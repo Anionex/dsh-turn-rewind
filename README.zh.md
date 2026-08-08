@@ -91,6 +91,8 @@ dsh --profile web --dump-config | grep change-ledger
 
 ## 使用流程
 
+在 Web Profile 中，每个已落定的 Assistant Turn 都会通过官方 `conversation.chat.turnTail` 扩展点显示一个紧凑的**回退**入口。打开后才按需读取检查点，展示有界的逐路径变化，阻止 HEAD 或 Git 操作漂移，并要求用户明确勾选确认后才恢复代码；当前这一模式保持对话位置不变。
+
 可以直接向 Agent 提出：
 
 ```text

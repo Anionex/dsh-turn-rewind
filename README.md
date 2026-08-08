@@ -93,6 +93,8 @@ When the profile also provides the DSH Agent service, the plugin claims the Agen
 
 ## User flow
 
+In the Web profile, each finalized assistant turn gains a compact **Rewind** action in the official `conversation.chat.turnTail` extension point. Opening it fetches the checkpoint lazily, shows every affected path up to the bounded preview cap, blocks HEAD/Git-operation drift, and requires an explicit acknowledgement before code restoration. The current conversation stays in place for this first Web mode.
+
 Example requests:
 
 ```text
