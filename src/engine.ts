@@ -49,6 +49,7 @@ export class ChangeLedgerEngine {
   readonly config: ResolvedChangeLedgerConfig
   readonly store: LedgerStore
   private readonly plans = new Map<string, RestorePlan>()
+  private readonly activePlans = new Set<string>()
   private readonly ready: Promise<number>
 
   /** Build an engine and start crash-journal reconciliation. */
@@ -255,124 +256,132 @@ export class ChangeLedgerEngine {
     if (plan.sessionId !== undefined && plan.sessionId !== options.sessionId) {
       throw new ChangeLedgerError('SESSION_MISMATCH', 'restore plan belongs to a different DSH session')
     }
+    if (this.activePlans.has(plan.id)) {
+      throw new ChangeLedgerError('PLAN_IN_PROGRESS', `restore plan ${plan.id} is already being applied`)
+    }
+    this.activePlans.add(plan.id)
 
-    await this.assertStorageSeparated(plan.workspace)
-    const release = await this.store.acquire(plan.workspace)
     try {
-      const manifest = await this.store.readManifest(plan.workspace, plan.restorePointId)
-      const current = await captureStableTree({ cwd: plan.workspace, config: this.config, ...(options.signal === undefined ? {} : { signal: options.signal }) })
-      assertRepositoryCompatible(manifest, current.source.state, plan.allowHeadChange)
-      assertPlanRepositoryFresh(plan.repository, current.source.state)
-      assertPlanFresh(plan, current.entries)
-      await assertNoUnmanagedRestoreConflicts(plan.workspace, manifest.entries, current.entries, plan.paths)
-
-      const rescue = await this.createLocked({
-        cwd: plan.workspace,
-        kind: 'rescue',
-        label: `Before restoring ${manifest.id}`,
-        parentRestorePoint: manifest.id,
-        ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-      })
+      await this.assertStorageSeparated(plan.workspace)
+      const release = await this.store.acquire(plan.workspace)
       try {
-        assertPlanFresh(plan, rescue.entries)
-        await assertNoUnmanagedRestoreConflicts(plan.workspace, manifest.entries, rescue.entries, plan.paths)
-      } catch (error) {
-        await this.store.deleteManifest(plan.workspace, rescue.id)
-        await this.store.collectGarbage(plan.workspace)
-        throw error
-      }
-      const operation: RestoreOperation = {
-        version: LEDGER_FORMAT_VERSION,
-        id: makeId('op'),
-        workspace: plan.workspace,
-        restorePointId: manifest.id,
-        rescuePointId: rescue.id,
-        ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
-        paths: plan.paths,
-        startedAt: Date.now(),
-        state: 'running',
-      }
-      await this.store.writeOperation(operation)
+        const manifest = await this.store.readManifest(plan.workspace, plan.restorePointId)
+        const current = await captureStableTree({ cwd: plan.workspace, config: this.config, ...(options.signal === undefined ? {} : { signal: options.signal }) })
+        assertRepositoryCompatible(manifest, current.source.state, plan.allowHeadChange)
+        assertPlanRepositoryFresh(plan.repository, current.source.state)
+        assertPlanFresh(plan, current.entries)
+        await assertNoUnmanagedRestoreConflicts(plan.workspace, manifest.entries, current.entries, plan.paths)
 
-      try {
-        await this.restorePaths(plan.workspace, manifest.entries, plan.paths, options.signal)
-        await this.verifyPaths(plan.workspace, manifest.entries, plan.paths, options.signal)
-      } catch (error) {
-        const primaryError = errorMessage(error)
-        let journalWarning: string | undefined
+        const rescue = await this.createLocked({
+          cwd: plan.workspace,
+          kind: 'rescue',
+          label: `Before restoring ${manifest.id}`,
+          parentRestorePoint: manifest.id,
+          ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+        })
         try {
-          await this.store.writeOperation({ ...operation, state: 'rollback-running', error: primaryError })
-        } catch (journalError) {
-          journalWarning = `could not persist rollback-running state: ${errorMessage(journalError)}`
+          assertPlanFresh(plan, rescue.entries)
+          await assertNoUnmanagedRestoreConflicts(plan.workspace, manifest.entries, rescue.entries, plan.paths)
+        } catch (error) {
+          await this.store.deleteManifest(plan.workspace, rescue.id)
+          await this.store.collectGarbage(plan.workspace)
+          throw error
         }
+        const operation: RestoreOperation = {
+          version: LEDGER_FORMAT_VERSION,
+          id: makeId('op'),
+          workspace: plan.workspace,
+          restorePointId: manifest.id,
+          rescuePointId: rescue.id,
+          ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
+          paths: plan.paths,
+          startedAt: Date.now(),
+          state: 'running',
+        }
+        await this.store.writeOperation(operation)
 
-        let rollbackFailure: unknown
         try {
-          await this.restorePaths(plan.workspace, rescue.entries, plan.paths)
-          await this.verifyPaths(plan.workspace, rescue.entries, plan.paths)
-        } catch (rollbackError) {
-          rollbackFailure = rollbackError
-        }
+          await this.restorePaths(plan.workspace, manifest.entries, plan.paths, options.signal)
+          await this.verifyPaths(plan.workspace, manifest.entries, plan.paths, options.signal)
+        } catch (error) {
+          const primaryError = errorMessage(error)
+          let journalWarning: string | undefined
+          try {
+            await this.store.writeOperation({ ...operation, state: 'rollback-running', error: primaryError })
+          } catch (journalError) {
+            journalWarning = `could not persist rollback-running state: ${errorMessage(journalError)}`
+          }
 
-        if (rollbackFailure === undefined) {
-          let terminalJournalWarning: string | undefined
+          let rollbackFailure: unknown
+          try {
+            await this.restorePaths(plan.workspace, rescue.entries, plan.paths)
+            await this.verifyPaths(plan.workspace, rescue.entries, plan.paths)
+          } catch (rollbackError) {
+            rollbackFailure = rollbackError
+          }
+
+          if (rollbackFailure === undefined) {
+            let terminalJournalWarning: string | undefined
+            try {
+              await this.store.writeOperation({
+                ...operation,
+                state: 'rolled-back',
+                error: primaryError,
+                finishedAt: Date.now(),
+              })
+            } catch (journalError) {
+              terminalJournalWarning = `could not persist rolled-back state: ${errorMessage(journalError)}`
+            }
+            const warnings = [journalWarning, terminalJournalWarning].filter((value): value is string => value !== undefined)
+            const warningText = warnings.length === 0 ? '' : `; journal warning: ${warnings.join('; ')}`
+            throw new ChangeLedgerError(
+              'RESTORE_FAILED_ROLLED_BACK',
+              `restore failed and the pre-restore state was recovered from ${rescue.id}: ${primaryError}${warningText}`,
+              { cause: error },
+            )
+          }
+
+          const rollbackMessage = errorMessage(rollbackFailure)
+          let recoveryJournalWarning: string | undefined
           try {
             await this.store.writeOperation({
               ...operation,
-              state: 'rolled-back',
+              state: 'recovery-required',
               error: primaryError,
-              finishedAt: Date.now(),
+              rollbackError: rollbackMessage,
             })
           } catch (journalError) {
-            terminalJournalWarning = `could not persist rolled-back state: ${errorMessage(journalError)}`
+            recoveryJournalWarning = `could not persist recovery-required state: ${errorMessage(journalError)}`
           }
-          const warnings = [journalWarning, terminalJournalWarning].filter((value): value is string => value !== undefined)
+          const warnings = [journalWarning, recoveryJournalWarning].filter((value): value is string => value !== undefined)
           const warningText = warnings.length === 0 ? '' : `; journal warning: ${warnings.join('; ')}`
           throw new ChangeLedgerError(
-            'RESTORE_FAILED_ROLLED_BACK',
-            `restore failed and the pre-restore state was recovered from ${rescue.id}: ${primaryError}${warningText}`,
+            'RECOVERY_REQUIRED',
+            `restore and automatic rollback both failed; operation ${operation.id} can be recovered from rescue point ${rescue.id}: ${primaryError}; rollback: ${rollbackMessage}${warningText}`,
             { cause: error },
           )
         }
 
-        const rollbackMessage = errorMessage(rollbackFailure)
-        let recoveryJournalWarning: string | undefined
-        try {
-          await this.store.writeOperation({
-            ...operation,
-            state: 'recovery-required',
-            error: primaryError,
-            rollbackError: rollbackMessage,
-          })
-        } catch (journalError) {
-          recoveryJournalWarning = `could not persist recovery-required state: ${errorMessage(journalError)}`
+        const finishedAt = Date.now()
+        await this.store.writeOperation({ ...operation, state: 'completed', finishedAt })
+        await this.store.writeManifest({
+          ...manifest,
+          restoreCount: manifest.restoreCount + 1,
+          lastRestoredAt: finishedAt,
+        })
+        this.plans.delete(plan.id)
+        return {
+          operationId: operation.id,
+          restorePointId: manifest.id,
+          rescuePointId: rescue.id,
+          restoredPaths: plan.paths,
         }
-        const warnings = [journalWarning, recoveryJournalWarning].filter((value): value is string => value !== undefined)
-        const warningText = warnings.length === 0 ? '' : `; journal warning: ${warnings.join('; ')}`
-        throw new ChangeLedgerError(
-          'RECOVERY_REQUIRED',
-          `restore and automatic rollback both failed; operation ${operation.id} can be recovered from rescue point ${rescue.id}: ${primaryError}; rollback: ${rollbackMessage}${warningText}`,
-          { cause: error },
-        )
-      }
-
-      const finishedAt = Date.now()
-      await this.store.writeOperation({ ...operation, state: 'completed', finishedAt })
-      await this.store.writeManifest({
-        ...manifest,
-        restoreCount: manifest.restoreCount + 1,
-        lastRestoredAt: finishedAt,
-      })
-      this.plans.delete(plan.id)
-      return {
-        operationId: operation.id,
-        restorePointId: manifest.id,
-        rescuePointId: rescue.id,
-        restoredPaths: plan.paths,
+      } finally {
+        await release()
       }
     } finally {
-      await release()
+      this.activePlans.delete(plan.id)
     }
   }
 

@@ -5,6 +5,7 @@ export declare class ChangeLedgerEngine {
     readonly config: ResolvedChangeLedgerConfig;
     readonly store: LedgerStore;
     private readonly plans;
+    private readonly activePlans;
     private readonly ready;
     /** Build an engine and start crash-journal reconciliation. */
     constructor(config?: ChangeLedgerConfig);

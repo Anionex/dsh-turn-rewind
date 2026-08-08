@@ -205,6 +205,41 @@ test('full restore is two-step, approval-ready, verified, and reversible through
   assert.equal(await readFile(join(f.workspace, 'new.txt'), 'utf8'), 'created later\n')
 })
 
+test('one restore plan cannot be applied concurrently', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  await seedCommitted(f.workspace, { 'a.txt': 'before\n' })
+  const point = await f.engine.create({ cwd: f.workspace })
+  await writeFile(join(f.workspace, 'a.txt'), 'after\n')
+  const plan = await f.engine.planRestore({ cwd: f.workspace, restorePointId: point.id })
+
+  const acquire = f.engine.store.acquire.bind(f.engine.store)
+  let enteredResolve
+  const entered = new Promise(resolve => { enteredResolve = resolve })
+  let continueResolve
+  const continueRestore = new Promise(resolve => { continueResolve = resolve })
+  f.engine.store.acquire = async (workspace) => {
+    const release = await acquire(workspace)
+    enteredResolve()
+    await continueRestore
+    return release
+  }
+
+  const first = f.engine.applyRestore({ planId: plan.id, confirmation: plan.confirmation })
+  await entered
+  try {
+    await assert.rejects(
+      f.engine.applyRestore({ planId: plan.id, confirmation: plan.confirmation }),
+      (error) => error instanceof ChangeLedgerError && error.code === 'PLAN_IN_PROGRESS',
+    )
+  } finally {
+    continueResolve()
+  }
+  await first
+  const points = await f.engine.list({ cwd: f.workspace, includeRescue: true })
+  assert.equal(points.filter(candidate => candidate.kind === 'rescue').length, 1)
+})
+
 test('selective restore changes only reviewed paths', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)
