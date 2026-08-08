@@ -181,6 +181,38 @@ test('combined rewind without code drift creates only the conversation child', a
   assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'checkpoint\n')
 })
 
+test('combined rewind without a plan rejects code drift introduced after preview', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const checkpoint = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-web', turn: 1, turnEndSeq: 4 })
+  let forked = false
+  const ctx = {
+    sessions: {
+      get: () => ({ id: 'session-web', header: { cwd: f.workspace }, events: sessionEvents() }),
+    },
+    sessionQuery: { readSession: async () => { throw new Error('unexpected cold read') } },
+    apiProxy: {
+      sessions: {
+        fork: async () => {
+          forked = true
+          return { result: { ok: true, value: { sessionId: 'session-child' } } }
+        },
+      },
+    },
+  }
+  const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
+  const preview = await request(handler, 'GET', '/change-ledger/rewind?sessionId=session-web&turn=1')
+  assert.equal(preview.body.totalChanges, 0)
+  await writeFile(join(f.workspace, 'code.txt'), 'changed after preview\n')
+  const result = await request(handler, 'POST', '/change-ledger/rewind', {
+    mode: 'both', sessionId: 'session-web', turn: 1, checkpointId: checkpoint.id,
+  })
+  assert.equal(result.status, 409)
+  assert.equal(result.body.code, 'PLAN_STALE')
+  assert.equal(forked, false)
+  assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'changed after preview\n')
+})
+
 test('combined rewind compensates code when conversation creation fails', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)

@@ -231,6 +231,11 @@ export function createRewindHttpHandler(
             throw new ChangeLedgerError('INVALID_ARGUMENTS', 'planId and confirmation must be supplied together')
           }
           restoreResult = await engine.applyRestore({ planId, confirmation, sessionId })
+        } else {
+          const inspection = await engine.inspect({ cwd: checkpoint.cwd, restorePointId: checkpoint.id })
+          if (inspection.changes.length > 0) {
+            throw new ChangeLedgerError('PLAN_STALE', 'the workspace changed after preview; reopen the rewind dialog')
+          }
         }
 
         try {
@@ -282,7 +287,7 @@ async function checkpointForRequest(
   sessionId: string,
   turn: number,
   requestedId: string,
-): Promise<{ readonly id: string; readonly turnEndSeq: number }> {
+): Promise<{ readonly id: string; readonly turnEndSeq: number; readonly cwd: string }> {
   const cwd = await sessionCwd(ctx, sessionId)
   const checkpoint = await engine.findTurnCheckpoint({ cwd, sessionId, turn })
   if (checkpoint === undefined || checkpoint.turnEndSeq === undefined) {
@@ -291,7 +296,7 @@ async function checkpointForRequest(
   if (requestedId !== checkpoint.id) {
     throw new ChangeLedgerError('PLAN_STALE', 'the selected turn checkpoint changed; reopen the rewind dialog')
   }
-  return { id: checkpoint.id, turnEndSeq: checkpoint.turnEndSeq }
+  return { id: checkpoint.id, turnEndSeq: checkpoint.turnEndSeq, cwd }
 }
 
 async function createConversationFork(

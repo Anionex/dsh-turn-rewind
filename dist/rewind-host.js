@@ -143,6 +143,12 @@ export function createRewindHttpHandler(ctx, engine, coordinator) {
                     }
                     restoreResult = await engine.applyRestore({ planId, confirmation, sessionId });
                 }
+                else {
+                    const inspection = await engine.inspect({ cwd: checkpoint.cwd, restorePointId: checkpoint.id });
+                    if (inspection.changes.length > 0) {
+                        throw new ChangeLedgerError('PLAN_STALE', 'the workspace changed after preview; reopen the rewind dialog');
+                    }
+                }
                 try {
                     const fork = await createConversationFork(ctx, sessionId, turn, checkpoint.turnEndSeq);
                     json(response, 200, { status: 'completed', mode, sessionId: fork.sessionId, ...restoreResult });
@@ -194,7 +200,7 @@ async function checkpointForRequest(ctx, engine, sessionId, turn, requestedId) {
     if (requestedId !== checkpoint.id) {
         throw new ChangeLedgerError('PLAN_STALE', 'the selected turn checkpoint changed; reopen the rewind dialog');
     }
-    return { id: checkpoint.id, turnEndSeq: checkpoint.turnEndSeq };
+    return { id: checkpoint.id, turnEndSeq: checkpoint.turnEndSeq, cwd };
 }
 async function createConversationFork(ctx, sourceId, turn, turnEndSeq) {
     const live = ctx.sessions.get(sourceId);
