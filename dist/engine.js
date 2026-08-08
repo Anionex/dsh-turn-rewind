@@ -10,6 +10,7 @@ import { LedgerStore } from './store.js';
 import { LEDGER_FORMAT_VERSION, } from './types.js';
 const DEFAULTS = {
     maxRestorePoints: 50,
+    maxTurnCheckpointsPerSession: 30,
     maxFiles: 20_000,
     maxFileBytes: 16 * 1024 * 1024,
     maxSnapshotBytes: 512 * 1024 * 1024,
@@ -53,6 +54,57 @@ export class ChangeLedgerEngine {
             await release();
         }
     }
+    /** Capture one completed DSH turn for user-triggered Web rewind. */
+    async createTurnCheckpoint(options) {
+        await this.ready;
+        if (!Number.isSafeInteger(options.turn) || options.turn < 0) {
+            throw new ChangeLedgerError('INVALID_ARGUMENTS', 'turn must be a non-negative safe integer');
+        }
+        if (!Number.isSafeInteger(options.turnEndSeq) || options.turnEndSeq < 0) {
+            throw new ChangeLedgerError('INVALID_ARGUMENTS', 'turnEndSeq must be a non-negative safe integer');
+        }
+        const source = await discoverRepository(options.cwd, options.signal);
+        await this.assertStorageSeparated(source.state.root);
+        const release = await this.store.acquire(source.state.root);
+        try {
+            const existing = await this.store.listManifests(source.state.root);
+            const duplicate = existing.find(manifest => manifest.kind === 'turn'
+                && manifest.sessionId === options.sessionId
+                && manifest.turn === options.turn
+                && manifest.turnEndSeq === options.turnEndSeq);
+            if (duplicate !== undefined)
+                return summarize(duplicate);
+            const manifest = await this.createLocked({
+                cwd: source.state.root,
+                kind: 'turn',
+                sessionId: options.sessionId,
+                label: `Turn ${String(options.turn)} checkpoint`,
+                turn: options.turn,
+                turnEndSeq: options.turnEndSeq,
+                ...(options.signal === undefined ? {} : { signal: options.signal }),
+            });
+            const checkpoints = [...existing.filter(point => point.kind === 'turn' && point.sessionId === options.sessionId), manifest]
+                .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id));
+            for (const stale of checkpoints.slice(this.config.maxTurnCheckpointsPerSession)) {
+                if (await this.store.isReferencedByRecovery(source.state.root, stale.id))
+                    continue;
+                await this.store.deleteManifest(source.state.root, stale.id);
+            }
+            await this.store.collectGarbage(source.state.root);
+            return summarize(manifest);
+        }
+        finally {
+            await release();
+        }
+    }
+    /** Find the newest checkpoint for one completed session turn. */
+    async findTurnCheckpoint(options) {
+        await this.ready;
+        const source = await discoverRepository(options.cwd, options.signal);
+        await this.assertStorageSeparated(source.state.root);
+        const manifest = (await this.store.listManifests(source.state.root)).find(point => point.kind === 'turn' && point.sessionId === options.sessionId && point.turn === options.turn);
+        return manifest === undefined ? undefined : summarize(manifest);
+    }
     /** List restore points for the current worktree. */
     async list(options) {
         await this.ready;
@@ -60,7 +112,9 @@ export class ChangeLedgerEngine {
         await this.assertStorageSeparated(source.state.root);
         const manifests = await this.store.listManifests(source.state.root);
         return manifests
-            .filter((manifest) => options.includeRescue === true || manifest.kind === 'user')
+            .filter((manifest) => manifest.kind === 'user'
+            || (manifest.kind === 'rescue' && options.includeRescue === true)
+            || (manifest.kind === 'turn' && options.includeTurnCheckpoints === true))
             .map(summarize);
     }
     /** Compare one restore point with the current worktree. */
@@ -281,8 +335,9 @@ export class ChangeLedgerEngine {
     }
     async createLocked(options) {
         const existing = await this.store.listManifests(options.cwd);
-        if (existing.length >= this.config.maxRestorePoints) {
-            throw new ChangeLedgerError('RESTORE_POINT_LIMIT', `workspace already has ${existing.length} restore points; configured maximum is ${this.config.maxRestorePoints}`);
+        const durableUserPoints = existing.filter(point => point.kind !== 'turn');
+        if (options.kind !== 'turn' && durableUserPoints.length >= this.config.maxRestorePoints) {
+            throw new ChangeLedgerError('RESTORE_POINT_LIMIT', `workspace already has ${durableUserPoints.length} user/rescue restore points; configured maximum is ${this.config.maxRestorePoints}`);
         }
         try {
             const tree = await captureStableTree({
@@ -300,6 +355,8 @@ export class ChangeLedgerEngine {
                 ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
                 ...(options.label === undefined ? {} : { label: options.label }),
                 ...(options.parentRestorePoint === undefined ? {} : { parentRestorePoint: options.parentRestorePoint }),
+                ...(options.turn === undefined ? {} : { turn: options.turn }),
+                ...(options.turnEndSeq === undefined ? {} : { turnEndSeq: options.turnEndSeq }),
                 createdAt: Date.now(),
                 treeHash: tree.treeHash,
                 fileCount: tree.fileCount,
@@ -394,6 +451,7 @@ export function resolveConfig(config) {
     return {
         storageDir,
         maxRestorePoints: positiveInteger(config.maxRestorePoints ?? DEFAULTS.maxRestorePoints, 'maxRestorePoints'),
+        maxTurnCheckpointsPerSession: positiveInteger(config.maxTurnCheckpointsPerSession ?? DEFAULTS.maxTurnCheckpointsPerSession, 'maxTurnCheckpointsPerSession'),
         maxFiles: positiveInteger(config.maxFiles ?? DEFAULTS.maxFiles, 'maxFiles'),
         maxFileBytes: positiveInteger(config.maxFileBytes ?? DEFAULTS.maxFileBytes, 'maxFileBytes'),
         maxSnapshotBytes: positiveInteger(config.maxSnapshotBytes ?? DEFAULTS.maxSnapshotBytes, 'maxSnapshotBytes'),
@@ -409,6 +467,8 @@ function summarize(manifest) {
         ...(manifest.sessionId === undefined ? {} : { sessionId: manifest.sessionId }),
         ...(manifest.label === undefined ? {} : { label: manifest.label }),
         ...(manifest.parentRestorePoint === undefined ? {} : { parentRestorePoint: manifest.parentRestorePoint }),
+        ...(manifest.turn === undefined ? {} : { turn: manifest.turn }),
+        ...(manifest.turnEndSeq === undefined ? {} : { turnEndSeq: manifest.turnEndSeq }),
         createdAt: manifest.createdAt,
         treeHash: manifest.treeHash,
         fileCount: manifest.fileCount,

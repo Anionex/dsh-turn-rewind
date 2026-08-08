@@ -40,7 +40,7 @@ Restore journals are written before worktree mutation. A failed restore attempts
 - It does not restore Git index entries, refs, commits, stash state, ignored files, submodules, or repository operation metadata.
 - It does not preserve extended attributes, ACLs, ownership, timestamps, or hard-link identity.
 - It does not provide confidentiality or tamper resistance against the same operating-system user. State files are owner-only by default, but the host user remains trusted.
-- It does not automatically decide when to create or apply a restore point.
+- It automatically captures bounded, hidden checkpoints after completed DSH turns when the rewind adapter is active; it never automatically applies one. User and rescue restore points remain explicit.
 
 ## Reporting
 

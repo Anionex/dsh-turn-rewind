@@ -17,7 +17,7 @@ Behavioral changes must include a real temporary-Git-repository test. Restore-pa
 
 ## Design constraints
 
-- User-triggered and reviewable; no automatic restore.
+- Restores are always user-triggered and reviewable. Automatic turn checkpoints may capture state but never apply it.
 - No Git commit, reset, stash, checkout, ref, or index mutation.
 - No recursive deletion of worktree content.
 - Fail loud rather than silently omitting an eligible path.

@@ -48,6 +48,20 @@ export class ChangeLedgerService extends Service {
     return this.engine.create(options)
   }
 
+  /** Capture one completed turn for Web rewind. */
+  createTurnCheckpoint(
+    options: Parameters<ChangeLedgerEngine['createTurnCheckpoint']>[0],
+  ): ReturnType<ChangeLedgerEngine['createTurnCheckpoint']> {
+    return this.engine.createTurnCheckpoint(options)
+  }
+
+  /** Find the newest checkpoint for one completed turn. */
+  findTurnCheckpoint(
+    options: Parameters<ChangeLedgerEngine['findTurnCheckpoint']>[0],
+  ): ReturnType<ChangeLedgerEngine['findTurnCheckpoint']> {
+    return this.engine.findTurnCheckpoint(options)
+  }
+
   /** List restore points. */
   list(options: Parameters<ChangeLedgerEngine['list']>[0]): ReturnType<ChangeLedgerEngine['list']> {
     return this.engine.list(options)

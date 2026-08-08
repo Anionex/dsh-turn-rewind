@@ -126,6 +126,7 @@ dsh --profile web --dump-config | grep change-ledger
   config:
     storageDir: ~/.dsh/change-ledger/v1
     maxRestorePoints: 50
+    maxTurnCheckpointsPerSession: 30
     maxFiles: 20000
     maxFileBytes: 16777216
     maxSnapshotBytes: 536870912
@@ -133,7 +134,7 @@ dsh --profile web --dump-config | grep change-ledger
     staleLockMs: 30000
 ```
 
-所有容量与数量限制都采用 fail loud；插件不会自动清理用户恢复点。未配置时，`storageDir` 使用 `$DSH_HOME/change-ledger/v1`，未设置 `DSH_HOME` 时回退到 `~/.dsh/change-ledger/v1`；它不得与被管理 worktree 重叠。
+所有容量与用户恢复点数量限制都采用 fail loud。自动 Turn 检查点使用独立的每会话保留窗口，并且只清理自己最旧的检查点；用户和救援恢复点永远不会被静默删除。未配置时，`storageDir` 使用 `$DSH_HOME/change-ledger/v1`，未设置 `DSH_HOME` 时回退到 `~/.dsh/change-ledger/v1`；它不得与被管理 worktree 重叠。
 
 ## 故障恢复
 

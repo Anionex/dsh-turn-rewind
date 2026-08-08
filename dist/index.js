@@ -36,6 +36,14 @@ export class ChangeLedgerService extends Service {
     create(options) {
         return this.engine.create(options);
     }
+    /** Capture one completed turn for Web rewind. */
+    createTurnCheckpoint(options) {
+        return this.engine.createTurnCheckpoint(options);
+    }
+    /** Find the newest checkpoint for one completed turn. */
+    findTurnCheckpoint(options) {
+        return this.engine.findTurnCheckpoint(options);
+    }
     /** List restore points. */
     list(options) {
         return this.engine.list(options);

@@ -128,6 +128,7 @@ Override configuration in the profile patch layer:
   config:
     storageDir: ~/.dsh/change-ledger/v1
     maxRestorePoints: 50
+    maxTurnCheckpointsPerSession: 30
     maxFiles: 20000
     maxFileBytes: 16777216
     maxSnapshotBytes: 536870912
@@ -135,7 +136,7 @@ Override configuration in the profile patch layer:
     staleLockMs: 30000
 ```
 
-All size and retention limits fail loudly. The plugin never silently prunes a user's restore point. When omitted, `storageDir` resolves to `$DSH_HOME/change-ledger/v1` and falls back to `~/.dsh/change-ledger/v1`; it must not overlap the managed worktree.
+All size and user-point retention limits fail loudly. Automatic turn checkpoints have a separate per-session retention window and prune only their own oldest checkpoints; user and rescue restore points are never silently pruned. When omitted, `storageDir` resolves to `$DSH_HOME/change-ledger/v1` and falls back to `~/.dsh/change-ledger/v1`; it must not overlap the managed worktree.
 
 ## Recovery
 

@@ -28,8 +28,9 @@ export function parseManifest(value) {
     const id = stringField(record, 'id');
     validateRestorePointId(id);
     const kind = record.kind;
-    if (kind !== 'user' && kind !== 'rescue')
-        corrupt('restore-point kind must be "user" or "rescue"');
+    if (kind !== 'user' && kind !== 'rescue' && kind !== 'turn') {
+        corrupt('restore-point kind must be "user", "rescue", or "turn"');
+    }
     const workspace = absoluteString(record, 'workspace');
     const repository = parseRepository(record.repository);
     if (repository.root !== workspace)
@@ -60,6 +61,16 @@ export function parseManifest(value) {
     const parentRestorePoint = optionalString(record, 'parentRestorePoint');
     if (parentRestorePoint !== undefined)
         validateRestorePointId(parentRestorePoint);
+    const turn = optionalNonNegativeInteger(record, 'turn');
+    const turnEndSeq = optionalNonNegativeInteger(record, 'turnEndSeq');
+    if (kind === 'turn') {
+        if (sessionId === undefined || turn === undefined || turnEndSeq === undefined) {
+            corrupt('turn restore points require sessionId, turn, and turnEndSeq');
+        }
+    }
+    else if (turn !== undefined || turnEndSeq !== undefined) {
+        corrupt('only turn restore points may carry turn metadata');
+    }
     const lastRestoredAt = optionalNonNegativeInteger(record, 'lastRestoredAt');
     return {
         version: LEDGER_FORMAT_VERSION,
@@ -70,6 +81,8 @@ export function parseManifest(value) {
         ...(sessionId === undefined ? {} : { sessionId }),
         ...(label === undefined ? {} : { label }),
         ...(parentRestorePoint === undefined ? {} : { parentRestorePoint }),
+        ...(turn === undefined ? {} : { turn }),
+        ...(turnEndSeq === undefined ? {} : { turnEndSeq }),
         createdAt,
         treeHash,
         fileCount,

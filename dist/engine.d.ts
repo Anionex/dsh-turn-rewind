@@ -17,10 +17,26 @@ export declare class ChangeLedgerEngine {
         readonly label?: string;
         readonly signal?: AbortSignal;
     }): Promise<RestorePointSummary>;
+    /** Capture one completed DSH turn for user-triggered Web rewind. */
+    createTurnCheckpoint(options: {
+        readonly cwd: string;
+        readonly sessionId: string;
+        readonly turn: number;
+        readonly turnEndSeq: number;
+        readonly signal?: AbortSignal;
+    }): Promise<RestorePointSummary>;
+    /** Find the newest checkpoint for one completed session turn. */
+    findTurnCheckpoint(options: {
+        readonly cwd: string;
+        readonly sessionId: string;
+        readonly turn: number;
+        readonly signal?: AbortSignal;
+    }): Promise<RestorePointSummary | undefined>;
     /** List restore points for the current worktree. */
     list(options: {
         readonly cwd: string;
         readonly includeRescue?: boolean;
+        readonly includeTurnCheckpoints?: boolean;
         readonly signal?: AbortSignal;
     }): Promise<RestorePointSummary[]>;
     /** Compare one restore point with the current worktree. */

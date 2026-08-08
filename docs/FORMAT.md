@@ -24,7 +24,7 @@ Every JSON write uses a sibling temporary file followed by rename. Blob publicat
 interface RestorePointManifestV1 {
   version: 1
   id: `rp_${string}`
-  kind: 'user' | 'rescue'
+  kind: 'user' | 'rescue' | 'turn'
   workspace: string
   repository: {
     root: string
@@ -37,6 +37,8 @@ interface RestorePointManifestV1 {
   sessionId?: string
   label?: string
   parentRestorePoint?: string
+  turn?: number
+  turnEndSeq?: number
   createdAt: number
   treeHash: string
   fileCount: number
@@ -59,6 +61,8 @@ interface SymlinkEntry {
   mode: number
 }
 ```
+
+`turn` manifests are automatic, hidden checkpoints used by the Web rewind surface. They require `sessionId`, `turn`, and the inclusive `turnEndSeq`; those fields are rejected on `user` and `rescue` manifests. This is an additive version-1 shape: pre-existing version-1 user and rescue manifests remain valid, while malformed or partially anchored turn manifests fail closed.
 
 Entry keys are canonical Git-style relative paths using `/`. Absolute paths, empty segments, `.` segments, `..` segments, and NUL bytes are rejected before filesystem resolution.
 

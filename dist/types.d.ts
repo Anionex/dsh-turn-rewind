@@ -31,7 +31,7 @@ export interface RepositoryState {
     readonly stagedPaths: readonly string[];
 }
 /** Why a restore point exists. */
-export type RestorePointKind = 'user' | 'rescue';
+export type RestorePointKind = 'user' | 'rescue' | 'turn';
 /** Durable workspace restore point. */
 export interface RestorePointManifest {
     readonly version: typeof LEDGER_FORMAT_VERSION;
@@ -42,6 +42,10 @@ export interface RestorePointManifest {
     readonly sessionId?: string;
     readonly label?: string;
     readonly parentRestorePoint?: RestorePointId;
+    /** Completed DSH turn captured by an automatic Web rewind checkpoint. */
+    readonly turn?: number;
+    /** Inclusive `turn/end` event sequence for the captured turn. */
+    readonly turnEndSeq?: number;
     readonly createdAt: number;
     readonly treeHash: string;
     readonly fileCount: number;
@@ -73,6 +77,8 @@ export interface RestorePointSummary {
     readonly sessionId?: string;
     readonly label?: string;
     readonly parentRestorePoint?: RestorePointId;
+    readonly turn?: number;
+    readonly turnEndSeq?: number;
     readonly createdAt: number;
     readonly treeHash: string;
     readonly fileCount: number;
@@ -126,6 +132,8 @@ export interface ChangeLedgerConfig {
     readonly storageDir?: string;
     /** Maximum user and rescue restore points retained per workspace. */
     readonly maxRestorePoints?: number;
+    /** Maximum automatic turn checkpoints retained per session. */
+    readonly maxTurnCheckpointsPerSession?: number;
     /** Maximum number of files in one restore point. */
     readonly maxFiles?: number;
     /** Maximum bytes read from one regular file. */
@@ -141,6 +149,7 @@ export interface ChangeLedgerConfig {
 export interface ResolvedChangeLedgerConfig {
     readonly storageDir: string;
     readonly maxRestorePoints: number;
+    readonly maxTurnCheckpointsPerSession: number;
     readonly maxFiles: number;
     readonly maxFileBytes: number;
     readonly maxSnapshotBytes: number;

@@ -68,6 +68,60 @@ test('creates and lists a content-addressed restore point without Git side effec
   assert.equal(await git(f.workspace, 'diff', '--cached', '--binary'), indexBefore)
 })
 
+test('captures hidden turn checkpoints, finds them by session turn, and restores their code state', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  await seedCommitted(f.workspace, { 'src/main.txt': 'turn one\n' })
+
+  const checkpoint = await f.engine.createTurnCheckpoint({
+    cwd: f.workspace,
+    sessionId: 'session-web',
+    turn: 1,
+    turnEndSeq: 9,
+  })
+  assert.equal(checkpoint.kind, 'turn')
+  assert.equal(checkpoint.turn, 1)
+  assert.equal(checkpoint.turnEndSeq, 9)
+  assert.equal((await f.engine.list({ cwd: f.workspace })).length, 0)
+  assert.equal((await f.engine.list({ cwd: f.workspace, includeTurnCheckpoints: true })).length, 1)
+  assert.equal((await f.engine.findTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-web', turn: 1 }))?.id, checkpoint.id)
+
+  await writeFile(join(f.workspace, 'src/main.txt'), 'turn two\n')
+  const plan = await f.engine.planRestore({
+    cwd: f.workspace,
+    restorePointId: checkpoint.id,
+    sessionId: 'session-web',
+  })
+  await f.engine.applyRestore({ planId: plan.id, confirmation: plan.confirmation, sessionId: 'session-web' })
+  assert.equal(await readFile(join(f.workspace, 'src/main.txt'), 'utf8'), 'turn one\n')
+})
+
+test('turn checkpoint retention prunes only the oldest checkpoint in the same session', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  f.engine = new ChangeLedgerEngine({
+    storageDir: f.storageDir,
+    staleLockMs: 1,
+    maxTurnCheckpointsPerSession: 2,
+  })
+  await f.engine.initialize()
+  await seedCommitted(f.workspace, { 'state.txt': 'one\n' })
+  const first = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 's1', turn: 1, turnEndSeq: 3 })
+  await writeFile(join(f.workspace, 'state.txt'), 'two\n')
+  const second = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 's1', turn: 2, turnEndSeq: 7 })
+  const other = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 's2', turn: 1, turnEndSeq: 4 })
+  await writeFile(join(f.workspace, 'state.txt'), 'three\n')
+  const third = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 's1', turn: 3, turnEndSeq: 11 })
+
+  const points = await f.engine.list({ cwd: f.workspace, includeTurnCheckpoints: true })
+  assert.deepEqual(new Set(points.map(point => point.id)), new Set([second.id, third.id, other.id]))
+  assert.equal(await f.engine.findTurnCheckpoint({ cwd: f.workspace, sessionId: 's1', turn: 1 }), undefined)
+  await assert.rejects(
+    f.engine.inspect({ cwd: f.workspace, restorePointId: first.id }),
+    error => error instanceof ChangeLedgerError && error.code === 'RESTORE_POINT_NOT_FOUND',
+  )
+})
+
 test('worktree discovery preserves legal trailing spaces in the root path', async (t) => {
   const outer = await mkdtemp(join(tmpdir(), 'dsh-change-ledger-space-test-'))
   t.after(async () => rm(outer, { recursive: true, force: true }))
