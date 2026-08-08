@@ -1,0 +1,4 @@
+# Mount the change-ledger service and its model-facing tools into a DSH profile.
+- insert:
+    - id: change-ledger
+      name: '@dsh-external/change-ledger'

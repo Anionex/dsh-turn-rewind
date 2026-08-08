@@ -1,0 +1,72 @@
+{
+  "name": "@dsh-external/change-ledger",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Persistent, reviewable, and safely restorable workspace change sets for DeepSeek Harness",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./core": {
+      "types": "./dist/engine.d.ts",
+      "default": "./dist/engine.js"
+    },
+    "./format": {
+      "types": "./dist/types.d.ts",
+      "default": "./dist/types.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc -p tsconfig.json && pnpm run build && node --test tests/*.test.mjs && pnpm pack --dry-run",
+    "test": "pnpm run build && node --test tests/*.test.mjs"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "cordis",
+    "restore-point",
+    "workspace",
+    "change-ledger"
+  ],
+  "license": "BSD-3-Clause",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dsh-external/dsh-change-ledger.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dsh-external/dsh-change-ledger/issues"
+  },
+  "peerDependencies": {
+    "cordis": "^4.0.0-rc.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "cordis": "^4.0.0-rc.7",
+    "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "packageManager": "pnpm@11.7.0"
+}
