@@ -12,11 +12,15 @@ Workspace restoration requires all of the following:
 2. a fresh in-memory plan generated from the current tree;
 3. an exact short-lived confirmation value;
 4. the same DSH session when the plan was session-bound;
-5. a normal DSH human approval outcome;
+5. an explicit human decision: the normal DSH approval outcome for model-facing tools, or the Web rewind dialog's mode selection and acknowledgement for a direct browser action;
 6. still-fresh selected-path hashes and the exact reviewed HEAD/branch/operation fence under the workspace lock;
 7. a durable rescue point and operation journal.
 
-The Web rewind adapter obtains the same session-bound plan and exact confirmation from a same-origin preview request, then sends both only after the user confirms the browser dialog. Direct mutation requests without that live plan pair fail closed.
+The Web rewind adapter obtains the same session-bound plan and exact confirmation from a same-origin preview request, then sends both only after the user selects a code-affecting mode and confirms the browser dialog. Direct mutation requests without that live plan pair fail closed. Conversation-only rewind sends neither value because it does not mutate the workspace.
+
+Conversation rewind verifies that the durable checkpoint still names the exact `turn/end` event before delegating child creation to DSH's official Host API. The Host owns seed validation, model-target inheritance, persistence, and Workspace attachment. The original append-only Session remains intact.
+
+Combined rewind restores code first, then creates the conversation child. If child creation fails, the adapter immediately applies the first restore's rescue point to compensate the code change. If compensation also fails, the ordinary durable restore journals and rescue points remain available for manual recovery rather than hiding a partial outcome.
 
 An absent approval channel fails closed through DSH's standard `ask` behavior.
 

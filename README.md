@@ -89,11 +89,21 @@ Restart a running profile after changing its bundle list.
 
 The package is a DSH Profile Bundle. `package.json` declares `dsh.bundle.patch`, and `cordis.patch.yml` mounts `@dsh-external/change-ledger` without a DSH core patch.
 
-When the profile also provides the DSH Agent service, the plugin claims the Agent's idle maintenance boundary after each completed turn and captures a hidden checkpoint before queued work may start another turn. In Web profiles, the same-origin `/change-ledger/rewind` endpoint exposes a bounded preview and mints the ordinary short-lived, session-bound restore plan used by the browser surface. It never restores merely because a turn completed.
+When the profile also provides the DSH Agent service, the plugin claims the Agent's idle maintenance boundary after each completed turn and captures a hidden checkpoint before queued work may start another turn. In Web profiles, the same-origin `/change-ledger/rewind` endpoint exposes a bounded preview, mints the ordinary short-lived, session-bound restore plan used by code-affecting modes, and delegates conversation reconstruction to DSH's official Host fork lifecycle. It never restores merely because a turn completed.
 
 ## User flow
 
-In the Web profile, each finalized assistant turn gains a compact **Rewind** action in the official `conversation.chat.turnTail` extension point. Opening it fetches the checkpoint lazily, shows every affected path up to the bounded preview cap, blocks HEAD/Git-operation drift, and requires an explicit acknowledgement before code restoration. The current conversation stays in place for this first Web mode.
+In the Web profile, each finalized assistant turn gains a compact **Rewind** action in the official `conversation.chat.turnTail` extension point. Opening it fetches the checkpoint lazily, shows every affected path up to the bounded preview cap, and offers three modes:
+
+| Mode | Code | Conversation |
+| --- | --- | --- |
+| **Code and conversation** (default) | Restores the worktree after an explicit acknowledgement and rescue point. | Creates and opens a child Session ending at the selected turn. |
+| **Code only** | Restores the worktree after an explicit acknowledgement and rescue point. | Leaves the current Session open and unchanged. |
+| **Conversation only** | Leaves the current worktree unchanged. | Creates and opens a child Session ending at the selected turn. |
+
+HEAD, branch, or in-progress Git-operation drift blocks only modes that would change code; conversation-only rewind remains available. If the worktree already matches the selected turn, the combined mode safely reduces to conversation-only. If conversation creation fails after a combined code restore, Change Ledger automatically restores the pre-operation code from the rescue point.
+
+DSH Session logs are append-only, so conversation rewind is implemented by asking the official Host API to create a child from the exact completed-turn boundary and then opening that child. This implementation detail does not make it equivalent to the existing **Branch** action: Branch preserves the current code, while combined Rewind restores both code and conversational context. The original Session is always retained.
 
 Example requests:
 

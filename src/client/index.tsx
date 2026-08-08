@@ -1,4 +1,4 @@
-import { useCallback, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   Button,
   IconRefreshOutline16,
@@ -25,21 +25,28 @@ interface RewindMatch {
 interface RewindTailProps {
   readonly matched: RewindMatch
   readonly sessionId: string
+  readonly openSession: (sessionId: string) => void
 }
 
 interface SlotsLike {
   inject(name: string, install: () => unknown): void
   register(
-    entry: { readonly name: string; readonly select: (owner: TurnTailOwnerLike) => RewindMatch | null },
+    entry: {
+      readonly name: string
+      readonly select: (owner: TurnTailOwnerLike) => RewindMatch | null
+      readonly inject: () => { readonly openSession: (sessionId: string) => void }
+    },
     component: (props: RewindTailProps) => ReactNode,
   ): () => void
 }
 
 interface ClientContextLike {
   readonly slots: SlotsLike
+  readonly sessions: { open(sessionId: string): void }
   effect(setup: () => (() => void), label?: string): unknown
 }
 
+type RewindMode = 'both' | 'code' | 'conversation'
 type ChangeKind = 'added' | 'deleted' | 'modified' | 'mode-changed' | 'type-changed'
 
 interface ReadyPreview {
@@ -69,7 +76,11 @@ const styles = `
 .dcl-rewind-trigger{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 8px;border:0;border-radius:14px;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;cursor:pointer}
 .dcl-rewind-trigger:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
 .dcl-rewind-body{display:flex;flex-direction:column;gap:14px;min-width:min(560px,calc(100vw - 64px))}
-.dcl-rewind-option{display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1)}
+.dcl-rewind-options{display:flex;flex-direction:column;gap:8px}
+.dcl-rewind-option{display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1);cursor:pointer}
+.dcl-rewind-option[data-selected="true"]{border-color:var(--dsw-alias-state-business-primary)}
+.dcl-rewind-option[data-disabled="true"]{cursor:not-allowed;opacity:.52}
+.dcl-rewind-option input{margin-top:2px}
 .dcl-rewind-option strong{display:block;color:var(--dsw-alias-label-primary);font-size:14px}
 .dcl-rewind-option span{display:block;margin-top:3px;color:var(--dsw-alias-label-tertiary);font-size:12px}
 .dcl-rewind-summary{display:flex;gap:16px;color:var(--dsw-alias-label-secondary);font-size:13px}
@@ -78,8 +89,8 @@ const styles = `
 .dcl-rewind-file:last-child{border-bottom:0}.dcl-rewind-file code{overflow:hidden;text-overflow:ellipsis;color:var(--dsw-alias-label-secondary)}
 .dcl-rewind-kind{flex:none;color:var(--dsw-alias-label-tertiary)}
 .dcl-rewind-warning,.dcl-rewind-error{margin:0;padding:10px 12px;border-radius:10px;font-size:12px;line-height:18px}
-.dcl-rewind-warning{background:var(--dsw-alias-bg-warning);color:var(--dsw-alias-label-warning)}
-.dcl-rewind-error{background:var(--dsw-alias-bg-error);color:var(--dsw-alias-label-error)}
+.dcl-rewind-warning{background:var(--dsw-alias-state-warn-tertiary);color:var(--dsw-alias-state-warn-primary)}
+.dcl-rewind-error{border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 30%,transparent);color:var(--dsw-alias-state-error-primary)}
 .dcl-rewind-ack{display:flex;align-items:flex-start;gap:8px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 `
 
@@ -92,7 +103,7 @@ export function selectRewindTurn(owner: TurnTailOwnerLike): RewindMatch | null {
 }
 
 /** Browser plugin entry: register one compact action under every finalized assistant turn. */
-export const inject = ['slots']
+export const inject = ['slots', 'sessions']
 export function apply(ctx: ClientContextLike): void {
   ctx.effect(() => {
     if (document.querySelector(`style[data-plugin-css="${STYLE_ID}"]`) !== null) return () => {}
@@ -106,67 +117,144 @@ export function apply(ctx: ClientContextLike): void {
   ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
     name: 'conversation.chat.turnTail',
     select: selectRewindTurn,
+    inject: () => ({ openSession: (sessionId: string) => { ctx.sessions.open(sessionId) } }),
   }, RewindTurnTail))
 }
 
-/** Turn-tail action and its review-first code restore dialog. */
-export function RewindTurnTail({ matched, sessionId }: RewindTailProps): ReactNode {
+/** Turn-tail action and its review-first code/conversation restore dialog. */
+export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailProps): ReactNode {
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [preview, setPreview] = useState<Preview | null>(null)
+  const [mode, setMode] = useState<RewindMode>('both')
   const [acknowledged, setAcknowledged] = useState(false)
   const [applying, setApplying] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [completed, setCompleted] = useState<string | null>(null)
+  const loadAbort = useRef<AbortController | null>(null)
+  const applyPending = useRef(false)
+
+  useEffect(() => () => {
+    loadAbort.current?.abort()
+    loadAbort.current = null
+  }, [])
 
   const load = useCallback(async () => {
+    loadAbort.current?.abort()
+    const controller = new AbortController()
+    loadAbort.current = controller
     setLoading(true)
     setError(null)
     setCompleted(null)
     try {
       const response = await fetch(`${PATH}?sessionId=${encodeURIComponent(sessionId)}&turn=${String(matched.turn)}`, {
-        method: 'GET', headers: { accept: 'application/json' }, cache: 'no-store',
+        method: 'GET', headers: { accept: 'application/json' }, cache: 'no-store', signal: controller.signal,
       })
       const value = await responseJson(response)
-      setPreview(decodePreview(value))
+      if (loadAbort.current === controller) setPreview(decodePreview(value))
     } catch (caught) {
-      setError(messageOf(caught))
+      if (!controller.signal.aborted) setError(messageOf(caught))
     } finally {
-      setLoading(false)
+      if (loadAbort.current === controller) {
+        loadAbort.current = null
+        setLoading(false)
+      }
     }
   }, [matched.turn, sessionId])
 
   const show = (): void => {
     setOpen(true)
+    setPreview(null)
+    setMode('both')
     setAcknowledged(false)
     void load()
   }
-  const close = (): void => { if (!applying) setOpen(false) }
+  const close = (): void => {
+    if (applying) return
+    loadAbort.current?.abort()
+    loadAbort.current = null
+    setLoading(false)
+    setOpen(false)
+  }
+  const chooseMode = (next: RewindMode): void => {
+    if (applying) return
+    setMode(next)
+    setAcknowledged(false)
+    setError(null)
+    setCompleted(null)
+  }
   const ready = preview?.status === 'ready' ? preview : null
-  const blocked = ready === null || ready.totalChanges === 0 || ready.headChanged || ready.operationChanged
+  const hasCodeChanges = ready !== null && ready.totalChanges > 0
+  const restoresCode = mode !== 'conversation'
+  const needsCodeRestore = restoresCode && hasCodeChanges
+  const codeUnavailable = mode === 'code' && !hasCodeChanges
+  const driftBlocked = needsCodeRestore && ready !== null && (ready.headChanged || ready.operationChanged)
+  const planMissing = needsCodeRestore && ready !== null && (ready.planId === undefined || ready.confirmation === undefined)
+  const canApply = ready !== null
+    && !loading
+    && !applying
+    && completed === null
+    && !codeUnavailable
+    && !driftBlocked
+    && !planMissing
+    && (!needsCodeRestore || acknowledged)
 
   const applyRestore = async (): Promise<void> => {
-    if (ready?.planId === undefined || ready.confirmation === undefined || !acknowledged || blocked) return
+    if (ready === null || !canApply || applyPending.current) return
+    const body: Record<string, unknown> = {
+      mode,
+      sessionId,
+      turn: ready.turn,
+      checkpointId: ready.checkpointId,
+    }
+    if (needsCodeRestore) {
+      if (ready.planId === undefined || ready.confirmation === undefined) return
+      body.planId = ready.planId
+      body.confirmation = ready.confirmation
+    }
+    applyPending.current = true
     setApplying(true)
     setError(null)
     try {
       const response = await fetch(PATH, {
         method: 'POST',
         headers: { accept: 'application/json', 'content-type': 'application/json' },
-        body: JSON.stringify({
-          mode: 'code', sessionId, planId: ready.planId, confirmation: ready.confirmation,
-        }),
+        body: JSON.stringify(body),
       })
       const result = recordOf(await responseJson(response))
-      setCompleted(`代码已恢复；救援点 ${requiredString(result.rescuePointId, 'rescuePointId')} 已保留。`)
+      const resultMode = requiredString(result.mode, 'mode')
+      if (resultMode !== mode) throw new Error(`服务器返回了不匹配的回退模式：${resultMode}`)
       setAcknowledged(false)
-      await load()
+      if (mode === 'code') {
+        const rescuePointId = requiredString(result.rescuePointId, 'rescuePointId')
+        setCompleted(`代码已恢复；当前对话保持不变。救援点 ${rescuePointId} 已保留。`)
+        return
+      }
+      const childSessionId = requiredString(result.sessionId, 'sessionId')
+      if (mode === 'conversation') {
+        setCompleted('已创建此轮结束时的对话版本；当前代码保持不变。')
+      } else if (needsCodeRestore) {
+        const rescuePointId = requiredString(result.rescuePointId, 'rescuePointId')
+        setCompleted(`代码与对话已回到此轮结束时；操作前代码已保存在救援点 ${rescuePointId}。`)
+      } else {
+        setCompleted('已创建此轮结束时的对话版本；代码原本已与该轮一致。')
+      }
+      try {
+        openSession(childSessionId)
+        setOpen(false)
+      } catch (navigationError) {
+        setError(`回退已完成，但无法自动打开新对话：${messageOf(navigationError)}`)
+      }
     } catch (caught) {
       setError(messageOf(caught))
     } finally {
+      applyPending.current = false
       setApplying(false)
     }
   }
+
+  const actionLabel = mode === 'both' ? '同时回退' : mode === 'code' ? '恢复代码' : '回退对话'
+  const radioName = `dcl-rewind-${sessionId}-${String(matched.turn)}`
 
   return (
     <div className="dcl-rewind-tail">
@@ -181,40 +269,57 @@ export function RewindTurnTail({ matched, sessionId }: RewindTailProps): ReactNo
         onClose={close}
         title={`回退到第 ${String(matched.turn)} 轮结束时`}
         closeLabel="关闭"
-        description="恢复前会再次验证工作区，并自动保存当前代码作为救援点。"
+        description="选择要恢复的范围。原对话始终保留；涉及代码时会再次验证工作区并先创建救援点。"
         footer={(
           <>
             <Button variant="outline" onClick={close} disabled={applying}>取消</Button>
-            <Button variant="primary" onClick={() => { void applyRestore() }} disabled={blocked || !acknowledged || applying}>
-              {applying ? '正在恢复…' : '恢复代码'}
+            <Button variant="primary" onClick={() => { void applyRestore() }} disabled={!canApply}>
+              {applying ? '正在回退…' : completed === null ? actionLabel : '已完成'}
             </Button>
           </>
         )}
       >
         <div className="dcl-rewind-body">
-          {loading && <p>正在检查此轮的代码状态…</p>}
+          {loading && <p>正在读取此轮恢复点…</p>}
           {preview?.status === 'pending' && <p>此轮检查点仍在写入，请稍后重试。</p>}
           {preview?.status === 'missing' && <p className="dcl-rewind-error">没有找到此轮检查点；该轮可能早于插件启用时间或已超过保留窗口。</p>}
           {preview?.status === 'failed' && <p className="dcl-rewind-error">检查点创建失败：{preview.error}</p>}
           {ready !== null && (
             <>
-              <label className="dcl-rewind-option">
-                <input type="radio" checked readOnly />
-                <span><strong>仅恢复代码</strong><span>对话保持当前位置，只把工作区恢复到此轮结束时。</span></span>
-              </label>
-              <div className="dcl-rewind-summary"><span>{String(ready.totalChanges)} 个路径将变化</span><span>救援点会自动创建</span></div>
-              {(ready.headChanged || ready.operationChanged) && (
+              <div className="dcl-rewind-options">
+                <label className="dcl-rewind-option" data-selected={mode === 'both'} data-disabled={applying}>
+                  <input type="radio" name={radioName} checked={mode === 'both'} disabled={applying} onChange={() => { chooseMode('both') }} />
+                  <span><strong>同时恢复代码与对话</strong><span>恢复工作区，并创建、打开此轮结束时的对话版本；原对话保留。</span></span>
+                </label>
+                <label className="dcl-rewind-option" data-selected={mode === 'code'} data-disabled={applying || ready.totalChanges === 0}>
+                  <input type="radio" name={radioName} checked={mode === 'code'} disabled={applying || ready.totalChanges === 0} onChange={() => { chooseMode('code') }} />
+                  <span><strong>仅恢复代码</strong><span>{ready.totalChanges === 0 ? '当前代码已经与该轮一致，无需恢复。' : '对话保持当前位置，只把工作区恢复到此轮结束时。'}</span></span>
+                </label>
+                <label className="dcl-rewind-option" data-selected={mode === 'conversation'} data-disabled={applying}>
+                  <input type="radio" name={radioName} checked={mode === 'conversation'} disabled={applying} onChange={() => { chooseMode('conversation') }} />
+                  <span><strong>仅回退对话</strong><span>创建并打开此轮结束时的对话版本；当前代码保持不变。</span></span>
+                </label>
+              </div>
+              <div className="dcl-rewind-summary">
+                <span>{String(ready.totalChanges)} 个代码路径与该轮不同</span>
+                <span>{needsCodeRestore ? '恢复前自动创建救援点' : '不会修改当前代码'}</span>
+              </div>
+              {needsCodeRestore && (ready.headChanged || ready.operationChanged) && (
                 <p className="dcl-rewind-warning">Git HEAD、分支或进行中的 Git 操作已经变化。为避免跨历史恢复，请先处理该变化后重新打开。</p>
               )}
-              {ready.totalChanges === 0 && <p>当前工作区已经与该轮结束状态一致。</p>}
+              {!restoresCode && (ready.headChanged || ready.operationChanged) && (
+                <p>仅回退对话不会修改工作区，因此不受当前 HEAD 或 Git 操作状态影响。</p>
+              )}
+              {planMissing && <p className="dcl-rewind-error">代码恢复计划缺失，请关闭后重新打开回退窗口。</p>}
+              {ready.totalChanges === 0 && <p>当前工作区已经与该轮结束状态一致；“同时回退”将只创建对话版本。</p>}
               {ready.changes.length > 0 && (
                 <div className="dcl-rewind-files">
                   {ready.changes.map(change => <div className="dcl-rewind-file" key={change.path}><code>{change.path}</code><span className="dcl-rewind-kind">{kindLabel(change.kind)}</span></div>)}
                   {ready.truncated && <div className="dcl-rewind-file"><span>其余路径未在此处展开</span></div>}
                 </div>
               )}
-              {!blocked && (
-                <label className="dcl-rewind-ack"><input type="checkbox" checked={acknowledged} disabled={applying} onChange={event => { setAcknowledged(event.currentTarget.checked) }} /><span>我确认恢复以上代码变化；当前状态将保存在救援点中。</span></label>
+              {needsCodeRestore && !driftBlocked && !planMissing && (
+                <label className="dcl-rewind-ack"><input type="checkbox" checked={acknowledged} disabled={applying} onChange={event => { setAcknowledged(event.currentTarget.checked) }} /><span>我确认恢复以上代码变化；当前代码会先保存到救援点，原对话不会被删除。</span></label>
               )}
             </>
           )}
