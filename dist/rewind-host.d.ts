@@ -50,12 +50,36 @@ interface HttpServerLike {
         handler: (request: HttpRequestLike, response: HttpResponseLike) => void | Promise<void>;
     }): () => void;
 }
+interface ApiProxyLike {
+    readonly sessions: {
+        fork(request: {
+            readonly rpcId: string;
+            readonly payload: {
+                readonly sessionId: string;
+                readonly atSeq: number;
+            };
+        }): Promise<{
+            readonly result: {
+                readonly ok: true;
+                readonly value: {
+                    readonly sessionId: string;
+                };
+            } | {
+                readonly ok: false;
+                readonly error: {
+                    readonly message: string;
+                };
+            };
+        }>;
+    };
+}
 declare module 'cordis' {
     interface Context {
         agents: AgentsLike;
         sessions: SessionsLike;
         sessionQuery: SessionQueryLike;
         httpServer: HttpServerLike;
+        apiProxy: ApiProxyLike;
     }
     interface Events {
         'agent/created'(payload: {
@@ -87,6 +111,6 @@ export declare class TurnCheckpointCoordinator {
 /** Register the same-origin preview/apply endpoint consumed by the browser half. */
 export declare function installRewindHttp(ctx: Context, engine: ChangeLedgerEngine, coordinator: TurnCheckpointCoordinator): void;
 /** Build the exact-route handler as a testable unit. */
-export declare function createRewindHttpHandler(ctx: Pick<Context, 'sessions' | 'sessionQuery'>, engine: ChangeLedgerEngine, coordinator: TurnCheckpointCoordinator): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void>;
+export declare function createRewindHttpHandler(ctx: Pick<Context, 'sessions' | 'sessionQuery' | 'apiProxy'>, engine: ChangeLedgerEngine, coordinator: TurnCheckpointCoordinator): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void>;
 export {};
 //# sourceMappingURL=rewind-host.d.ts.map

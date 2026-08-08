@@ -74,6 +74,7 @@ test('HTTP preview mints a session-bound plan and code apply restores the checkp
   const ctx = {
     sessions: { get: id => id === 'session-web' ? { header: { cwd: f.workspace } } : undefined },
     sessionQuery: { readSession: async () => { throw new Error('unexpected cold read') } },
+    apiProxy: { sessions: { fork: async () => { throw new Error('unexpected fork') } } },
   }
   const handler = createRewindHttpHandler(ctx, f.engine, coordinator)
 
@@ -94,6 +95,120 @@ test('HTTP preview mints a session-bound plan and code apply restores the checkp
   assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'checkpoint\n')
 })
 
+test('conversation rewind validates the checkpoint boundary and delegates to the host fork lifecycle', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const checkpoint = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-web', turn: 1, turnEndSeq: 4 })
+  const events = sessionEvents()
+  let forkRequest
+  const ctx = {
+    sessions: {
+      get: () => ({ id: 'session-web', header: { cwd: f.workspace }, events }),
+    },
+    sessionQuery: { readSession: async () => { throw new Error('unexpected cold read') } },
+    apiProxy: {
+      sessions: {
+        async fork(request) {
+          forkRequest = request
+          return { result: { ok: true, value: { sessionId: 'session-child' } } }
+        },
+      },
+    },
+  }
+  const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
+  const result = await request(handler, 'POST', '/change-ledger/rewind', {
+    mode: 'conversation', sessionId: 'session-web', turn: 1, checkpointId: checkpoint.id,
+  })
+  assert.equal(result.status, 200)
+  assert.equal(result.body.mode, 'conversation')
+  assert.equal(result.body.sessionId, 'session-child')
+  assert.equal(typeof forkRequest.rpcId, 'string')
+  assert.deepEqual(forkRequest.payload, { sessionId: 'session-web', atSeq: 4 })
+})
+
+test('combined rewind restores code before creating the conversation child', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const checkpoint = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-web', turn: 1, turnEndSeq: 4 })
+  await writeFile(join(f.workspace, 'code.txt'), 'changed\n')
+  const ctx = {
+    sessions: {
+      get: () => ({ id: 'session-web', header: { cwd: f.workspace }, events: sessionEvents() }),
+    },
+    sessionQuery: { readSession: async () => { throw new Error('unexpected cold read') } },
+    apiProxy: {
+      sessions: {
+        fork: async () => ({ result: { ok: true, value: { sessionId: 'session-child' } } }),
+      },
+    },
+  }
+  const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
+  const preview = await request(handler, 'GET', '/change-ledger/rewind?sessionId=session-web&turn=1')
+  const result = await request(handler, 'POST', '/change-ledger/rewind', {
+    mode: 'both', sessionId: 'session-web', turn: 1, checkpointId: checkpoint.id,
+    planId: preview.body.planId, confirmation: preview.body.confirmation,
+  })
+  assert.equal(result.status, 200)
+  assert.equal(result.body.mode, 'both')
+  assert.equal(result.body.sessionId, 'session-child')
+  assert.match(result.body.rescuePointId, /^rp_/)
+  assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'checkpoint\n')
+})
+
+test('combined rewind without code drift creates only the conversation child', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const checkpoint = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-web', turn: 1, turnEndSeq: 4 })
+  const ctx = {
+    sessions: {
+      get: () => ({ id: 'session-web', header: { cwd: f.workspace }, events: sessionEvents() }),
+    },
+    sessionQuery: { readSession: async () => { throw new Error('unexpected cold read') } },
+    apiProxy: {
+      sessions: {
+        fork: async () => ({ result: { ok: true, value: { sessionId: 'session-child' } } }),
+      },
+    },
+  }
+  const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
+  const result = await request(handler, 'POST', '/change-ledger/rewind', {
+    mode: 'both', sessionId: 'session-web', turn: 1, checkpointId: checkpoint.id,
+  })
+  assert.equal(result.status, 200)
+  assert.equal(result.body.mode, 'both')
+  assert.equal(result.body.sessionId, 'session-child')
+  assert.equal(result.body.rescuePointId, undefined)
+  assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'checkpoint\n')
+})
+
+test('combined rewind compensates code when conversation creation fails', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const checkpoint = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-web', turn: 1, turnEndSeq: 4 })
+  await writeFile(join(f.workspace, 'code.txt'), 'changed\n')
+  const events = sessionEvents()
+  const ctx = {
+    sessions: {
+      get: () => ({ id: 'session-web', header: { cwd: f.workspace }, events }),
+    },
+    sessionQuery: { readSession: async () => { throw new Error('unexpected cold read') } },
+    apiProxy: {
+      sessions: {
+        fork: async () => ({ result: { ok: false, error: { message: 'fork fixture failure' } } }),
+      },
+    },
+  }
+  const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
+  const preview = await request(handler, 'GET', '/change-ledger/rewind?sessionId=session-web&turn=1')
+  const result = await request(handler, 'POST', '/change-ledger/rewind', {
+    mode: 'both', sessionId: 'session-web', turn: 1, checkpointId: checkpoint.id,
+    planId: preview.body.planId, confirmation: preview.body.confirmation,
+  })
+  assert.equal(result.status, 409)
+  assert.equal(result.body.code, 'RESTORE_FAILED_ROLLED_BACK')
+  assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'changed\n')
+})
+
 async function request(handler, method, url, body) {
   const request = new EventEmitter()
   request.method = method
@@ -111,4 +226,14 @@ async function request(handler, method, url, body) {
   })
   await pending
   return { status, body: JSON.parse(text) }
+}
+
+function sessionEvents() {
+  return [
+    { type: 'request/header', seq: 0, data: { header: { config: { provider: 'deepseek', model: 'chat', maxTokens: 4096 } } } },
+    { type: 'turn/start', seq: 1, data: { turn: 1 } },
+    { type: 'user/message', seq: 2, data: {} },
+    { type: 'assistant/message', seq: 3, data: {} },
+    { type: 'turn/end', seq: 4, data: { turn: 1 } },
+  ]
 }

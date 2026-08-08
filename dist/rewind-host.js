@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { ChangeLedgerError, errorMessage } from './errors.js';
 export const REWIND_HTTP_PATH = '/change-ledger/rewind';
 const BODY_LIMIT = 64 * 1024;
@@ -112,13 +113,61 @@ export function createRewindHttpHandler(ctx, engine, coordinator) {
             }
             if (request.method === 'POST') {
                 const body = objectBody(await readBody(request));
-                if (body.mode !== 'code')
-                    throw new ChangeLedgerError('INVALID_ARGUMENTS', 'this endpoint currently accepts mode "code"');
+                const mode = body.mode;
+                if (mode !== 'code' && mode !== 'conversation' && mode !== 'both') {
+                    throw new ChangeLedgerError('INVALID_ARGUMENTS', 'mode must be "code", "conversation", or "both"');
+                }
                 const sessionId = requiredText(body.sessionId, 'sessionId');
-                const planId = requiredText(body.planId, 'planId');
-                const confirmation = requiredText(body.confirmation, 'confirmation');
-                const result = await engine.applyRestore({ planId, confirmation, sessionId });
-                json(response, 200, { status: 'completed', mode: 'code', ...result });
+                const planId = optionalText(body.planId, 'planId');
+                const confirmation = optionalText(body.confirmation, 'confirmation');
+                if (mode === 'code') {
+                    if (planId === undefined || confirmation === undefined) {
+                        throw new ChangeLedgerError('NO_CHANGES', 'the selected turn has no code changes to restore');
+                    }
+                    const result = await engine.applyRestore({ planId, confirmation, sessionId });
+                    json(response, 200, { status: 'completed', mode, ...result });
+                    return;
+                }
+                const turn = nonNegativeInteger(body.turn, 'turn');
+                const checkpointId = requiredText(body.checkpointId, 'checkpointId');
+                const checkpoint = await checkpointForRequest(ctx, engine, sessionId, turn, checkpointId);
+                if (mode === 'conversation') {
+                    const fork = await createConversationFork(ctx, sessionId, turn, checkpoint.turnEndSeq);
+                    json(response, 200, { status: 'completed', mode, sessionId: fork.sessionId });
+                    return;
+                }
+                let restoreResult;
+                if (planId !== undefined || confirmation !== undefined) {
+                    if (planId === undefined || confirmation === undefined) {
+                        throw new ChangeLedgerError('INVALID_ARGUMENTS', 'planId and confirmation must be supplied together');
+                    }
+                    restoreResult = await engine.applyRestore({ planId, confirmation, sessionId });
+                }
+                try {
+                    const fork = await createConversationFork(ctx, sessionId, turn, checkpoint.turnEndSeq);
+                    json(response, 200, { status: 'completed', mode, sessionId: fork.sessionId, ...restoreResult });
+                }
+                catch (forkError) {
+                    if (restoreResult === undefined)
+                        throw forkError;
+                    try {
+                        const cwd = await sessionCwd(ctx, sessionId);
+                        const rollbackPlan = await engine.planRestore({
+                            cwd,
+                            restorePointId: restoreResult.rescuePointId,
+                            sessionId,
+                        });
+                        await engine.applyRestore({
+                            planId: rollbackPlan.id,
+                            confirmation: rollbackPlan.confirmation,
+                            sessionId,
+                        });
+                    }
+                    catch (rollbackError) {
+                        throw new AggregateError([forkError, rollbackError], 'conversation fork failed and code compensation also failed');
+                    }
+                    throw new ChangeLedgerError('RESTORE_FAILED_ROLLED_BACK', `conversation fork failed; code was recovered from ${restoreResult.rescuePointId}: ${errorMessage(forkError)}`, { cause: forkError });
+                }
                 return;
             }
             json(response, 405, { error: 'method not allowed' });
@@ -136,6 +185,32 @@ async function sessionCwd(ctx, sessionId) {
         throw new ChangeLedgerError('WORKSPACE_REQUIRED', `session ${sessionId} has no workspace`);
     return cwd;
 }
+async function checkpointForRequest(ctx, engine, sessionId, turn, requestedId) {
+    const cwd = await sessionCwd(ctx, sessionId);
+    const checkpoint = await engine.findTurnCheckpoint({ cwd, sessionId, turn });
+    if (checkpoint === undefined || checkpoint.turnEndSeq === undefined) {
+        throw new ChangeLedgerError('RESTORE_POINT_NOT_FOUND', `turn ${String(turn)} has no rewind checkpoint`);
+    }
+    if (requestedId !== checkpoint.id) {
+        throw new ChangeLedgerError('PLAN_STALE', 'the selected turn checkpoint changed; reopen the rewind dialog');
+    }
+    return { id: checkpoint.id, turnEndSeq: checkpoint.turnEndSeq };
+}
+async function createConversationFork(ctx, sourceId, turn, turnEndSeq) {
+    const live = ctx.sessions.get(sourceId);
+    const source = live ?? { id: sourceId, ...await ctx.sessionQuery.readSession(sourceId) };
+    const boundary = source.events.find(event => (event.type === 'turn/end' && event.seq === turnEndSeq && event.data.turn === turn));
+    if (boundary === undefined)
+        throw new ChangeLedgerError('PLAN_STALE', 'the session no longer contains the checkpoint turn boundary');
+    const response = await ctx.apiProxy.sessions.fork({
+        rpcId: randomUUID(),
+        payload: { sessionId: sourceId, atSeq: turnEndSeq },
+    });
+    if (!response.result.ok) {
+        throw new ChangeLedgerError('CONVERSATION_REWIND_FAILED', response.result.error.message);
+    }
+    return { sessionId: requiredText(response.result.value.sessionId, 'fork sessionId') };
+}
 function checkpointKey(sessionId, turn) {
     return `${sessionId}\0${String(turn)}`;
 }
@@ -143,6 +218,9 @@ function requiredText(value, name) {
     if (typeof value !== 'string' || value === '')
         throw new ChangeLedgerError('INVALID_ARGUMENTS', `${name} must be a non-empty string`);
     return value;
+}
+function optionalText(value, name) {
+    return value === undefined ? undefined : requiredText(value, name);
 }
 function nonNegativeInteger(value, name) {
     const parsed = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
