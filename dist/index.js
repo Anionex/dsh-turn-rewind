@@ -4,9 +4,11 @@
  */
 import { Service } from 'cordis';
 import { ChangeLedgerEngine } from './engine.js';
+import { installRewindHttp, TurnCheckpointCoordinator } from './rewind-host.js';
 import { registerTools } from './tools.js';
 export * from './engine.js';
 export * from './errors.js';
+export * from './rewind-host.js';
 export * from './types.js';
 /** Cordis service exposed as `ctx.changeLedger` for other DSH plugins. */
 export class ChangeLedgerService extends Service {
@@ -17,6 +19,11 @@ export class ChangeLedgerService extends Service {
         super(ctx, 'changeLedger');
         this.engine = new ChangeLedgerEngine(config);
         registerTools(ctx, this.engine);
+        const checkpoints = new TurnCheckpointCoordinator(this.engine);
+        ctx.inject(['agents'], (scope) => { checkpoints.install(scope); });
+        ctx.inject(['httpServer', 'sessions', 'sessionQuery'], (scope) => {
+            installRewindHttp(scope, this.engine, checkpoints);
+        });
         void this.engine.initialize().then((reconciled) => {
             if (reconciled > 0) {
                 ctx.logger.warn(`[change-ledger] marked ${reconciled} interrupted restore operation(s) for manual recovery`);

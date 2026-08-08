@@ -19,6 +19,10 @@
       "types": "./dist/types.d.ts",
       "default": "./dist/types.js"
     },
+    "./rewind-host": {
+      "types": "./dist/rewind-host.d.ts",
+      "default": "./dist/rewind-host.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },

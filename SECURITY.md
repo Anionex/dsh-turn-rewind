@@ -16,6 +16,8 @@ Workspace restoration requires all of the following:
 6. still-fresh selected-path hashes and the exact reviewed HEAD/branch/operation fence under the workspace lock;
 7. a durable rescue point and operation journal.
 
+The Web rewind adapter obtains the same session-bound plan and exact confirmation from a same-origin preview request, then sends both only after the user confirms the browser dialog. Direct mutation requests without that live plan pair fail closed.
+
 An absent approval channel fails closed through DSH's standard `ask` behavior.
 
 ## Filesystem containment

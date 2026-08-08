@@ -7,6 +7,7 @@ import { ChangeLedgerEngine } from './engine.js';
 import type { ChangeLedgerConfig } from './types.js';
 export * from './engine.js';
 export * from './errors.js';
+export * from './rewind-host.js';
 export * from './types.js';
 declare module 'cordis' {
     interface Context {
