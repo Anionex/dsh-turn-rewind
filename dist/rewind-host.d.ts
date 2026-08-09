@@ -5,11 +5,14 @@ interface SessionEventLike {
     readonly seq: number;
     readonly data: Record<string, unknown>;
 }
+interface SessionHeaderLike {
+    readonly cwd?: string;
+    readonly parentSession?: string;
+    readonly seedLength?: number;
+}
 interface SessionLike {
     readonly id: string;
-    readonly header: {
-        readonly cwd?: string;
-    };
+    readonly header: SessionHeaderLike;
     readonly events: readonly SessionEventLike[];
 }
 interface AgentLike {
@@ -26,9 +29,7 @@ interface SessionsLike {
 }
 interface SessionQueryLike {
     readSession(id: string): Promise<{
-        readonly header: {
-            readonly cwd?: string;
-        };
+        readonly header: SessionHeaderLike;
         readonly events: readonly SessionEventLike[];
     }>;
 }

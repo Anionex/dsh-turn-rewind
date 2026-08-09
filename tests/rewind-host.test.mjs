@@ -261,6 +261,65 @@ test('conversation rewind validates the checkpoint boundary and delegates to the
   assert.deepEqual(forkRequest.payload, { sessionId: 'session-web', atSeq: 4 })
 })
 
+test('forked conversations inherit exact seeded-turn checkpoints from their parent lineage', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const checkpoint = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-parent', turn: 1, turnEndSeq: 4 })
+  const events = sessionEvents()
+  const parent = { id: 'session-parent', header: { cwd: f.workspace }, events }
+  const child = {
+    id: 'session-child',
+    header: { cwd: f.workspace, parentSession: 'session-parent', seedLength: 5 },
+    events,
+  }
+  let forkRequest
+  const ctx = {
+    sessions: { get: id => id === child.id ? child : id === parent.id ? parent : undefined },
+    sessionQuery: { readSession: async () => { throw new Error('unexpected cold read') } },
+    apiProxy: {
+      sessions: {
+        async fork(request) {
+          forkRequest = request
+          return { result: { ok: true, value: { sessionId: 'session-grandchild' } } }
+        },
+      },
+    },
+  }
+  const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
+  const preview = await request(handler, 'GET', '/change-ledger/rewind?sessionId=session-child&turn=1')
+  assert.equal(preview.status, 200)
+  assert.equal(preview.body.status, 'ready')
+  assert.equal(preview.body.checkpointId, checkpoint.id)
+
+  const result = await request(handler, 'POST', '/change-ledger/rewind', {
+    mode: 'conversation', sessionId: 'session-child', turn: 1, checkpointId: checkpoint.id,
+  })
+  assert.equal(result.status, 200)
+  assert.equal(result.body.sessionId, 'session-grandchild')
+  assert.deepEqual(forkRequest.payload, { sessionId: 'session-child', atSeq: 4 })
+})
+
+test('fork lineage never exposes a parent checkpoint beyond the durable seed boundary', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-parent', turn: 1, turnEndSeq: 4 })
+  const events = sessionEvents()
+  const child = {
+    id: 'session-child',
+    header: { cwd: f.workspace, parentSession: 'session-parent', seedLength: 4 },
+    events,
+  }
+  const ctx = {
+    sessions: { get: id => id === child.id ? child : undefined },
+    sessionQuery: { readSession: async () => { throw new Error('parent must not be read beyond the seed boundary') } },
+    apiProxy: { sessions: { fork: async () => { throw new Error('unexpected fork') } } },
+  }
+  const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
+  const preview = await request(handler, 'GET', '/change-ledger/rewind?sessionId=session-child&turn=1')
+  assert.equal(preview.status, 200)
+  assert.equal(preview.body.status, 'missing')
+})
+
 test('combined rewind restores code before creating the conversation child', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)

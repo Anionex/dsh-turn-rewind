@@ -101,7 +101,7 @@ dsh --profile web --dump-config | grep change-ledger
 
 HEAD、分支或进行中的 Git 操作发生漂移时，只会阻止会修改代码的模式；纯对话回退仍可执行。如果当前工作树已经与所选 Turn 一致，“同时恢复”会安全退化为只创建对话版本。如果组合回退已经恢复代码、但随后创建对话失败，Change Ledger 会自动使用操作前救援点恢复原代码。
 
-DSH Session 日志是 append-only，因此对话回退的底层实现是：让官方 Host API 从精确的已完成 Turn 边界创建子 Session，再自动打开该子 Session。这一实现细节不等于现有的 **Branch** 操作：Branch 保留当前代码，而组合 Rewind 会同时恢复代码与对话上下文；原 Session 始终保留。
+DSH Session 日志是 append-only，因此对话回退的底层实现是：让官方 Host API 从精确的已完成 Turn 边界创建子 Session，再自动打开该子 Session。Fork 子 Session 只有在目标边界位于每一层持久化 `seedLength` 围栏内、并仍与祖先的精确 `turn/end` 一致时，才能复用祖先检查点；这样既支持连续回退，也不会把子 Session 后续历史错误标成旧检查点。这一实现细节不等于现有的 **Branch** 操作：Branch 保留当前代码，而组合 Rewind 会同时恢复代码与对话上下文；原 Session 始终保留。
 
 可以直接向 Agent 提出：
 

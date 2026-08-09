@@ -18,7 +18,7 @@ Workspace restoration requires all of the following:
 
 The Web rewind adapter obtains the same session-bound plan and exact confirmation from a same-origin preview request, then sends both only after the user selects a code-affecting mode and confirms the browser dialog. Direct mutation requests without that live plan pair fail closed. Conversation-only rewind sends neither value because it does not mutate the workspace.
 
-Conversation rewind verifies that the durable checkpoint still names the exact `turn/end` event before delegating child creation to DSH's official Host API. The Host owns seed validation, model-target inheritance, persistence, and Workspace attachment. The original append-only Session remains intact.
+Conversation rewind verifies that the durable checkpoint still names the exact `turn/end` event before delegating child creation to DSH's official Host API. A forked Session may resolve that checkpoint through its parent lineage only while the boundary remains below every durable `seedLength`, every ancestor contains the same turn and seq, and the checkpoint names that exact seq. The Host owns seed creation, model-target inheritance, persistence, and Workspace attachment. The original append-only Session remains intact.
 
 Combined rewind restores code first, then creates the conversation child. If child creation fails, the adapter immediately applies the first restore's rescue point to compensate the code change. If compensation also fails, the ordinary durable restore journals and rescue points remain available for manual recovery rather than hiding a partial outcome.
 

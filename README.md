@@ -103,7 +103,7 @@ In the Web profile, each finalized assistant turn gains a compact **Rewind** act
 
 HEAD, branch, or in-progress Git-operation drift blocks only modes that would change code; conversation-only rewind remains available. If the worktree already matches the selected turn, the combined mode safely reduces to conversation-only. If conversation creation fails after a combined code restore, Change Ledger automatically restores the pre-operation code from the rescue point.
 
-DSH Session logs are append-only, so conversation rewind is implemented by asking the official Host API to create a child from the exact completed-turn boundary and then opening that child. This implementation detail does not make it equivalent to the existing **Branch** action: Branch preserves the current code, while combined Rewind restores both code and conversational context. The original Session is always retained.
+DSH Session logs are append-only, so conversation rewind is implemented by asking the official Host API to create a child from the exact completed-turn boundary and then opening that child. A forked child may reuse an ancestor's checkpoint only while the requested boundary is inside every durable `seedLength` fence and still matches the ancestor's exact `turn/end`; this allows repeated rewind without relabeling later child history. This implementation detail does not make it equivalent to the existing **Branch** action: Branch preserves the current code, while combined Rewind restores both code and conversational context. The original Session is always retained.
 
 Example requests:
 

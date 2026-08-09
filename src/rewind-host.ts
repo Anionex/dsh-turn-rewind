@@ -10,9 +10,15 @@ interface SessionEventLike {
   readonly data: Record<string, unknown>
 }
 
+interface SessionHeaderLike {
+  readonly cwd?: string
+  readonly parentSession?: string
+  readonly seedLength?: number
+}
+
 interface SessionLike {
   readonly id: string
-  readonly header: { readonly cwd?: string }
+  readonly header: SessionHeaderLike
   readonly events: readonly SessionEventLike[]
 }
 
@@ -32,7 +38,7 @@ interface SessionsLike {
 }
 
 interface SessionQueryLike {
-  readSession(id: string): Promise<{ readonly header: { readonly cwd?: string }; readonly events: readonly SessionEventLike[] }>
+  readSession(id: string): Promise<{ readonly header: SessionHeaderLike; readonly events: readonly SessionEventLike[] }>
 }
 
 interface HttpRequestLike {
@@ -221,14 +227,13 @@ export function createRewindHttpHandler(
         const url = new URL(request.url ?? REWIND_HTTP_PATH, 'http://dsh.local')
         const sessionId = requiredText(url.searchParams.get('sessionId'), 'sessionId')
         const turn = nonNegativeInteger(url.searchParams.get('turn'), 'turn')
-        const cwd = await sessionCwd(ctx, sessionId)
-        const checkpoint = await engine.findTurnCheckpoint({ cwd, sessionId, turn })
+        const checkpoint = await resolveTurnCheckpoint(ctx, engine, sessionId, turn)
         if (checkpoint === undefined) {
           if (url.searchParams.get('retry') === '1') coordinator.retry(sessionId, turn)
           json(response, 200, coordinator.state(sessionId, turn))
           return
         }
-        const inspection = await engine.inspect({ cwd, restorePointId: checkpoint.id })
+        const inspection = await engine.inspect({ cwd: checkpoint.cwd, restorePointId: checkpoint.id })
         if (inspection.changes.length === 0) {
           json(response, 200, {
             status: 'ready', sessionId, turn, checkpointId: checkpoint.id,
@@ -237,7 +242,7 @@ export function createRewindHttpHandler(
           })
           return
         }
-        const plan = await engine.planRestore({ cwd, restorePointId: checkpoint.id, sessionId })
+        const plan = await engine.planRestore({ cwd: checkpoint.cwd, restorePointId: checkpoint.id, sessionId })
         json(response, 200, {
           status: 'ready', sessionId, turn, checkpointId: checkpoint.id,
           turnEndSeq: checkpoint.turnEndSeq,
@@ -334,6 +339,56 @@ async function sessionCwd(ctx: Pick<Context, 'sessions' | 'sessionQuery'>, sessi
   return cwd
 }
 
+async function readSession(
+  ctx: Pick<Context, 'sessions' | 'sessionQuery'>,
+  sessionId: string,
+): Promise<SessionLike> {
+  const live = ctx.sessions.get(sessionId)
+  return live ?? { id: sessionId, ...await ctx.sessionQuery.readSession(sessionId) }
+}
+
+async function resolveTurnCheckpoint(
+  ctx: Pick<Context, 'sessions' | 'sessionQuery'>,
+  engine: ChangeLedgerEngine,
+  sessionId: string,
+  turn: number,
+): Promise<{ readonly id: string; readonly turnEndSeq: number; readonly cwd: string } | undefined> {
+  const cwd = await sessionCwd(ctx, sessionId)
+  const direct = await engine.findTurnCheckpoint({ cwd, sessionId, turn })
+  if (direct !== undefined) {
+    if (direct.turnEndSeq === undefined) {
+      throw new ChangeLedgerError('PLAN_STALE', 'the selected turn checkpoint has no durable turn boundary')
+    }
+    return { id: direct.id, turnEndSeq: direct.turnEndSeq, cwd }
+  }
+
+  let current = await readSession(ctx, sessionId)
+  const boundary = current.events.find(event => event.type === 'turn/end' && event.data.turn === turn)
+  if (boundary === undefined) return undefined
+  const seen = new Set<string>([sessionId])
+  while (current.header.parentSession !== undefined
+    && current.header.seedLength !== undefined
+    && boundary.seq < current.header.seedLength) {
+    const parentId = current.header.parentSession
+    if (seen.has(parentId)) {
+      throw new ChangeLedgerError('PLAN_STALE', 'session fork lineage contains a cycle')
+    }
+    seen.add(parentId)
+    current = await readSession(ctx, parentId)
+    const parentBoundary = current.events.find(event => (
+      event.type === 'turn/end' && event.seq === boundary.seq && event.data.turn === turn
+    ))
+    if (parentBoundary === undefined) return undefined
+    const inherited = await engine.findTurnCheckpoint({ cwd, sessionId: parentId, turn })
+    if (inherited === undefined) continue
+    if (inherited.turnEndSeq !== boundary.seq) {
+      throw new ChangeLedgerError('PLAN_STALE', 'the inherited turn checkpoint no longer matches the fork boundary')
+    }
+    return { id: inherited.id, turnEndSeq: boundary.seq, cwd }
+  }
+  return undefined
+}
+
 async function checkpointForRequest(
   ctx: Pick<Context, 'sessions' | 'sessionQuery'>,
   engine: ChangeLedgerEngine,
@@ -341,15 +396,14 @@ async function checkpointForRequest(
   turn: number,
   requestedId: string,
 ): Promise<{ readonly id: string; readonly turnEndSeq: number; readonly cwd: string }> {
-  const cwd = await sessionCwd(ctx, sessionId)
-  const checkpoint = await engine.findTurnCheckpoint({ cwd, sessionId, turn })
-  if (checkpoint === undefined || checkpoint.turnEndSeq === undefined) {
+  const checkpoint = await resolveTurnCheckpoint(ctx, engine, sessionId, turn)
+  if (checkpoint === undefined) {
     throw new ChangeLedgerError('RESTORE_POINT_NOT_FOUND', `turn ${String(turn)} has no rewind checkpoint`)
   }
   if (requestedId !== checkpoint.id) {
     throw new ChangeLedgerError('PLAN_STALE', 'the selected turn checkpoint changed; reopen the rewind dialog')
   }
-  return { id: checkpoint.id, turnEndSeq: checkpoint.turnEndSeq, cwd }
+  return checkpoint
 }
 
 async function createConversationFork(
@@ -358,8 +412,7 @@ async function createConversationFork(
   turn: number,
   turnEndSeq: number,
 ): Promise<{ readonly sessionId: string }> {
-  const live = ctx.sessions.get(sourceId)
-  const source = live ?? { id: sourceId, ...await ctx.sessionQuery.readSession(sourceId) }
+  const source = await readSession(ctx, sourceId)
   const boundary = source.events.find(event => (
     event.type === 'turn/end' && event.seq === turnEndSeq && event.data.turn === turn
   ))
