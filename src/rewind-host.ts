@@ -98,7 +98,8 @@ declare module 'cordis' {
 
 export const REWIND_HTTP_PATH = '/turn-rewind'
 const BODY_LIMIT = 64 * 1024
-const CHANGE_PREVIEW_LIMIT = 200
+const INITIAL_CHANGE_PREVIEW_LIMIT = 8
+const MAX_CHANGE_PAGE_SIZE = 200
 
 /** In-memory capture status and same-boundary retry state for turn checkpoints. */
 export class TurnCheckpointCoordinator {
@@ -217,7 +218,7 @@ export function installRewindHttp(
 
 /** Build the exact-route handler as a testable unit. */
 export function createRewindHttpHandler(
-  ctx: Pick<Context, 'sessions' | 'sessionQuery' | 'apiProxy'>,
+  ctx: Pick<Context, 'sessions' | 'sessionQuery' | 'apiProxy'> & { readonly agents?: AgentsLike },
   engine: ChangeLedgerEngine,
   coordinator: TurnCheckpointCoordinator,
 ): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void> {
@@ -227,6 +228,9 @@ export function createRewindHttpHandler(
         const url = new URL(request.url ?? REWIND_HTTP_PATH, 'http://dsh.local')
         const sessionId = requiredText(url.searchParams.get('sessionId'), 'sessionId')
         const turn = nonNegativeInteger(url.searchParams.get('turn'), 'turn')
+        const detailsOnly = url.searchParams.get('details') === '1'
+        const offset = nonNegativeInteger(url.searchParams.get('offset') ?? '0', 'offset')
+        const limit = pageSize(url.searchParams.get('limit'), detailsOnly ? MAX_CHANGE_PAGE_SIZE : INITIAL_CHANGE_PREVIEW_LIMIT)
         const checkpoint = await resolveTurnCheckpoint(ctx, engine, sessionId, turn)
         if (checkpoint === undefined) {
           if (url.searchParams.get('retry') === '1') coordinator.retry(sessionId, turn)
@@ -234,66 +238,58 @@ export function createRewindHttpHandler(
           return
         }
         const inspection = await engine.inspect({ cwd: checkpoint.cwd, restorePointId: checkpoint.id })
-        if (inspection.changes.length === 0) {
-          json(response, 200, {
-            status: 'ready', sessionId, turn, checkpointId: checkpoint.id,
-            turnEndSeq: checkpoint.turnEndSeq, totalChanges: 0, changes: [], truncated: false,
-            headChanged: inspection.headChanged, operationChanged: inspection.operationChanged,
-          })
-          return
-        }
-        const plan = await engine.planRestore({ cwd: checkpoint.cwd, restorePointId: checkpoint.id, sessionId })
-        json(response, 200, {
+        const activeSessionIds = await sharedWorkspaceSessions(ctx.agents, checkpoint.cwd, sessionId)
+        const changes = inspection.changes.slice(offset, offset + limit)
+        const common = {
           status: 'ready', sessionId, turn, checkpointId: checkpoint.id,
           turnEndSeq: checkpoint.turnEndSeq,
           totalChanges: inspection.changes.length,
-          changes: inspection.changes.slice(0, CHANGE_PREVIEW_LIMIT).map(change => ({ path: change.path, kind: change.kind })),
-          truncated: inspection.changes.length > CHANGE_PREVIEW_LIMIT,
+          changes: changes.map(change => ({ path: change.path, kind: change.kind })),
+          offset,
+          truncated: offset + changes.length < inspection.changes.length,
           headChanged: inspection.headChanged,
           operationChanged: inspection.operationChanged,
-          planId: plan.id,
-          confirmation: plan.confirmation,
-        })
+          activeSessionIds,
+          restoreBlocked: activeSessionIds.length > 0,
+        } as const
+        if (inspection.changes.length === 0) {
+          json(response, 200, common)
+          return
+        }
+        if (detailsOnly || activeSessionIds.length > 0) {
+          json(response, 200, common)
+          return
+        }
+        const plan = await engine.planRestore({ cwd: checkpoint.cwd, restorePointId: checkpoint.id, sessionId })
+        json(response, 200, { ...common, planId: plan.id, confirmation: plan.confirmation })
         return
       }
       if (request.method === 'POST') {
         const body = objectBody(await readBody(request))
         const mode = body.mode
-        if (mode !== 'code' && mode !== 'conversation' && mode !== 'both') {
-          throw new ChangeLedgerError('INVALID_ARGUMENTS', 'mode must be "code", "conversation", or "both"')
+        if (mode !== 'code' && mode !== 'both') {
+          throw new ChangeLedgerError('INVALID_ARGUMENTS', 'mode must be "code" or "both"')
         }
         const sessionId = requiredText(body.sessionId, 'sessionId')
-        const planId = optionalText(body.planId, 'planId')
-        const confirmation = optionalText(body.confirmation, 'confirmation')
-        if (mode === 'code') {
-          if (planId === undefined || confirmation === undefined) {
-            throw new ChangeLedgerError('NO_CHANGES', 'the selected turn has no code changes to restore')
-          }
-          const result = await engine.applyRestore({ planId, confirmation, sessionId })
-          json(response, 200, { status: 'completed', mode, ...result })
-          return
-        }
-
         const turn = nonNegativeInteger(body.turn, 'turn')
         const checkpointId = requiredText(body.checkpointId, 'checkpointId')
         const checkpoint = await checkpointForRequest(ctx, engine, sessionId, turn, checkpointId)
-        if (mode === 'conversation') {
-          const fork = await createConversationFork(ctx, sessionId, turn, checkpoint.turnEndSeq)
-          json(response, 200, { status: 'completed', mode, sessionId: fork.sessionId })
-          return
+        const activeSessionIds = await sharedWorkspaceSessions(ctx.agents, checkpoint.cwd, sessionId)
+        if (activeSessionIds.length > 0) {
+          throw new ChangeLedgerError(
+            'WORKSPACE_IN_USE',
+            `project files are also used by active sessions: ${activeSessionIds.slice(0, 5).join(', ')}`,
+          )
         }
-
-        let restoreResult: Awaited<ReturnType<ChangeLedgerEngine['applyRestore']>> | undefined
-        if (planId !== undefined || confirmation !== undefined) {
-          if (planId === undefined || confirmation === undefined) {
-            throw new ChangeLedgerError('INVALID_ARGUMENTS', 'planId and confirmation must be supplied together')
-          }
-          restoreResult = await engine.applyRestore({ planId, confirmation, sessionId })
-        } else {
-          const inspection = await engine.inspect({ cwd: checkpoint.cwd, restorePointId: checkpoint.id })
-          if (inspection.changes.length > 0) {
-            throw new ChangeLedgerError('PLAN_STALE', 'the workspace changed after preview; reopen the rewind dialog')
-          }
+        const planId = optionalText(body.planId, 'planId')
+        const confirmation = optionalText(body.confirmation, 'confirmation')
+        if (planId === undefined || confirmation === undefined) {
+          throw new ChangeLedgerError('NO_CHANGES', 'the selected turn has no project files to restore')
+        }
+        const restoreResult = await engine.applyRestore({ planId, confirmation, sessionId })
+        if (mode === 'code') {
+          json(response, 200, { status: 'completed', mode, ...restoreResult })
+          return
         }
 
         try {
@@ -361,19 +357,28 @@ async function resolveTurnCheckpoint(
   const boundary = current.events.find(event => event.type === 'turn/end' && event.data.turn === turn)
   if (boundary === undefined) return undefined
   const seen = new Set<string>([sessionId])
-  while (current.header.parentSession !== undefined
-    && current.header.seedLength !== undefined
-    && boundary.seq < current.header.seedLength) {
+  while (true) {
     const parentId = current.header.parentSession
+    const seedLength = current.header.seedLength
+    if ((parentId === undefined) !== (seedLength === undefined)) {
+      throw new ChangeLedgerError('PLAN_STALE', 'session fork lineage has incomplete parent metadata')
+    }
+    if (parentId === undefined || seedLength === undefined || boundary.seq >= seedLength) return undefined
     if (seen.has(parentId)) {
       throw new ChangeLedgerError('PLAN_STALE', 'session fork lineage contains a cycle')
     }
     seen.add(parentId)
-    current = await readSession(ctx, parentId)
+    try {
+      current = await readSession(ctx, parentId)
+    } catch (error) {
+      throw new ChangeLedgerError('PLAN_STALE', `parent session ${parentId} is unavailable`, { cause: error })
+    }
     const parentBoundary = current.events.find(event => (
       event.type === 'turn/end' && event.seq === boundary.seq && event.data.turn === turn
     ))
-    if (parentBoundary === undefined) return undefined
+    if (parentBoundary === undefined) {
+      throw new ChangeLedgerError('PLAN_STALE', 'session fork lineage no longer matches the inherited turn boundary')
+    }
     const inherited = await engine.findTurnCheckpoint({ cwd, sessionId: parentId, turn })
     if (inherited === undefined) continue
     if (inherited.turnEndSeq !== boundary.seq) {
@@ -381,7 +386,6 @@ async function resolveTurnCheckpoint(
     }
     return { id: inherited.id, turnEndSeq: boundary.seq, cwd }
   }
-  return undefined
 }
 
 async function checkpointForRequest(
@@ -441,6 +445,37 @@ function nonNegativeInteger(value: unknown, name: string): number {
     throw new ChangeLedgerError('INVALID_ARGUMENTS', `${name} must be a non-negative safe integer`)
   }
   return parsed as number
+}
+
+function pageSize(value: unknown, fallback: number): number {
+  if (value === null || value === undefined) return fallback
+  const parsed = nonNegativeInteger(value, 'limit')
+  if (parsed < 1 || parsed > MAX_CHANGE_PAGE_SIZE) {
+    throw new ChangeLedgerError('INVALID_ARGUMENTS', `limit must be between 1 and ${String(MAX_CHANGE_PAGE_SIZE)}`)
+  }
+  return parsed
+}
+
+async function sharedWorkspaceSessions(
+  agents: AgentsLike | undefined,
+  cwd: string,
+  sourceSessionId: string,
+): Promise<readonly string[]> {
+  const listed = agents?.list() ?? []
+  if (listed.length === 0) return []
+  const root = await discoverRepositoryRoot(cwd)
+  const shared: string[] = []
+  for (const agent of listed) {
+    if (agent.status !== 'running') continue
+    const session = agent.session
+    if (session.id === sourceSessionId || session.header.cwd === undefined) continue
+    try {
+      if (await discoverRepositoryRoot(session.header.cwd) === root) shared.push(session.id)
+    } catch {
+      // A live Session whose cwd is not a valid Git worktree cannot share this worktree.
+    }
+  }
+  return shared.sort()
 }
 
 function objectBody(value: unknown): Record<string, unknown> {

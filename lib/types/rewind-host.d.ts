@@ -118,5 +118,7 @@ export declare class TurnCheckpointCoordinator {
 /** Register the same-origin preview/apply endpoint consumed by the browser half. */
 export declare function installRewindHttp(ctx: Context, engine: ChangeLedgerEngine, coordinator: TurnCheckpointCoordinator): void;
 /** Build the exact-route handler as a testable unit. */
-export declare function createRewindHttpHandler(ctx: Pick<Context, 'sessions' | 'sessionQuery' | 'apiProxy'>, engine: ChangeLedgerEngine, coordinator: TurnCheckpointCoordinator): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void>;
+export declare function createRewindHttpHandler(ctx: Pick<Context, 'sessions' | 'sessionQuery' | 'apiProxy'> & {
+    readonly agents?: AgentsLike;
+}, engine: ChangeLedgerEngine, coordinator: TurnCheckpointCoordinator): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void>;
 export {};

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNo
 import { createPortal } from 'react-dom'
 import {
   Button,
-  IconRefreshOutline16,
   Modal,
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -63,7 +62,7 @@ interface ClientContextLike {
   effect(setup: () => (() => void), label?: string): unknown
 }
 
-type RewindMode = 'both' | 'code' | 'conversation'
+type RewindMode = 'both' | 'code'
 type ChangeKind = 'added' | 'deleted' | 'modified' | 'mode-changed' | 'type-changed'
 
 interface ReadyPreview {
@@ -74,9 +73,12 @@ interface ReadyPreview {
   readonly turnEndSeq: number
   readonly totalChanges: number
   readonly changes: readonly { readonly path: string; readonly kind: ChangeKind }[]
+  readonly offset: number
   readonly truncated: boolean
   readonly headChanged: boolean
   readonly operationChanged: boolean
+  readonly activeSessionIds: readonly string[]
+  readonly restoreBlocked: boolean
   readonly planId?: string
   readonly confirmation?: string
 }
@@ -109,11 +111,13 @@ const styles = `
 .dcl-rewind-file{display:flex;justify-content:space-between;gap:16px;min-width:0;padding:8px 10px;border-bottom:1px solid var(--dsw-alias-border-l1);font-size:12px}
 .dcl-rewind-file:last-child{border-bottom:0}.dcl-rewind-file code{min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--dsw-alias-label-secondary)}
 .dcl-rewind-kind{flex:none;color:var(--dsw-alias-label-tertiary)}
+.dcl-rewind-file-actions{display:flex;justify-content:flex-start}
 .dcl-rewind-status{margin:0;overflow-wrap:anywhere;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px}
 .dcl-rewind-warning,.dcl-rewind-error{box-sizing:border-box;max-width:100%;margin:0;padding:10px 12px;overflow-wrap:anywhere;word-break:break-word;border-radius:10px;font-size:12px;line-height:18px}
 .dcl-rewind-warning{background:var(--dsw-alias-state-warn-tertiary);color:var(--dsw-alias-state-warn-primary)}
 .dcl-rewind-error{border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 30%,transparent);color:var(--dsw-alias-state-error-primary)}
-.dcl-rewind-ack{display:flex;align-items:flex-start;gap:8px;min-width:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.dcl-rewind-ack input{flex:none}.dcl-rewind-ack span{min-width:0;overflow-wrap:anywhere}
+.dcl-rewind-backup{box-sizing:border-box;margin:0;padding:10px 12px;border-radius:10px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
+.dcl-rewind-details{font-size:12px;color:var(--dsw-alias-label-tertiary)}.dcl-rewind-details summary{cursor:pointer;color:var(--dsw-alias-label-secondary)}.dcl-rewind-details dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:5px 10px;margin:10px 0 0}.dcl-rewind-details dt{color:var(--dsw-alias-label-tertiary)}.dcl-rewind-details dd{min-width:0;margin:0;overflow-wrap:anywhere;font-family:monospace;color:var(--dsw-alias-label-secondary)}
 .dcl-rewind-retry{align-self:flex-start}
 `
 
@@ -188,10 +192,12 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
   const [loading, setLoading] = useState(false)
   const [preview, setPreview] = useState<Preview | null>(null)
   const [mode, setMode] = useState<RewindMode>('both')
-  const [acknowledged, setAcknowledged] = useState(false)
   const [applying, setApplying] = useState(false)
+  const [loadingDetails, setLoadingDetails] = useState(false)
+  const [stale, setStale] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [completed, setCompleted] = useState<string | null>(null)
+  const [backupId, setBackupId] = useState<string | null>(null)
   const loadAbort = useRef<AbortController | null>(null)
   const applyPending = useRef(false)
 
@@ -205,8 +211,10 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
     const controller = new AbortController()
     loadAbort.current = controller
     setLoading(true)
+    setStale(false)
     setError(null)
     setCompleted(null)
+    setBackupId(null)
     try {
       const retryQuery = retry ? '&retry=1' : ''
       const response = await fetch(`${PATH}?sessionId=${encodeURIComponent(sessionId)}&turn=${String(matched.turn)}${retryQuery}`, {
@@ -228,7 +236,7 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
     setOpen(true)
     setPreview(null)
     setMode('both')
-    setAcknowledged(false)
+    setStale(false)
     void load()
   }
   const close = (): void => {
@@ -241,25 +249,56 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
   const chooseMode = (next: RewindMode): void => {
     if (applying) return
     setMode(next)
-    setAcknowledged(false)
     setError(null)
     setCompleted(null)
   }
   const ready = preview?.status === 'ready' ? preview : null
-  const hasCodeChanges = ready !== null && ready.totalChanges > 0
-  const restoresCode = mode !== 'conversation'
-  const needsCodeRestore = restoresCode && hasCodeChanges
-  const codeUnavailable = mode === 'code' && !hasCodeChanges
-  const driftBlocked = needsCodeRestore && ready !== null && (ready.headChanged || ready.operationChanged)
-  const planMissing = needsCodeRestore && ready !== null && (ready.planId === undefined || ready.confirmation === undefined)
+  const hasFileChanges = ready !== null && ready.totalChanges > 0
+  const driftBlocked = hasFileChanges && ready !== null && (ready.headChanged || ready.operationChanged)
+  const sharedBlocked = ready?.restoreBlocked === true
+  const planMissing = hasFileChanges && ready !== null && !sharedBlocked && (ready.planId === undefined || ready.confirmation === undefined)
   const canApply = ready !== null
     && !loading
     && !applying
+    && !loadingDetails
     && completed === null
-    && !codeUnavailable
+    && hasFileChanges
     && !driftBlocked
+    && !sharedBlocked
     && !planMissing
-    && (!needsCodeRestore || acknowledged)
+    && !stale
+
+  const loadAllChanges = async (): Promise<void> => {
+    if (ready === null || loadingDetails || !ready.truncated) return
+    setLoadingDetails(true)
+    setError(null)
+    try {
+      const collected = [...ready.changes]
+      let offset = collected.length
+      while (offset < ready.totalChanges) {
+        const response = await fetch(`${PATH}?sessionId=${encodeURIComponent(sessionId)}&turn=${String(matched.turn)}&details=1&offset=${String(offset)}&limit=200`, {
+          method: 'GET', headers: { accept: 'application/json' }, cache: 'no-store',
+        })
+        const page = decodePreview(await responseJson(response))
+        if (page.status !== 'ready'
+          || page.checkpointId !== ready.checkpointId
+          || page.totalChanges !== ready.totalChanges
+          || page.offset !== offset) {
+          throw new RewindRequestError('PLAN_STALE', '项目文件在展开列表时发生了变化。')
+        }
+        collected.push(...page.changes)
+        offset += page.changes.length
+        if (page.changes.length === 0) break
+      }
+      if (offset !== ready.totalChanges) throw new RewindRequestError('PLAN_STALE', '无法读取完整的文件列表。')
+      setPreview({ ...ready, changes: collected, truncated: false })
+    } catch (caught) {
+      if (caught instanceof RewindRequestError && caught.code === 'PLAN_STALE') setStale(true)
+      setError(friendlyError(caught))
+    } finally {
+      setLoadingDetails(false)
+    }
+  }
 
   const applyRestore = async (): Promise<void> => {
     if (ready === null || !canApply || applyPending.current) return
@@ -269,11 +308,9 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
       turn: ready.turn,
       checkpointId: ready.checkpointId,
     }
-    if (needsCodeRestore) {
-      if (ready.planId === undefined || ready.confirmation === undefined) return
-      body.planId = ready.planId
-      body.confirmation = ready.confirmation
-    }
+    if (ready.planId === undefined || ready.confirmation === undefined) return
+    body.planId = ready.planId
+    body.confirmation = ready.confirmation
     applyPending.current = true
     setApplying(true)
     setError(null)
@@ -286,21 +323,16 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
       const result = recordOf(await responseJson(response))
       const resultMode = requiredString(result.mode, 'mode')
       if (resultMode !== mode) throw new Error(`服务器返回了不匹配的回退模式：${resultMode}`)
-      setAcknowledged(false)
       if (mode === 'code') {
         const rescuePointId = requiredString(result.rescuePointId, 'rescuePointId')
-        setCompleted(`代码已恢复；当前对话保持不变。救援点 ${rescuePointId} 已保留。`)
+        setBackupId(rescuePointId)
+        setCompleted('项目文件已恢复；当前对话保持不变。操作前的文件已保存在自动备份中。')
         return
       }
       const childSessionId = requiredString(result.sessionId, 'sessionId')
-      if (mode === 'conversation') {
-        setCompleted('已创建此轮结束时的对话版本；当前代码保持不变。')
-      } else if (needsCodeRestore) {
-        const rescuePointId = requiredString(result.rescuePointId, 'rescuePointId')
-        setCompleted(`代码与对话已回到此轮结束时；操作前代码已保存在救援点 ${rescuePointId}。`)
-      } else {
-        setCompleted('已创建此轮结束时的对话版本；代码原本已与该轮一致。')
-      }
+      const rescuePointId = requiredString(result.rescuePointId, 'rescuePointId')
+      setBackupId(rescuePointId)
+      setCompleted('项目文件已恢复，并已创建从这里继续的新对话。操作前的文件已保存在自动备份中。')
       try {
         openSession(childSessionId)
         setOpen(false)
@@ -308,87 +340,98 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
         setError(`回退已完成，但无法自动打开新对话：${messageOf(navigationError)}`)
       }
     } catch (caught) {
-      setError(messageOf(caught))
+      if (caught instanceof RewindRequestError && (caught.code === 'PLAN_STALE' || caught.code === 'WORKSPACE_IN_USE')) {
+        setStale(true)
+      }
+      setError(friendlyError(caught))
     } finally {
       applyPending.current = false
       setApplying(false)
     }
   }
 
-  const actionLabel = mode === 'both' ? '同时回退' : mode === 'code' ? '恢复代码' : '回退对话'
+  const actionLabel = mode === 'both' ? '恢复并继续' : '恢复文件'
   const radioName = `dcl-rewind-${sessionId}-${String(matched.turn)}`
 
   return (
     <div className="dcl-rewind-tail">
-      <Tooltip label={`回退到第 ${String(matched.turn)} 轮结束时`} side="bottom">
-        <button type="button" className="dcl-rewind-trigger" onClick={show} aria-label={`回退到第 ${String(matched.turn)} 轮结束时`}>
-          <IconRefreshOutline16 size={16} />
+      <Tooltip label={`恢复到第 ${String(matched.turn)} 轮结束时的文件`} side="bottom">
+        <button type="button" className="dcl-rewind-trigger" onClick={show} aria-label={`恢复到第 ${String(matched.turn)} 轮结束时的文件`}>
+          <RewindIcon size={16} />
         </button>
       </Tooltip>
       <Modal
         open={open}
         onClose={close}
-        title={`回退到第 ${String(matched.turn)} 轮结束时`}
+        title={`恢复第 ${String(matched.turn)} 轮结束时的项目文件`}
         closeLabel="关闭"
-        description="选择要恢复的范围。原对话始终保留；涉及代码时会再次验证工作区并先创建救援点。"
+        description="先查看将要恢复的文件，再选择是否从这里继续新对话。原对话始终保留。"
         className="dcl-rewind-dialog"
         contentClassName="dcl-rewind-content"
         footer={(
           <>
             <Button variant="outline" onClick={close} disabled={applying}>取消</Button>
             <Button variant="primary" onClick={() => { void applyRestore() }} disabled={!canApply}>
-              {applying ? '正在回退…' : completed === null ? actionLabel : '已完成'}
+              {applying ? '正在恢复…' : completed === null ? actionLabel : '已完成'}
             </Button>
           </>
         )}
       >
         <div className="dcl-rewind-body">
-          {loading && <p className="dcl-rewind-status">正在读取此轮恢复点…</p>}
-          {preview?.status === 'pending' && <p className="dcl-rewind-status">此轮检查点仍在写入，请稍后重试。</p>}
-          {preview?.status === 'missing' && <p className="dcl-rewind-error">没有找到此轮检查点；该轮可能早于插件启用时间或已超过保留窗口。</p>}
-          {preview?.status === 'failed' && <p className="dcl-rewind-error">检查点创建失败：{preview.error}</p>}
+          {loading && <p className="dcl-rewind-status">正在检查可以恢复的项目文件…</p>}
+          {preview?.status === 'pending' && <p className="dcl-rewind-status">这一轮的文件状态仍在保存，请稍后重新检查。</p>}
+          {preview?.status === 'missing' && <p className="dcl-rewind-error">没有保存这一轮的文件状态。它可能早于 Turn Rewind 启用时间，或已经超过保留期限。</p>}
+          {preview?.status === 'failed' && <p className="dcl-rewind-error">无法读取这一轮的文件状态：{preview.error}</p>}
           {ready !== null && (
             <>
               <div className="dcl-rewind-options">
                 <label className="dcl-rewind-option" data-selected={mode === 'both'} data-disabled={applying}>
                   <input type="radio" name={radioName} checked={mode === 'both'} disabled={applying} onChange={() => { chooseMode('both') }} />
-                  <span className="dcl-rewind-option-content"><strong>同时恢复代码与对话</strong><span className="dcl-rewind-option-description">恢复工作区，并创建、打开此轮结束时的对话版本；原对话保留。</span></span>
+                  <span className="dcl-rewind-option-content"><strong>恢复文件并从这里继续</strong><span className="dcl-rewind-option-description">恢复项目文件，然后创建并打开从这一轮继续的新对话。原对话保留。</span></span>
                 </label>
-                <label className="dcl-rewind-option" data-selected={mode === 'code'} data-disabled={applying || ready.totalChanges === 0}>
-                  <input type="radio" name={radioName} checked={mode === 'code'} disabled={applying || ready.totalChanges === 0} onChange={() => { chooseMode('code') }} />
-                  <span className="dcl-rewind-option-content"><strong>仅恢复代码</strong><span className="dcl-rewind-option-description">{ready.totalChanges === 0 ? '当前代码已经与该轮一致，无需恢复。' : '对话保持当前位置，只把工作区恢复到此轮结束时。'}</span></span>
-                </label>
-                <label className="dcl-rewind-option" data-selected={mode === 'conversation'} data-disabled={applying}>
-                  <input type="radio" name={radioName} checked={mode === 'conversation'} disabled={applying} onChange={() => { chooseMode('conversation') }} />
-                  <span className="dcl-rewind-option-content"><strong>仅回退对话</strong><span className="dcl-rewind-option-description">创建并打开此轮结束时的对话版本；当前代码保持不变。</span></span>
+                <label className="dcl-rewind-option" data-selected={mode === 'code'} data-disabled={applying}>
+                  <input type="radio" name={radioName} checked={mode === 'code'} disabled={applying} onChange={() => { chooseMode('code') }} />
+                  <span className="dcl-rewind-option-content"><strong>只恢复文件</strong><span className="dcl-rewind-option-description">当前对话保持不变，只恢复这一轮结束时的项目文件。</span></span>
                 </label>
               </div>
               <div className="dcl-rewind-summary">
-                <span>{String(ready.totalChanges)} 个代码路径与该轮不同</span>
-                <span>{needsCodeRestore ? '恢复前自动创建救援点' : '不会修改当前代码'}</span>
+                <strong>将恢复 {String(ready.totalChanges)} 个文件</strong>
+                <span>{mode === 'both' ? '恢复后从这里继续新对话' : '当前对话保持不变'}</span>
               </div>
-              {needsCodeRestore && (ready.headChanged || ready.operationChanged) && (
-                <p className="dcl-rewind-warning">Git HEAD、分支或进行中的 Git 操作已经变化。为避免跨历史恢复，请先处理该变化后重新打开。</p>
+              {ready.totalChanges > 0 && !sharedBlocked && (
+                <p className="dcl-rewind-backup">恢复前会自动备份当前项目文件。恢复失败时会自动还原，不会让项目停留在只恢复了一部分的状态。</p>
               )}
-              {!restoresCode && (ready.headChanged || ready.operationChanged) && (
-                <p className="dcl-rewind-status">仅回退对话不会修改工作区，因此不受当前 HEAD 或 Git 操作状态影响。</p>
+              {sharedBlocked && (
+                <p className="dcl-rewind-error">这个项目目录还有其他对话正在运行。恢复文件会影响那些对话，因此当前操作已被阻止。请等待它们结束或先停止运行，再重新检查。</p>
               )}
-              {planMissing && <p className="dcl-rewind-error">代码恢复计划缺失，请关闭后重新打开回退窗口。</p>}
-              {ready.totalChanges === 0 && <p className="dcl-rewind-status">当前工作区已经与该轮结束状态一致；“同时回退”将只创建对话版本。</p>}
+              {driftBlocked && <p className="dcl-rewind-warning">项目的版本状态已经变化，当前无法安全恢复。请先完成或取消正在进行的版本控制操作，然后重新检查。</p>}
+              {planMissing && <p className="dcl-rewind-error">恢复信息已经失效，请重新检查文件。</p>}
+              {stale && <p className="dcl-rewind-error">项目文件在检查后又发生了变化。为避免覆盖新修改，这次恢复已失效，请重新检查。</p>}
+              {ready.totalChanges === 0 && <p className="dcl-rewind-status">项目文件已经和这一轮结束时一致，无需恢复。如需从这里开始新对话，请使用回复旁的 Branch 按钮。</p>}
               {ready.changes.length > 0 && (
                 <div className="dcl-rewind-files">
-                  {ready.changes.map(change => <div className="dcl-rewind-file" key={change.path}><code>{change.path}</code><span className="dcl-rewind-kind">{kindLabel(change.kind)}</span></div>)}
-                  {ready.truncated && <div className="dcl-rewind-file"><span>其余路径未在此处展开</span></div>}
+                  {ready.changes.map(change => <div className="dcl-rewind-file" key={change.path}><code>{change.path}</code><span className="dcl-rewind-kind">{fileRecoveryLabel(change.kind)}</span></div>)}
                 </div>
               )}
-              {needsCodeRestore && !driftBlocked && !planMissing && (
-                <label className="dcl-rewind-ack"><input type="checkbox" checked={acknowledged} disabled={applying} onChange={event => { setAcknowledged(event.currentTarget.checked) }} /><span>我确认恢复以上代码变化；当前代码会先保存到救援点，原对话不会被删除。</span></label>
+              {ready.truncated && (
+                <div className="dcl-rewind-file-actions"><Button variant="outline" size="sm" onClick={() => { void loadAllChanges() }} disabled={loadingDetails}>{loadingDetails ? '正在读取全部文件…' : `查看全部 ${String(ready.totalChanges)} 个文件`}</Button></div>
               )}
+              <details className="dcl-rewind-details">
+                <summary>操作详情</summary>
+                <dl>
+                  <dt>文件状态</dt><dd>{ready.checkpointId}</dd>
+                  <dt>对话边界</dt><dd>turn {String(ready.turn)} / seq {String(ready.turnEndSeq)}</dd>
+                  <dt>恢复授权</dt><dd>{ready.planId ?? '未生成'}</dd>
+                  <dt>版本状态变化</dt><dd>{ready.headChanged || ready.operationChanged ? '是' : '否'}</dd>
+                  <dt>共享目录</dt><dd>{ready.activeSessionIds.length > 0 ? ready.activeSessionIds.join(', ') : '无其他正在运行的对话'}</dd>
+                  {backupId !== null && <><dt>自动备份</dt><dd>{backupId}</dd></>}
+                </dl>
+              </details>
             </>
           )}
           {completed !== null && <p className="dcl-rewind-status">{completed}</p>}
           {error !== null && <p className="dcl-rewind-error">{error}</p>}
-          {!loading && preview?.status !== 'ready' && <Button className="dcl-rewind-retry" variant="outline" size="sm" onClick={() => { void load(true) }}>重试</Button>}
+          {!loading && (preview?.status !== 'ready' || stale || planMissing || sharedBlocked || driftBlocked) && <Button className="dcl-rewind-retry" variant="outline" size="sm" onClick={() => { void load(true) }}>重新检查</Button>}
         </div>
       </Modal>
     </div>
@@ -407,6 +450,10 @@ function decodePreview(value: unknown): Preview {
     const change = recordOf(entry)
     return { path: requiredString(change.path, 'path'), kind: requiredString(change.kind, 'kind') as ChangeKind }
   })
+  const activeSessionIdsValue = record.activeSessionIds
+  if (!Array.isArray(activeSessionIdsValue) || !activeSessionIdsValue.every(value => typeof value === 'string')) {
+    throw new Error('回退预览缺少 activeSessionIds')
+  }
   return {
     status,
     sessionId: requiredString(record.sessionId, 'sessionId'),
@@ -415,9 +462,12 @@ function decodePreview(value: unknown): Preview {
     turnEndSeq: requiredInteger(record.turnEndSeq, 'turnEndSeq'),
     totalChanges: requiredInteger(record.totalChanges, 'totalChanges'),
     changes,
+    offset: requiredInteger(record.offset, 'offset'),
     truncated: requiredBoolean(record.truncated, 'truncated'),
     headChanged: requiredBoolean(record.headChanged, 'headChanged'),
     operationChanged: requiredBoolean(record.operationChanged, 'operationChanged'),
+    activeSessionIds: activeSessionIdsValue as string[],
+    restoreBlocked: requiredBoolean(record.restoreBlocked, 'restoreBlocked'),
     ...(typeof record.planId === 'string' ? { planId: record.planId } : {}),
     ...(typeof record.confirmation === 'string' ? { confirmation: record.confirmation } : {}),
   }
@@ -462,9 +512,18 @@ async function responseJson(response: Response): Promise<unknown> {
   const value = await response.json() as unknown
   if (!response.ok) {
     const record = recordOf(value)
-    throw new Error(typeof record.error === 'string' ? record.error : `请求失败：${String(response.status)}`)
+    throw new RewindRequestError(
+      typeof record.code === 'string' ? record.code : 'REWIND_FAILED',
+      typeof record.error === 'string' ? record.error : `请求失败：${String(response.status)}`,
+    )
   }
   return value
+}
+
+class RewindRequestError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message)
+  }
 }
 
 function recordOf(value: unknown): Record<string, unknown> {
@@ -487,13 +546,35 @@ function requiredBoolean(value: unknown, name: string): boolean {
   return value
 }
 
-function kindLabel(kind: ChangeKind): string {
+/** Describe the user-visible result of restoring one changed file. */
+export function fileRecoveryLabel(kind: ChangeKind): string {
   switch (kind) {
-    case 'added': return '删除新增文件'
-    case 'deleted': return '恢复已删文件'
-    case 'modified': return '恢复内容'
-    case 'mode-changed': return '恢复权限'
-    case 'type-changed': return '恢复类型'
+    case 'added': return '移除后来新增的文件'
+    case 'deleted': return '找回文件'
+    case 'modified': return '恢复之前的版本'
+    case 'mode-changed': return '恢复文件权限'
+    case 'type-changed': return '恢复之前的文件类型'
+  }
+}
+
+function RewindIcon({ size }: { readonly size: number }): ReactNode {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M6.35 3.25 2.75 7l3.6 3.75M3.1 7h5.15a4.25 4.25 0 0 1 4.25 4.25v1.25" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function friendlyError(error: unknown): string {
+  if (!(error instanceof RewindRequestError)) return messageOf(error)
+  switch (error.code) {
+    case 'PLAN_STALE': return '项目文件在检查后又发生了变化。为避免覆盖新修改，请重新检查后再恢复。'
+    case 'WORKSPACE_IN_USE': return '这个项目目录还有其他对话正在运行。请等待它们结束或先停止运行，再重新检查。'
+    case 'WORKSPACE_LOCKED': return '另一个恢复操作正在处理这个项目目录。请等待它完成后重新检查。'
+    case 'NO_CHANGES': return '项目文件已经和这一轮结束时一致，无需恢复。需要新对话时请使用 Branch。'
+    case 'RESTORE_FAILED_ROLLED_BACK': return '恢复未能完成，项目文件已自动还原到操作前的状态。'
+    case 'CONVERSATION_REWIND_FAILED': return '文件已经恢复，但无法创建继续对话；项目文件已自动还原。'
+    default: return error.message
   }
 }
 

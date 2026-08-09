@@ -1,7 +1,6 @@
 declare module '@deepseek-ai/dsh-client-ui-primitives' {
   import type { ButtonHTMLAttributes, ComponentType, ReactNode } from 'react'
 
-  export const IconRefreshOutline16: ComponentType<{ size?: number; className?: string }>
   export const Tooltip: ComponentType<{ label: string; side?: string; children: ReactNode }>
   export const Modal: ComponentType<{
     open: boolean

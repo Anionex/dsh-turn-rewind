@@ -31,7 +31,7 @@ export class ChangeLedgerService extends Service {
     registerTools(ctx, this.engine)
     const checkpoints = new TurnCheckpointCoordinator(this.engine)
     ctx.inject(['agents'], (scope: Context) => { checkpoints.install(scope) })
-    ctx.inject(['httpServer', 'sessions', 'sessionQuery', 'apiProxy'], (scope: Context) => {
+    ctx.inject(['httpServer', 'sessions', 'sessionQuery', 'apiProxy', 'agents'], (scope: Context) => {
       installRewindHttp(scope, this.engine, checkpoints)
     })
     void this.engine.initialize().then((reconciled) => {

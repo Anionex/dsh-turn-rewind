@@ -43,6 +43,7 @@ interface ClientContextLike {
     };
     effect(setup: () => (() => void), label?: string): unknown;
 }
+type ChangeKind = 'added' | 'deleted' | 'modified' | 'mode-changed' | 'type-changed';
 /** Return the completed turn closed by one assistant-tail anchor. */
 export declare function selectRewindTurn(owner: TurnTailOwnerLike): RewindMatch | null;
 /** Browser plugin entry: bridge every finalized assistant action row to the rewind UI. */
@@ -52,4 +53,6 @@ export declare function apply(ctx: ClientContextLike): void;
 export declare function RewindTurnPortals({ sessionId, openSession, useSession }: RewindPortalBridgeProps): ReactNode;
 /** Turn-tail action and its review-first code/conversation restore dialog. */
 export declare function RewindTurnTail({ matched, sessionId, openSession }: RewindTailProps): ReactNode;
+/** Describe the user-visible result of restoring one changed file. */
+export declare function fileRecoveryLabel(kind: ChangeKind): string;
 export {};

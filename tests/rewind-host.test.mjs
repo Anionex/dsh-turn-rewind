@@ -222,6 +222,8 @@ test('HTTP preview mints a session-bound plan and code apply restores the checkp
   const applied = await request(handler, 'POST', '/turn-rewind', {
     mode: 'code',
     sessionId: 'session-web',
+    turn: 1,
+    checkpointId: preview.body.checkpointId,
     planId: preview.body.planId,
     confirmation: preview.body.confirmation,
   })
@@ -230,23 +232,18 @@ test('HTTP preview mints a session-bound plan and code apply restores the checkp
   assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'checkpoint\n')
 })
 
-test('conversation rewind validates the checkpoint boundary and delegates to the host fork lifecycle', async (t) => {
+test('conversation-only rewind is rejected so Branch owns conversation branching', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)
   const checkpoint = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-web', turn: 1, turnEndSeq: 4 })
-  const events = sessionEvents()
-  let forkRequest
   const ctx = {
     sessions: {
-      get: () => ({ id: 'session-web', header: { cwd: f.workspace }, events }),
+      get: () => ({ id: 'session-web', header: { cwd: f.workspace }, events: sessionEvents() }),
     },
     sessionQuery: { readSession: async () => { throw new Error('unexpected cold read') } },
     apiProxy: {
       sessions: {
-        async fork(request) {
-          forkRequest = request
-          return { result: { ok: true, value: { sessionId: 'session-child' } } }
-        },
+        async fork() { throw new Error('conversation-only mode must not fork') },
       },
     },
   }
@@ -254,11 +251,8 @@ test('conversation rewind validates the checkpoint boundary and delegates to the
   const result = await request(handler, 'POST', '/turn-rewind', {
     mode: 'conversation', sessionId: 'session-web', turn: 1, checkpointId: checkpoint.id,
   })
-  assert.equal(result.status, 200)
-  assert.equal(result.body.mode, 'conversation')
-  assert.equal(result.body.sessionId, 'session-child')
-  assert.equal(typeof forkRequest.rpcId, 'string')
-  assert.deepEqual(forkRequest.payload, { sessionId: 'session-web', atSeq: 4 })
+  assert.equal(result.status, 409)
+  assert.equal(result.body.code, 'INVALID_ARGUMENTS')
 })
 
 test('forked conversations inherit exact seeded-turn checkpoints from their parent lineage', async (t) => {
@@ -286,13 +280,15 @@ test('forked conversations inherit exact seeded-turn checkpoints from their pare
     },
   }
   const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
+  await writeFile(join(f.workspace, 'code.txt'), 'changed\n')
   const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-child&turn=1')
   assert.equal(preview.status, 200)
   assert.equal(preview.body.status, 'ready')
   assert.equal(preview.body.checkpointId, checkpoint.id)
 
   const result = await request(handler, 'POST', '/turn-rewind', {
-    mode: 'conversation', sessionId: 'session-child', turn: 1, checkpointId: checkpoint.id,
+    mode: 'both', sessionId: 'session-child', turn: 1, checkpointId: checkpoint.id,
+    planId: preview.body.planId, confirmation: preview.body.confirmation,
   })
   assert.equal(result.status, 200)
   assert.equal(result.body.sessionId, 'session-grandchild')
@@ -380,7 +376,7 @@ test('combined rewind restores code before creating the conversation child', asy
   assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'checkpoint\n')
 })
 
-test('combined rewind without code drift creates only the conversation child', async (t) => {
+test('rewind with no file changes does not degrade into Branch', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)
   const checkpoint = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-web', turn: 1, turnEndSeq: 4 })
@@ -399,14 +395,12 @@ test('combined rewind without code drift creates only the conversation child', a
   const result = await request(handler, 'POST', '/turn-rewind', {
     mode: 'both', sessionId: 'session-web', turn: 1, checkpointId: checkpoint.id,
   })
-  assert.equal(result.status, 200)
-  assert.equal(result.body.mode, 'both')
-  assert.equal(result.body.sessionId, 'session-child')
-  assert.equal(result.body.rescuePointId, undefined)
+  assert.equal(result.status, 409)
+  assert.equal(result.body.code, 'NO_CHANGES')
   assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'checkpoint\n')
 })
 
-test('combined rewind without a plan rejects code drift introduced after preview', async (t) => {
+test('file changes after preview invalidate the restore plan', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)
   const checkpoint = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-web', turn: 1, turnEndSeq: 4 })
@@ -426,11 +420,13 @@ test('combined rewind without a plan rejects code drift introduced after preview
     },
   }
   const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
+  await writeFile(join(f.workspace, 'code.txt'), 'changed before preview\n')
   const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-web&turn=1')
-  assert.equal(preview.body.totalChanges, 0)
+  assert.equal(preview.body.totalChanges, 1)
   await writeFile(join(f.workspace, 'code.txt'), 'changed after preview\n')
   const result = await request(handler, 'POST', '/turn-rewind', {
     mode: 'both', sessionId: 'session-web', turn: 1, checkpointId: checkpoint.id,
+    planId: preview.body.planId, confirmation: preview.body.confirmation,
   })
   assert.equal(result.status, 409)
   assert.equal(result.body.code, 'PLAN_STALE')
@@ -464,6 +460,198 @@ test('combined rewind compensates code when conversation creation fails', async 
   assert.equal(result.status, 409)
   assert.equal(result.body.code, 'RESTORE_FAILED_ROLLED_BACK')
   assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'changed\n')
+})
+
+test('file preview is concise and exposes paged access to the complete list', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const checkpoint = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-web', turn: 1, turnEndSeq: 4 })
+  for (let index = 0; index < 12; index += 1) {
+    await writeFile(join(f.workspace, `later-${String(index).padStart(2, '0')}.txt`), 'later\n')
+  }
+  const ctx = {
+    sessions: { get: () => ({ id: 'session-web', header: { cwd: f.workspace }, events: sessionEvents() }) },
+    sessionQuery: { readSession: async () => { throw new Error('unexpected cold read') } },
+    apiProxy: { sessions: { fork: async () => { throw new Error('unexpected fork') } } },
+  }
+  const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-web&turn=1')
+  assert.equal(preview.body.checkpointId, checkpoint.id)
+  assert.equal(preview.body.totalChanges, 12)
+  assert.equal(preview.body.changes.length, 8)
+  assert.equal(preview.body.offset, 0)
+  assert.equal(preview.body.truncated, true)
+  assert.equal(typeof preview.body.planId, 'string')
+
+  const details = await request(handler, 'GET', '/turn-rewind?sessionId=session-web&turn=1&details=1&offset=8&limit=200')
+  assert.equal(details.body.changes.length, 4)
+  assert.equal(details.body.offset, 8)
+  assert.equal(details.body.truncated, false)
+  assert.equal(details.body.planId, undefined)
+})
+
+test('another active session in the same worktree blocks preview and apply', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const checkpoint = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-source', turn: 1, turnEndSeq: 4 })
+  await writeFile(join(f.workspace, 'code.txt'), 'changed\n')
+  const source = { id: 'session-source', header: { cwd: f.workspace }, events: sessionEvents() }
+  const sibling = { id: 'session-sibling', header: { cwd: f.workspace }, events: sessionEvents() }
+  const ctx = {
+    sessions: { get: id => id === source.id ? source : id === sibling.id ? sibling : undefined },
+    agents: { list: () => [idleAgent('session-source', f.workspace, 1, 4), { ...idleAgent('session-sibling', f.workspace, 1, 4), status: 'running' }] },
+    sessionQuery: { readSession: async () => { throw new Error('unexpected cold read') } },
+    apiProxy: { sessions: { fork: async () => { throw new Error('unexpected fork') } } },
+  }
+  const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-source&turn=1')
+  assert.equal(preview.status, 200)
+  assert.equal(preview.body.restoreBlocked, true)
+  assert.deepEqual(preview.body.activeSessionIds, ['session-sibling'])
+  assert.equal(preview.body.planId, undefined)
+
+  const plan = await f.engine.planRestore({ cwd: f.workspace, restorePointId: checkpoint.id, sessionId: 'session-source' })
+  const applied = await request(handler, 'POST', '/turn-rewind', {
+    mode: 'code', sessionId: 'session-source', turn: 1, checkpointId: checkpoint.id,
+    planId: plan.id, confirmation: plan.confirmation,
+  })
+  assert.equal(applied.status, 409)
+  assert.equal(applied.body.code, 'WORKSPACE_IN_USE')
+  assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'changed\n')
+})
+
+test('concurrent branch restores cannot both apply stale previews', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const pointA = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-a', turn: 1, turnEndSeq: 4 })
+  const pointB = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-b', turn: 1, turnEndSeq: 4 })
+  await writeFile(join(f.workspace, 'code.txt'), 'changed\n')
+  const events = sessionEvents()
+  const sessions = new Map([
+    ['session-a', { id: 'session-a', header: { cwd: f.workspace }, events }],
+    ['session-b', { id: 'session-b', header: { cwd: f.workspace }, events }],
+  ])
+  const ctx = {
+    sessions: { get: id => sessions.get(id) },
+    sessionQuery: { readSession: async () => { throw new Error('unexpected cold read') } },
+    apiProxy: { sessions: { fork: async () => { throw new Error('unexpected fork') } } },
+  }
+  const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
+  const [previewA, previewB] = await Promise.all([
+    request(handler, 'GET', '/turn-rewind?sessionId=session-a&turn=1'),
+    request(handler, 'GET', '/turn-rewind?sessionId=session-b&turn=1'),
+  ])
+  const [resultA, resultB] = await Promise.all([
+    request(handler, 'POST', '/turn-rewind', {
+      mode: 'code', sessionId: 'session-a', turn: 1, checkpointId: pointA.id,
+      planId: previewA.body.planId, confirmation: previewA.body.confirmation,
+    }),
+    request(handler, 'POST', '/turn-rewind', {
+      mode: 'code', sessionId: 'session-b', turn: 1, checkpointId: pointB.id,
+      planId: previewB.body.planId, confirmation: previewB.body.confirmation,
+    }),
+  ])
+  assert.deepEqual([resultA.status, resultB.status].sort(), [200, 409])
+  const failed = resultA.status === 409 ? resultA : resultB
+  assert.ok(['PLAN_STALE', 'WORKSPACE_LOCKED'].includes(failed.body.code))
+  assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'checkpoint\n')
+})
+
+test('a child checkpoint takes precedence and sibling checkpoints never leak', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const parentPoint = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-parent', turn: 1, turnEndSeq: 4 })
+  await writeFile(join(f.workspace, 'code.txt'), 'sibling A snapshot\n')
+  const siblingPoint = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-a', turn: 1, turnEndSeq: 4 })
+  await writeFile(join(f.workspace, 'code.txt'), 'child snapshot\n')
+  const childPoint = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-child', turn: 1, turnEndSeq: 4 })
+  await writeFile(join(f.workspace, 'code.txt'), 'current\n')
+  const events = sessionEvents()
+  const parent = { id: 'session-parent', header: { cwd: f.workspace }, events }
+  const child = { id: 'session-child', header: { cwd: f.workspace, parentSession: parent.id, seedLength: 5 }, events }
+  const siblingA = { id: 'session-a', header: { cwd: f.workspace, parentSession: parent.id, seedLength: 5 }, events }
+  const siblingB = { id: 'session-b', header: { cwd: f.workspace, parentSession: parent.id, seedLength: 5 }, events }
+  const sessions = new Map([parent, child, siblingA, siblingB].map(session => [session.id, session]))
+  const ctx = {
+    sessions: { get: id => sessions.get(id) },
+    sessionQuery: { readSession: async () => { throw new Error('unexpected cold read') } },
+    apiProxy: { sessions: { fork: async () => { throw new Error('unexpected fork') } } },
+  }
+  const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
+  const [childPreview, siblingAPreview, siblingBPreview] = await Promise.all([
+    request(handler, 'GET', '/turn-rewind?sessionId=session-child&turn=1'),
+    request(handler, 'GET', '/turn-rewind?sessionId=session-a&turn=1'),
+    request(handler, 'GET', '/turn-rewind?sessionId=session-b&turn=1'),
+  ])
+  assert.equal(childPreview.body.checkpointId, childPoint.id)
+  assert.equal(siblingAPreview.body.checkpointId, siblingPoint.id)
+  assert.equal(siblingBPreview.body.checkpointId, parentPoint.id)
+})
+
+test('multi-level forks inherit checkpoints only through every seed boundary after restart', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const point = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-root', turn: 1, turnEndSeq: 4 })
+  const events = sessionEvents()
+  const stored = new Map([
+    ['session-leaf', { session: { cwd: f.workspace, parentSession: 'session-middle', seedLength: 5 }, events }],
+    ['session-middle', { session: { cwd: f.workspace, parentSession: 'session-root', seedLength: 5 }, events }],
+    ['session-root', { session: { cwd: f.workspace }, events }],
+  ])
+  const ctx = {
+    sessions: { get: () => undefined },
+    sessionQuery: { readSession: async id => stored.get(id) ?? Promise.reject(new Error(`missing ${id}`)) },
+    apiProxy: { sessions: { fork: async () => { throw new Error('unexpected fork') } } },
+  }
+  const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-leaf&turn=1')
+  assert.equal(preview.status, 200)
+  assert.equal(preview.body.checkpointId, point.id)
+
+  stored.set('session-middle', { session: { cwd: f.workspace, parentSession: 'session-root', seedLength: 4 }, events })
+  const blocked = await request(handler, 'GET', '/turn-rewind?sessionId=session-leaf&turn=1')
+  assert.equal(blocked.body.status, 'missing')
+})
+
+test('invalid fork lineage fails safely while a cleaned checkpoint reports missing', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const events = sessionEvents()
+  const scenarios = [
+    new Map([['leaf', { session: { cwd: f.workspace, parentSession: 'missing', seedLength: 5 }, events }]]),
+    new Map([
+      ['leaf', { session: { cwd: f.workspace, parentSession: 'parent', seedLength: 5 }, events }],
+      ['parent', { session: { cwd: f.workspace, parentSession: 'leaf', seedLength: 5 }, events }],
+    ]),
+    new Map([
+      ['leaf', { session: { cwd: f.workspace, parentSession: 'parent', seedLength: 5 }, events }],
+      ['parent', { session: { cwd: f.workspace }, events: [{ ...events[4], seq: 5 }].filter(Boolean) }],
+    ]),
+    new Map([['leaf', { session: { cwd: f.workspace, parentSession: 'parent' }, events }]]),
+  ]
+  for (const stored of scenarios) {
+    const ctx = {
+      sessions: { get: () => undefined },
+      sessionQuery: { readSession: async id => stored.get(id) ?? Promise.reject(new Error(`missing ${id}`)) },
+      apiProxy: { sessions: { fork: async () => { throw new Error('unexpected fork') } } },
+    }
+    const result = await request(createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine)), 'GET', '/turn-rewind?sessionId=leaf&turn=1')
+    assert.equal(result.status, 409)
+    assert.equal(result.body.code, 'PLAN_STALE')
+  }
+
+  const clean = new Map([
+    ['leaf', { session: { cwd: f.workspace, parentSession: 'parent', seedLength: 5 }, events }],
+    ['parent', { session: { cwd: f.workspace }, events }],
+  ])
+  const cleanCtx = {
+    sessions: { get: () => undefined },
+    sessionQuery: { readSession: async id => clean.get(id) ?? Promise.reject(new Error(`missing ${id}`)) },
+    apiProxy: { sessions: { fork: async () => { throw new Error('unexpected fork') } } },
+  }
+  const missing = await request(createRewindHttpHandler(cleanCtx, f.engine, new TurnCheckpointCoordinator(f.engine)), 'GET', '/turn-rewind?sessionId=leaf&turn=1')
+  assert.equal(missing.status, 200)
+  assert.equal(missing.body.status, 'missing')
 })
 
 async function request(handler, method, url, body) {

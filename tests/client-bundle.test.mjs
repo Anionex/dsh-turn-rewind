@@ -24,7 +24,7 @@ test('browser bundle registers the turn-tail selector and anchors only finalized
             }
             if (id === 'react-dom') return { createPortal: value => value }
             if (id === '@deepseek-ai/dsh-client-ui-primitives') {
-              return { Button() {}, IconRefreshOutline16() {}, Modal() {}, Tooltip() {} }
+              return { Button() {}, Modal() {}, Tooltip() {} }
             }
             throw new Error(`unexpected browser dependency ${id}`)
           })
@@ -43,6 +43,10 @@ test('browser bundle registers the turn-tail selector and anchors only finalized
     { turn: 3, seq: 7 },
   )
   assert.equal(plugin.selectRewindTurn({ seq: 1, nodes: [{ kind: 'user', seq: 1 }] }), null)
+  assert.deepEqual(
+    ['added', 'deleted', 'modified', 'mode-changed', 'type-changed'].map(kind => plugin.fileRecoveryLabel(kind)),
+    ['移除后来新增的文件', '找回文件', '恢复之前的版本', '恢复文件权限', '恢复之前的文件类型'],
+  )
 
   let registration
   const style = { dataset: {}, remove() {} }
@@ -75,12 +79,11 @@ test('browser bundle registers the turn-tail selector and anchors only finalized
   assert.equal(typeof registration.component, 'function')
 })
 
-test('rewind dialog scopes restore plans by mode and opens conversation results', async () => {
+test('rewind dialog restores files in two modes without a duplicate confirmation', async () => {
   const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
   const Button = function Button() {}
   const primitives = {
     Button,
-    IconRefreshOutline16: function IconRefreshOutline16() {},
     Modal: function Modal() {},
     Tooltip: function Tooltip() {},
   }
@@ -123,13 +126,14 @@ test('rewind dialog scopes restore plans by mode and opens conversation results'
 
   const ready = {
     status: 'ready', sessionId: 'session-source', turn: 3, checkpointId: 'rp_turn', turnEndSeq: 9,
-    totalChanges: 1, changes: [{ path: 'code.txt', kind: 'modified' }], truncated: false,
-    headChanged: false, operationChanged: false, planId: 'plan_1', confirmation: 'RESTORE-1',
+    totalChanges: 1, changes: [{ path: 'code.txt', kind: 'modified' }], offset: 0, truncated: false,
+    headChanged: false, operationChanged: false, activeSessionIds: [], restoreBlocked: false,
+    planId: 'plan_1', confirmation: 'RESTORE-1',
   }
 
-  async function run(mode, preview, acknowledged, result) {
+  async function run(mode, preview, result) {
     stateIndex = 0
-    values = [true, false, preview, mode, acknowledged, false, null, null]
+    values = [true, false, preview, mode, false, false, false, null, null, null]
     let request
     let opened
     context.fetch = async (url, options) => {
@@ -148,46 +152,24 @@ test('rewind dialog scopes restore plans by mode and opens conversation results'
     return { primary, request, opened }
   }
 
-  const both = await run('both', ready, true, { mode: 'both', sessionId: 'session-child', rescuePointId: 'rp_rescue' })
+  const both = await run('both', ready, { mode: 'both', sessionId: 'session-child', rescuePointId: 'rp_rescue' })
+  assert.equal(both.primary.props.children, '恢复并继续')
   assert.equal(both.opened, 'session-child')
   assert.deepEqual(JSON.parse(both.request.options.body), {
     mode: 'both', sessionId: 'session-source', turn: 3, checkpointId: 'rp_turn',
     planId: 'plan_1', confirmation: 'RESTORE-1',
   })
 
-  const code = await run('code', ready, true, { mode: 'code', rescuePointId: 'rp_code_rescue' })
+  const code = await run('code', ready, { mode: 'code', rescuePointId: 'rp_code_rescue' })
+  assert.equal(code.primary.props.children, '恢复文件')
   assert.equal(code.opened, undefined)
   assert.deepEqual(JSON.parse(code.request.options.body), {
     mode: 'code', sessionId: 'session-source', turn: 3, checkpointId: 'rp_turn',
     planId: 'plan_1', confirmation: 'RESTORE-1',
   })
 
-  const conversation = await run(
-    'conversation',
-    { ...ready, headChanged: true },
-    false,
-    { mode: 'conversation', sessionId: 'session-conversation' },
-  )
-  assert.equal(conversation.primary.props.disabled, false)
-  assert.equal(conversation.opened, 'session-conversation')
-  assert.deepEqual(JSON.parse(conversation.request.options.body), {
-    mode: 'conversation', sessionId: 'session-source', turn: 3, checkpointId: 'rp_turn',
-  })
-
-  const noCode = await run(
-    'both',
-    { ...ready, totalChanges: 0, changes: [], headChanged: true, planId: undefined, confirmation: undefined },
-    false,
-    { mode: 'both', sessionId: 'session-no-code' },
-  )
-  assert.equal(noCode.primary.props.disabled, false)
-  assert.equal(noCode.opened, 'session-no-code')
-  assert.deepEqual(JSON.parse(noCode.request.options.body), {
-    mode: 'both', sessionId: 'session-source', turn: 3, checkpointId: 'rp_turn',
-  })
-
   stateIndex = 0
-  values = [true, false, { ...ready, headChanged: true }, 'both', true, false, null, null]
+  values = [true, false, { ...ready, headChanged: true }, 'both', false, false, false, null, null, null]
   const blockedTree = plugin.RewindTurnTail({
     matched: { turn: 3, seq: 8 }, sessionId: 'session-source', openSession() {},
   })
@@ -195,21 +177,25 @@ test('rewind dialog scopes restore plans by mode and opens conversation results'
   assert.equal(modal.props.className, 'dcl-rewind-dialog')
   assert.equal(modal.props.contentClassName, 'dcl-rewind-content')
   const trigger = findNode(blockedTree, node => node.type === 'button' && node.props.className === 'dcl-rewind-trigger')
-  assert.equal(trigger.props['aria-label'], '回退到第 3 轮结束时')
+  assert.equal(trigger.props['aria-label'], '恢复到第 3 轮结束时的文件')
   assert.equal(findNode(trigger, node => node.type === 'span' && node.props.children === '回退'), undefined)
+  assert.ok(findNode(trigger, node => typeof node.type === 'function' && node.type.name === 'RewindIcon'))
   const blocked = findNode(blockedTree, node => node.type === Button && node.props.variant === 'primary')
   assert.equal(blocked.props.disabled, true)
+  assert.equal(findNode(blockedTree, node => node.type === 'input' && node.props.type === 'checkbox'), undefined)
+  assert.equal(findNode(blockedTree, node => node.type === 'strong' && node.props.children === '仅回退对话'), undefined)
 
   stateIndex = 0
-  values = [true, false, { ...ready, totalChanges: 0, changes: [] }, 'code', false, false, null, null]
-  const noCodeTree = plugin.RewindTurnTail({
+  values = [true, false, { ...ready, totalChanges: 0, changes: [], planId: undefined, confirmation: undefined }, 'both', false, false, false, null, null, null]
+  const noFilesTree = plugin.RewindTurnTail({
     matched: { turn: 3, seq: 8 }, sessionId: 'session-source', openSession() {},
   })
-  const codeUnavailable = findNode(noCodeTree, node => node.type === Button && node.props.variant === 'primary')
-  assert.equal(codeUnavailable.props.disabled, true)
+  const noFiles = findNode(noFilesTree, node => node.type === Button && node.props.variant === 'primary')
+  assert.equal(noFiles.props.disabled, true)
+  assert.ok(findNode(noFilesTree, node => node.type === 'p' && String(node.props.children).includes('Branch')))
 
   stateIndex = 0
-  values = [true, false, { status: 'failed', error: 'transient' }, 'both', false, false, null, null]
+  values = [true, false, { status: 'failed', error: 'transient' }, 'both', false, false, false, null, null, null]
   let retryUrl
   context.fetch = async (url) => {
     retryUrl = url
