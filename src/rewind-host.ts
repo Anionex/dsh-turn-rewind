@@ -26,7 +26,6 @@ interface AgentLike {
   readonly id: string
   readonly status: 'idle' | 'running'
   readonly session: SessionLike
-  runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>
 }
 
 interface AgentsLike {
@@ -64,6 +63,14 @@ interface HttpServerLike {
 
 interface ApiProxyLike {
   readonly sessions: {
+    create(request: {
+      readonly rpcId: string
+      readonly payload: { readonly cwd: string }
+    }): Promise<{
+      readonly result:
+        | { readonly ok: true; readonly value: { readonly sessionId: string } }
+        | { readonly ok: false; readonly error: { readonly message: string } }
+    }>
     fork(request: {
       readonly rpcId: string
       readonly payload: { readonly sessionId: string; readonly atSeq: number }
@@ -73,12 +80,6 @@ interface ApiProxyLike {
         | { readonly ok: false; readonly error: { readonly message: string } }
     }>
   }
-}
-
-interface RetryCapture {
-  readonly ctx: Pick<Context, 'logger'>
-  readonly agent: AgentLike
-  readonly turnEndSeq: number
 }
 
 declare module 'cordis' {
@@ -91,8 +92,15 @@ declare module 'cordis' {
   }
 
   interface Events {
-    'agent/created'(payload: { readonly agent: AgentLike }): void
-    'agent/status'(payload: { readonly agent: AgentLike; readonly status: 'idle' | 'running' }): void
+    'agent/pre-step'(
+      payload: {
+        readonly agent: AgentLike
+        readonly turn: number
+        readonly step: number
+        readonly signal: AbortSignal
+      },
+      next: () => Promise<unknown>,
+    ): Promise<unknown>
   }
 }
 
@@ -101,20 +109,21 @@ const BODY_LIMIT = 64 * 1024
 const INITIAL_CHANGE_PREVIEW_LIMIT = 8
 const MAX_CHANGE_PAGE_SIZE = 200
 
-/** In-memory capture status and same-boundary retry state for turn checkpoints. */
+/** Capture each turn before its opening user message can trigger model or tool work. */
 export class TurnCheckpointCoordinator {
-  private readonly scheduled = new Map<string, number>()
+  private readonly captures = new Map<string, Promise<void>>()
   private readonly pending = new Set<string>()
   private readonly failures = new Map<string, string>()
-  private readonly retries = new Map<string, RetryCapture>()
   private readonly workspaceTails = new Map<string, Promise<void>>()
 
   constructor(private readonly engine: ChangeLedgerEngine) {}
 
-  /** Install idle-boundary capture listeners while the Agent service is present. */
+  /** Install the first-step gate; checkpoint failures are recorded but never reject the user turn. */
   install(ctx: Context): void {
-    const schedule = (agent: AgentLike): void => { this.schedule(ctx, agent) }
-    ctx.on('agent/status', ({ agent, status }) => { if (status === 'idle') schedule(agent) })
+    ctx.on('agent/pre-step', async ({ agent, turn, step, signal }, next) => {
+      if (step === 1) await this.capture(ctx, agent, turn, signal)
+      return next()
+    }, { prepend: true })
   }
 
   /** Current capture state for a session turn when no durable checkpoint exists yet. */
@@ -125,52 +134,47 @@ export class TurnCheckpointCoordinator {
     return error === undefined ? { status: 'missing' } : { status: 'failed', error }
   }
 
-  /** Retry a failed capture only while the Agent remains at the same idle turn boundary. */
-  retry(sessionId: string, turn: number): boolean {
-    const key = checkpointKey(sessionId, turn)
-    const target = this.retries.get(key)
-    if (target === undefined || target.agent.status !== 'idle') return false
-    const end = target.agent.session.events.findLast(event => event.type === 'turn/end')
-    if (end?.seq !== target.turnEndSeq || end.data.turn !== turn) {
-      this.retries.delete(key)
-      return false
+  private async capture(
+    ctx: Pick<Context, 'logger'>,
+    agent: AgentLike,
+    turn: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const key = checkpointKey(agent.id, turn)
+    const existing = this.captures.get(key)
+    if (existing !== undefined) {
+      await existing
+      return
     }
-    this.schedule(target.ctx, target.agent)
-    return this.pending.has(key)
-  }
-
-  private schedule(ctx: Pick<Context, 'logger'>, agent: AgentLike): void {
-    if (agent.status !== 'idle') return
     const cwd = agent.session.header.cwd
     if (cwd === undefined) return
-    const end = agent.session.events.findLast(event => event.type === 'turn/end')
-    const turn = end?.data.turn
-    if (end === undefined || !Number.isSafeInteger(turn) || (turn as number) < 0) return
-    if ((this.scheduled.get(agent.id) ?? -1) >= end.seq) return
-    this.scheduled.set(agent.id, end.seq)
-    const key = checkpointKey(agent.id, turn as number)
+    const start = agent.session.events.findLast(event => event.type === 'turn/start' && event.data.turn === turn)
+    if (start === undefined) {
+      this.recordFailure(ctx, agent.id, turn, new Error('turn/start is unavailable before the first step'))
+      return
+    }
     this.pending.add(key)
     this.failures.delete(key)
-    this.retries.delete(key)
-    try {
-      void agent.runMaintenance(async (signal) => {
+    const capture = (async () => {
+      try {
         const workspace = await discoverRepositoryRoot(cwd, signal)
         await this.serializeWorkspace(workspace, signal, async () => {
           await this.engine.createTurnCheckpoint({
             cwd: workspace,
             sessionId: agent.id,
-            turn: turn as number,
-            turnEndSeq: end.seq,
+            turn,
+            turnStartSeq: start.seq,
             signal,
           })
         })
-      }).catch((error: unknown) => {
-        this.recordFailure(ctx, agent, key, turn as number, end.seq, error)
-      }).finally(() => { this.pending.delete(key) })
-    } catch (error) {
-      this.pending.delete(key)
-      this.recordFailure(ctx, agent, key, turn as number, end.seq, error)
-    }
+      } catch (error) {
+        this.recordFailure(ctx, agent.id, turn, error)
+      } finally {
+        this.pending.delete(key)
+      }
+    })()
+    this.captures.set(key, capture)
+    await capture
   }
 
   private async serializeWorkspace(workspace: string, signal: AbortSignal, task: () => Promise<void>): Promise<void> {
@@ -189,17 +193,13 @@ export class TurnCheckpointCoordinator {
 
   private recordFailure(
     ctx: Pick<Context, 'logger'>,
-    agent: AgentLike,
-    key: string,
+    sessionId: string,
     turn: number,
-    turnEndSeq: number,
     error: unknown,
   ): void {
-    if (this.scheduled.get(agent.id) === turnEndSeq) this.scheduled.delete(agent.id)
     const message = errorMessage(error)
-    this.failures.set(key, message)
-    this.retries.set(key, { ctx, agent, turnEndSeq })
-    ctx.logger.warn(`[change-ledger] turn checkpoint failed for ${agent.id} turn ${String(turn)}: ${message}`)
+    this.failures.set(checkpointKey(sessionId, turn), message)
+    ctx.logger.warn(`[turn-rewind] checkpoint failed for ${sessionId} turn ${String(turn)}: ${message}`)
   }
 }
 
@@ -227,40 +227,52 @@ export function createRewindHttpHandler(
       if (request.method === 'GET') {
         const url = new URL(request.url ?? REWIND_HTTP_PATH, 'http://dsh.local')
         const sessionId = requiredText(url.searchParams.get('sessionId'), 'sessionId')
-        const turn = nonNegativeInteger(url.searchParams.get('turn'), 'turn')
+        const messageSeq = nonNegativeInteger(url.searchParams.get('messageSeq'), 'messageSeq')
         const detailsOnly = url.searchParams.get('details') === '1'
         const offset = nonNegativeInteger(url.searchParams.get('offset') ?? '0', 'offset')
         const limit = pageSize(url.searchParams.get('limit'), detailsOnly ? MAX_CHANGE_PAGE_SIZE : INITIAL_CHANGE_PREVIEW_LIMIT)
-        const checkpoint = await resolveTurnCheckpoint(ctx, engine, sessionId, turn)
+        const { target, checkpoint } = await resolveMessageCheckpoint(ctx, engine, sessionId, messageSeq)
         if (checkpoint === undefined) {
-          if (url.searchParams.get('retry') === '1') coordinator.retry(sessionId, turn)
-          json(response, 200, coordinator.state(sessionId, turn))
+          json(response, 200, coordinator.state(sessionId, target.turn))
           return
         }
         const inspection = await engine.inspect({ cwd: checkpoint.cwd, restorePointId: checkpoint.id })
-        const activeSessionIds = await sharedWorkspaceSessions(ctx.agents, checkpoint.cwd, sessionId)
+        const activeSessionIds = await sharedWorkspaceSessions(ctx.agents, checkpoint.cwd)
         const changes = inspection.changes.slice(offset, offset + limit)
         const common = {
-          status: 'ready', sessionId, turn, checkpointId: checkpoint.id,
-          turnEndSeq: checkpoint.turnEndSeq,
+          status: 'ready', sessionId, messageSeq, turn: checkpoint.turn, checkpointId: checkpoint.id,
+          turnStartSeq: checkpoint.turnStartSeq,
           totalChanges: inspection.changes.length,
           changes: changes.map(change => ({ path: change.path, kind: change.kind })),
           offset,
           truncated: offset + changes.length < inspection.changes.length,
           headChanged: inspection.headChanged,
           operationChanged: inspection.operationChanged,
+          checkpointHead: inspection.restorePoint.head,
+          checkpointBranch: inspection.restorePoint.branch,
+          checkpointOperation: inspection.restorePoint.operation,
+          currentHead: inspection.currentHead,
+          currentBranch: inspection.currentBranch,
+          currentOperation: inspection.currentOperation,
           activeSessionIds,
-          restoreBlocked: activeSessionIds.length > 0,
+          restoreBlocked: activeSessionIds.length > 0 || inspection.operationChanged,
         } as const
         if (inspection.changes.length === 0) {
           json(response, 200, common)
           return
         }
-        if (detailsOnly || activeSessionIds.length > 0) {
+        if (detailsOnly || activeSessionIds.length > 0 || inspection.operationChanged) {
           json(response, 200, common)
           return
         }
-        const plan = await engine.planRestore({ cwd: checkpoint.cwd, restorePointId: checkpoint.id, sessionId })
+        const plan = await engine.planRestore({
+          cwd: checkpoint.cwd,
+          restorePointId: checkpoint.id,
+          sessionId,
+          allowHeadChange: inspection.headChanged,
+          expectedCurrentTreeHash: inspection.currentTreeHash,
+          expectedRepository: inspection.currentRepository,
+        })
         json(response, 200, { ...common, planId: plan.id, confirmation: plan.confirmation })
         return
       }
@@ -271,10 +283,10 @@ export function createRewindHttpHandler(
           throw new ChangeLedgerError('INVALID_ARGUMENTS', 'mode must be "code" or "both"')
         }
         const sessionId = requiredText(body.sessionId, 'sessionId')
-        const turn = nonNegativeInteger(body.turn, 'turn')
+        const messageSeq = nonNegativeInteger(body.messageSeq, 'messageSeq')
         const checkpointId = requiredText(body.checkpointId, 'checkpointId')
-        const checkpoint = await checkpointForRequest(ctx, engine, sessionId, turn, checkpointId)
-        const activeSessionIds = await sharedWorkspaceSessions(ctx.agents, checkpoint.cwd, sessionId)
+        const checkpoint = await checkpointForRequest(ctx, engine, sessionId, messageSeq, checkpointId)
+        const activeSessionIds = await sharedWorkspaceSessions(ctx.agents, checkpoint.cwd)
         if (activeSessionIds.length > 0) {
           throw new ChangeLedgerError(
             'WORKSPACE_IN_USE',
@@ -293,7 +305,7 @@ export function createRewindHttpHandler(
         }
 
         try {
-          const fork = await createConversationFork(ctx, sessionId, turn, checkpoint.turnEndSeq)
+          const fork = await createConversationRestart(ctx, sessionId, checkpoint)
           json(response, 200, { status: 'completed', mode, sessionId: fork.sessionId, ...restoreResult })
         } catch (forkError) {
           if (restoreResult === undefined) throw forkError
@@ -337,25 +349,34 @@ async function readSession(
   return { id: sessionId, header: stored.session, events: stored.events }
 }
 
-async function resolveTurnCheckpoint(
+interface MessageTarget {
+  readonly messageSeq: number
+  readonly turn: number
+  readonly turnStartSeq: number
+  readonly previousTurnEndSeq?: number
+  readonly cwd: string
+}
+
+interface MessageCheckpoint extends MessageTarget {
+  readonly id: string
+}
+
+async function resolveMessageCheckpoint(
   ctx: Pick<Context, 'sessions' | 'sessionQuery'>,
   engine: ChangeLedgerEngine,
   sessionId: string,
-  turn: number,
-): Promise<{ readonly id: string; readonly turnEndSeq: number; readonly cwd: string } | undefined> {
+  messageSeq: number,
+): Promise<{ readonly target: MessageTarget; readonly checkpoint?: MessageCheckpoint }> {
   let current = await readSession(ctx, sessionId)
-  const cwd = current.header.cwd
-  if (cwd === undefined) throw new ChangeLedgerError('WORKSPACE_REQUIRED', `session ${sessionId} has no workspace`)
-  const direct = await engine.findTurnCheckpoint({ cwd, sessionId, turn })
+  const target = messageTarget(current, messageSeq)
+  const direct = await engine.findTurnCheckpoint({ cwd: target.cwd, sessionId, turn: target.turn })
   if (direct !== undefined) {
-    if (direct.turnEndSeq === undefined) {
-      throw new ChangeLedgerError('PLAN_STALE', 'the selected turn checkpoint has no durable turn boundary')
+    if (direct.turnStartSeq !== target.turnStartSeq) {
+      throw new ChangeLedgerError('PLAN_STALE', 'the message checkpoint no longer matches its turn start')
     }
-    return { id: direct.id, turnEndSeq: direct.turnEndSeq, cwd }
+    return { target, checkpoint: { ...target, id: direct.id } }
   }
 
-  const boundary = current.events.find(event => event.type === 'turn/end' && event.data.turn === turn)
-  if (boundary === undefined) return undefined
   const seen = new Set<string>([sessionId])
   while (true) {
     const parentId = current.header.parentSession
@@ -363,7 +384,10 @@ async function resolveTurnCheckpoint(
     if ((parentId === undefined) !== (seedLength === undefined)) {
       throw new ChangeLedgerError('PLAN_STALE', 'session fork lineage has incomplete parent metadata')
     }
-    if (parentId === undefined || seedLength === undefined || boundary.seq >= seedLength) return undefined
+    if (parentId === undefined || seedLength === undefined
+      || target.messageSeq >= seedLength || target.turnStartSeq >= seedLength) {
+      return { target }
+    }
     if (seen.has(parentId)) {
       throw new ChangeLedgerError('PLAN_STALE', 'session fork lineage contains a cycle')
     }
@@ -373,18 +397,18 @@ async function resolveTurnCheckpoint(
     } catch (error) {
       throw new ChangeLedgerError('PLAN_STALE', `parent session ${parentId} is unavailable`, { cause: error })
     }
-    const parentBoundary = current.events.find(event => (
-      event.type === 'turn/end' && event.seq === boundary.seq && event.data.turn === turn
-    ))
-    if (parentBoundary === undefined) {
-      throw new ChangeLedgerError('PLAN_STALE', 'session fork lineage no longer matches the inherited turn boundary')
+    const parentTarget = messageTarget(current, messageSeq)
+    if (parentTarget.turn !== target.turn
+      || parentTarget.turnStartSeq !== target.turnStartSeq
+      || parentTarget.previousTurnEndSeq !== target.previousTurnEndSeq) {
+      throw new ChangeLedgerError('PLAN_STALE', 'session fork lineage no longer matches the inherited message boundary')
     }
-    const inherited = await engine.findTurnCheckpoint({ cwd, sessionId: parentId, turn })
+    const inherited = await engine.findTurnCheckpoint({ cwd: target.cwd, sessionId: parentId, turn: target.turn })
     if (inherited === undefined) continue
-    if (inherited.turnEndSeq !== boundary.seq) {
-      throw new ChangeLedgerError('PLAN_STALE', 'the inherited turn checkpoint no longer matches the fork boundary')
+    if (inherited.turnStartSeq !== target.turnStartSeq) {
+      throw new ChangeLedgerError('PLAN_STALE', 'the inherited message checkpoint no longer matches the fork boundary')
     }
-    return { id: inherited.id, turnEndSeq: boundary.seq, cwd }
+    return { target, checkpoint: { ...target, id: inherited.id } }
   }
 }
 
@@ -392,38 +416,85 @@ async function checkpointForRequest(
   ctx: Pick<Context, 'sessions' | 'sessionQuery'>,
   engine: ChangeLedgerEngine,
   sessionId: string,
-  turn: number,
+  messageSeq: number,
   requestedId: string,
-): Promise<{ readonly id: string; readonly turnEndSeq: number; readonly cwd: string }> {
-  const checkpoint = await resolveTurnCheckpoint(ctx, engine, sessionId, turn)
+): Promise<MessageCheckpoint> {
+  const { target, checkpoint } = await resolveMessageCheckpoint(ctx, engine, sessionId, messageSeq)
   if (checkpoint === undefined) {
-    throw new ChangeLedgerError('RESTORE_POINT_NOT_FOUND', `turn ${String(turn)} has no rewind checkpoint`)
+    throw new ChangeLedgerError('RESTORE_POINT_NOT_FOUND', `message ${String(target.messageSeq)} has no rewind checkpoint`)
   }
   if (requestedId !== checkpoint.id) {
-    throw new ChangeLedgerError('PLAN_STALE', 'the selected turn checkpoint changed; reopen the rewind dialog')
+    throw new ChangeLedgerError('PLAN_STALE', 'the selected message checkpoint changed; reopen the rewind dialog')
   }
   return checkpoint
 }
 
-async function createConversationFork(
+async function createConversationRestart(
   ctx: Pick<Context, 'sessions' | 'sessionQuery' | 'apiProxy'>,
   sourceId: string,
-  turn: number,
-  turnEndSeq: number,
+  checkpoint: MessageCheckpoint,
 ): Promise<{ readonly sessionId: string }> {
   const source = await readSession(ctx, sourceId)
-  const boundary = source.events.find(event => (
-    event.type === 'turn/end' && event.seq === turnEndSeq && event.data.turn === turn
-  ))
-  if (boundary === undefined) throw new ChangeLedgerError('PLAN_STALE', 'the session no longer contains the checkpoint turn boundary')
-  const response = await ctx.apiProxy.sessions.fork({
-    rpcId: randomUUID(),
-    payload: { sessionId: sourceId, atSeq: turnEndSeq },
-  })
+  const current = messageTarget(source, checkpoint.messageSeq)
+  if (current.turn !== checkpoint.turn
+    || current.turnStartSeq !== checkpoint.turnStartSeq
+    || current.previousTurnEndSeq !== checkpoint.previousTurnEndSeq) {
+    throw new ChangeLedgerError('PLAN_STALE', 'the session no longer contains the selected message boundary')
+  }
+  const response = checkpoint.previousTurnEndSeq === undefined
+    ? await ctx.apiProxy.sessions.create({
+        rpcId: randomUUID(),
+        payload: { cwd: checkpoint.cwd },
+      })
+    : await ctx.apiProxy.sessions.fork({
+        rpcId: randomUUID(),
+        payload: { sessionId: sourceId, atSeq: checkpoint.previousTurnEndSeq },
+      })
   if (!response.result.ok) {
     throw new ChangeLedgerError('CONVERSATION_REWIND_FAILED', response.result.error.message)
   }
   return { sessionId: requiredText(response.result.value.sessionId, 'fork sessionId') }
+}
+
+function messageTarget(session: SessionLike, messageSeq: number): MessageTarget {
+  const cwd = session.header.cwd
+  if (cwd === undefined) throw new ChangeLedgerError('WORKSPACE_REQUIRED', `session ${session.id} has no workspace`)
+  const message = session.events.find(event => event.type === 'user/message' && event.seq === messageSeq && isDirectUserMessage(event))
+  if (message === undefined) {
+    throw new ChangeLedgerError('RESTORE_POINT_NOT_FOUND', `session ${session.id} has no user message at ${String(messageSeq)}`)
+  }
+  const start = session.events.findLast(event => event.type === 'turn/start' && event.seq < messageSeq)
+  const turn = start?.data.turn
+  if (start === undefined || !Number.isSafeInteger(turn) || (turn as number) < 0) {
+    throw new ChangeLedgerError('PLAN_STALE', 'the selected user message has no valid turn start')
+  }
+  const openingMessage = session.events.find(event => (
+    event.type === 'user/message'
+    && event.seq > start.seq
+    && event.seq <= messageSeq
+    && isDirectUserMessage(event)
+  ))
+  if (openingMessage?.seq !== messageSeq) {
+    throw new ChangeLedgerError('RESTORE_POINT_NOT_FOUND', 'rewind is available only for the opening user message of a turn')
+  }
+  const interveningEnd = session.events.find(event => event.type === 'turn/end' && event.seq > start.seq && event.seq < messageSeq)
+  if (interveningEnd !== undefined) {
+    throw new ChangeLedgerError('PLAN_STALE', 'the selected user message is outside its recorded turn')
+  }
+  const previousEnd = session.events.findLast(event => event.type === 'turn/end' && event.seq < start.seq)
+  return {
+    messageSeq,
+    turn: turn as number,
+    turnStartSeq: start.seq,
+    ...(previousEnd === undefined ? {} : { previousTurnEndSeq: previousEnd.seq }),
+    cwd,
+  }
+}
+
+function isDirectUserMessage(event: SessionEventLike): boolean {
+  const source = event.data.source
+  return source !== null && typeof source === 'object' && !Array.isArray(source)
+    && (source as Record<string, unknown>).kind === 'user'
 }
 
 function checkpointKey(sessionId: string, turn: number): string {
@@ -459,7 +530,6 @@ function pageSize(value: unknown, fallback: number): number {
 async function sharedWorkspaceSessions(
   agents: AgentsLike | undefined,
   cwd: string,
-  sourceSessionId: string,
 ): Promise<readonly string[]> {
   const listed = agents?.list() ?? []
   if (listed.length === 0) return []
@@ -468,7 +538,7 @@ async function sharedWorkspaceSessions(
   for (const agent of listed) {
     if (agent.status !== 'running') continue
     const session = agent.session
-    if (session.id === sourceSessionId || session.header.cwd === undefined) continue
+    if (session.header.cwd === undefined) continue
     try {
       if (await discoverRepositoryRoot(session.header.cwd) === root) shared.push(session.id)
     } catch {

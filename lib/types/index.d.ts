@@ -24,9 +24,9 @@ export declare class ChangeLedgerService extends Service {
     initialize(): ReturnType<ChangeLedgerEngine['initialize']>;
     /** Create a user restore point. */
     create(options: Parameters<ChangeLedgerEngine['create']>[0]): ReturnType<ChangeLedgerEngine['create']>;
-    /** Capture one completed turn for Web rewind. */
+    /** Capture project files before one turn enters its first Agent step. */
     createTurnCheckpoint(options: Parameters<ChangeLedgerEngine['createTurnCheckpoint']>[0]): ReturnType<ChangeLedgerEngine['createTurnCheckpoint']>;
-    /** Find the newest checkpoint for one completed turn. */
+    /** Find the prompt-anchored checkpoint for one session turn. */
     findTurnCheckpoint(options: Parameters<ChangeLedgerEngine['findTurnCheckpoint']>[0]): ReturnType<ChangeLedgerEngine['findTurnCheckpoint']>;
     /** List restore points. */
     list(options: Parameters<ChangeLedgerEngine['list']>[0]): ReturnType<ChangeLedgerEngine['list']>;

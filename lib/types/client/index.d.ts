@@ -2,27 +2,26 @@ import { type ReactNode } from 'react';
 interface ConversationNodeLike {
     readonly kind: string;
     readonly seq: number;
-    readonly turn?: number;
-}
-interface TurnTailOwnerLike {
-    readonly nodes: readonly ConversationNodeLike[];
-    readonly seq: number;
+    readonly content?: readonly {
+        readonly type: string;
+        readonly text?: string;
+    }[];
 }
 interface ConversationSnapshotLike {
     readonly nodes: readonly ConversationNodeLike[];
 }
 interface RewindMatch {
-    readonly turn: number;
-    readonly seq: number;
+    readonly messageSeq: number;
+    readonly promptText: string;
 }
-interface RewindTailProps {
+interface RewindMessageActionProps {
     readonly matched: RewindMatch;
     readonly sessionId: string;
-    readonly openSession: (sessionId: string) => void;
+    readonly openRestoredSession: (sessionId: string, promptText: string) => Promise<void>;
 }
 interface RewindPortalBridgeProps {
     readonly sessionId: string;
-    readonly openSession: (sessionId: string) => void;
+    readonly openRestoredSession: (sessionId: string, promptText: string) => Promise<void>;
     readonly useSession: <T>(selector: (snapshot: ConversationSnapshotLike) => T) => T;
 }
 interface SlotsLike {
@@ -32,7 +31,7 @@ interface SlotsLike {
         readonly id: string;
         readonly order: number;
         readonly inject: () => {
-            readonly openSession: (sessionId: string) => void;
+            readonly openRestoredSession: (sessionId: string, promptText: string) => Promise<void>;
         };
     }, component: (props: RewindPortalBridgeProps) => ReactNode): () => void;
 }
@@ -40,19 +39,27 @@ interface ClientContextLike {
     readonly slots: SlotsLike;
     readonly sessions: {
         open(sessionId: string): void;
+        scope(sessionId: string): unknown | undefined;
+    };
+    readonly conversation: {
+        readonly input: {
+            for(scope: unknown): {
+                setDraft(text: string): void;
+            };
+        };
     };
     effect(setup: () => (() => void), label?: string): unknown;
 }
 type ChangeKind = 'added' | 'deleted' | 'modified' | 'mode-changed' | 'type-changed';
-/** Return the completed turn closed by one assistant-tail anchor. */
-export declare function selectRewindTurn(owner: TurnTailOwnerLike): RewindMatch | null;
-/** Browser plugin entry: bridge every finalized assistant action row to the rewind UI. */
+/** Return the rewind anchor and editable text owned by one direct user message. */
+export declare function selectRewindMessage(node: ConversationNodeLike): RewindMatch | null;
+/** Browser plugin entry: bridge every direct user-message action row to the rewind UI. */
 export declare const inject: string[];
 export declare function apply(ctx: ClientContextLike): void;
-/** Session-scoped bridge that portals rewind controls into finalized assistant action rows. */
-export declare function RewindTurnPortals({ sessionId, openSession, useSession }: RewindPortalBridgeProps): ReactNode;
-/** Turn-tail action and its review-first code/conversation restore dialog. */
-export declare function RewindTurnTail({ matched, sessionId, openSession }: RewindTailProps): ReactNode;
+/** Session-scoped bridge that portals rewind controls into direct user-message action rows. */
+export declare function RewindMessagePortals({ sessionId, openRestoredSession, useSession }: RewindPortalBridgeProps): ReactNode;
+/** User-message action and its review-first file/conversation restore dialog. */
+export declare function RewindMessageAction({ matched, sessionId, openRestoredSession }: RewindMessageActionProps): ReactNode;
 /** Describe the user-visible result of restoring one changed file. */
 export declare function fileRecoveryLabel(kind: ChangeKind): string;
 export {};

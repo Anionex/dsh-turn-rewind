@@ -55,14 +55,14 @@ export class ChangeLedgerService extends Service {
     return this.engine.create(options)
   }
 
-  /** Capture one completed turn for Web rewind. */
+  /** Capture project files before one turn enters its first Agent step. */
   createTurnCheckpoint(
     options: Parameters<ChangeLedgerEngine['createTurnCheckpoint']>[0],
   ): ReturnType<ChangeLedgerEngine['createTurnCheckpoint']> {
     return this.engine.createTurnCheckpoint(options)
   }
 
-  /** Find the newest checkpoint for one completed turn. */
+  /** Find the prompt-anchored checkpoint for one session turn. */
   findTurnCheckpoint(
     options: Parameters<ChangeLedgerEngine['findTurnCheckpoint']>[0],
   ): ReturnType<ChangeLedgerEngine['findTurnCheckpoint']> {

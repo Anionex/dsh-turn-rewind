@@ -51,9 +51,11 @@ export interface RestorePointManifest {
   readonly sessionId?: string
   readonly label?: string
   readonly parentRestorePoint?: RestorePointId
-  /** Completed DSH turn captured by an automatic Web rewind checkpoint. */
+  /** DSH turn whose opening user request owns this automatic Web rewind checkpoint. */
   readonly turn?: number
-  /** Inclusive `turn/end` event sequence for the captured turn. */
+  /** Inclusive `turn/start` event sequence; the snapshot was captured before the turn entered its first step. */
+  readonly turnStartSeq?: number
+  /** Legacy inclusive `turn/end` event sequence used by checkpoints created before prompt-anchored rewind. */
   readonly turnEndSeq?: number
   readonly createdAt: number
   readonly treeHash: string
@@ -76,6 +78,10 @@ export interface WorkspaceChange {
 export interface RestorePointInspection {
   readonly restorePoint: RestorePointSummary
   readonly currentTreeHash: string
+  readonly currentRepository: RepositoryState
+  readonly currentHead?: string
+  readonly currentBranch?: string
+  readonly currentOperation?: string
   readonly headChanged: boolean
   readonly operationChanged: boolean
   readonly changes: readonly WorkspaceChange[]
@@ -90,6 +96,7 @@ export interface RestorePointSummary {
   readonly label?: string
   readonly parentRestorePoint?: RestorePointId
   readonly turn?: number
+  readonly turnStartSeq?: number
   readonly turnEndSeq?: number
   readonly createdAt: number
   readonly treeHash: string
@@ -99,6 +106,7 @@ export interface RestorePointSummary {
   readonly lastRestoredAt?: number
   readonly head?: string
   readonly branch?: string
+  readonly operation?: string
   readonly stagedPathCount: number
 }
 

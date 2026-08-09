@@ -1,5 +1,5 @@
 import { LedgerStore } from './store.js';
-import { type ChangeLedgerConfig, type RecoverySummary, type ResolvedChangeLedgerConfig, type RestorePlan, type RestorePointInspection, type RestorePointSummary, type RestoreResult } from './types.js';
+import { type ChangeLedgerConfig, type RecoverySummary, type ResolvedChangeLedgerConfig, type RestorePlan, type RestorePointInspection, type RestorePointManifest, type RestorePointSummary, type RestoreResult } from './types.js';
 /** Persistent workspace change-set engine, independent of the DSH tool adapter. */
 export declare class ChangeLedgerEngine {
     readonly config: ResolvedChangeLedgerConfig;
@@ -18,15 +18,15 @@ export declare class ChangeLedgerEngine {
         readonly label?: string;
         readonly signal?: AbortSignal;
     }): Promise<RestorePointSummary>;
-    /** Capture one completed DSH turn for user-triggered Web rewind. */
+    /** Capture project files before one DSH turn begins its first step. */
     createTurnCheckpoint(options: {
         readonly cwd: string;
         readonly sessionId: string;
         readonly turn: number;
-        readonly turnEndSeq: number;
+        readonly turnStartSeq: number;
         readonly signal?: AbortSignal;
     }): Promise<RestorePointSummary>;
-    /** Find the newest checkpoint for one completed session turn. */
+    /** Find the prompt-anchored checkpoint captured before one session turn. */
     findTurnCheckpoint(options: {
         readonly cwd: string;
         readonly sessionId: string;
@@ -53,6 +53,8 @@ export declare class ChangeLedgerEngine {
         readonly sessionId?: string;
         readonly paths?: readonly string[];
         readonly allowHeadChange?: boolean;
+        readonly expectedCurrentTreeHash?: string;
+        readonly expectedRepository?: RestorePointManifest['repository'];
         readonly signal?: AbortSignal;
     }): Promise<RestorePlan>;
     /** Apply one approved restore plan, creating a durable rescue point first. */

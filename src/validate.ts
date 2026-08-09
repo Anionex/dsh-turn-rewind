@@ -65,12 +65,13 @@ export function parseManifest(value: unknown): RestorePointManifest {
   const parentRestorePoint = optionalString(record, 'parentRestorePoint')
   if (parentRestorePoint !== undefined) validateRestorePointId(parentRestorePoint)
   const turn = optionalNonNegativeInteger(record, 'turn')
+  const turnStartSeq = optionalNonNegativeInteger(record, 'turnStartSeq')
   const turnEndSeq = optionalNonNegativeInteger(record, 'turnEndSeq')
   if (kind === 'turn') {
-    if (sessionId === undefined || turn === undefined || turnEndSeq === undefined) {
-      corrupt('turn restore points require sessionId, turn, and turnEndSeq')
+    if (sessionId === undefined || turn === undefined || (turnStartSeq === undefined) === (turnEndSeq === undefined)) {
+      corrupt('turn restore points require sessionId, turn, and exactly one turn boundary')
     }
-  } else if (turn !== undefined || turnEndSeq !== undefined) {
+  } else if (turn !== undefined || turnStartSeq !== undefined || turnEndSeq !== undefined) {
     corrupt('only turn restore points may carry turn metadata')
   }
   const lastRestoredAt = optionalNonNegativeInteger(record, 'lastRestoredAt')
@@ -84,6 +85,7 @@ export function parseManifest(value: unknown): RestorePointManifest {
     ...(label === undefined ? {} : { label }),
     ...(parentRestorePoint === undefined ? {} : { parentRestorePoint }),
     ...(turn === undefined ? {} : { turn }),
+    ...(turnStartSeq === undefined ? {} : { turnStartSeq }),
     ...(turnEndSeq === undefined ? {} : { turnEndSeq }),
     createdAt,
     treeHash,

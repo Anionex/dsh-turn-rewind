@@ -19,7 +19,6 @@ interface AgentLike {
     readonly id: string;
     readonly status: 'idle' | 'running';
     readonly session: SessionLike;
-    runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;
 }
 interface AgentsLike {
     list(): AgentLike[];
@@ -53,6 +52,24 @@ interface HttpServerLike {
 }
 interface ApiProxyLike {
     readonly sessions: {
+        create(request: {
+            readonly rpcId: string;
+            readonly payload: {
+                readonly cwd: string;
+            };
+        }): Promise<{
+            readonly result: {
+                readonly ok: true;
+                readonly value: {
+                    readonly sessionId: string;
+                };
+            } | {
+                readonly ok: false;
+                readonly error: {
+                    readonly message: string;
+                };
+            };
+        }>;
         fork(request: {
             readonly rpcId: string;
             readonly payload: {
@@ -83,35 +100,31 @@ declare module 'cordis' {
         apiProxy: ApiProxyLike;
     }
     interface Events {
-        'agent/created'(payload: {
+        'agent/pre-step'(payload: {
             readonly agent: AgentLike;
-        }): void;
-        'agent/status'(payload: {
-            readonly agent: AgentLike;
-            readonly status: 'idle' | 'running';
-        }): void;
+            readonly turn: number;
+            readonly step: number;
+            readonly signal: AbortSignal;
+        }, next: () => Promise<unknown>): Promise<unknown>;
     }
 }
 export declare const REWIND_HTTP_PATH = "/turn-rewind";
-/** In-memory capture status and same-boundary retry state for turn checkpoints. */
+/** Capture each turn before its opening user message can trigger model or tool work. */
 export declare class TurnCheckpointCoordinator {
     private readonly engine;
-    private readonly scheduled;
+    private readonly captures;
     private readonly pending;
     private readonly failures;
-    private readonly retries;
     private readonly workspaceTails;
     constructor(engine: ChangeLedgerEngine);
-    /** Install idle-boundary capture listeners while the Agent service is present. */
+    /** Install the first-step gate; checkpoint failures are recorded but never reject the user turn. */
     install(ctx: Context): void;
     /** Current capture state for a session turn when no durable checkpoint exists yet. */
     state(sessionId: string, turn: number): {
         readonly status: 'pending' | 'failed' | 'missing';
         readonly error?: string;
     };
-    /** Retry a failed capture only while the Agent remains at the same idle turn boundary. */
-    retry(sessionId: string, turn: number): boolean;
-    private schedule;
+    private capture;
     private serializeWorkspace;
     private recordFailure;
 }

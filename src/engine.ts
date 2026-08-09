@@ -3,7 +3,7 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { lstat, realpath } from 'node:fs/promises'
 import { ChangeLedgerError, errorMessage } from './errors.js'
-import { discoverRepository } from './git.js'
+import { discoverRepository, sameRepositoryFence } from './git.js'
 import {
   ensureSafeParents,
   expandHome,
@@ -90,20 +90,20 @@ export class ChangeLedgerEngine {
     }
   }
 
-  /** Capture one completed DSH turn for user-triggered Web rewind. */
+  /** Capture project files before one DSH turn begins its first step. */
   async createTurnCheckpoint(options: {
     readonly cwd: string
     readonly sessionId: string
     readonly turn: number
-    readonly turnEndSeq: number
+    readonly turnStartSeq: number
     readonly signal?: AbortSignal
   }): Promise<RestorePointSummary> {
     await this.ready
     if (!Number.isSafeInteger(options.turn) || options.turn < 0) {
       throw new ChangeLedgerError('INVALID_ARGUMENTS', 'turn must be a non-negative safe integer')
     }
-    if (!Number.isSafeInteger(options.turnEndSeq) || options.turnEndSeq < 0) {
-      throw new ChangeLedgerError('INVALID_ARGUMENTS', 'turnEndSeq must be a non-negative safe integer')
+    if (!Number.isSafeInteger(options.turnStartSeq) || options.turnStartSeq < 0) {
+      throw new ChangeLedgerError('INVALID_ARGUMENTS', 'turnStartSeq must be a non-negative safe integer')
     }
     const source = await discoverRepository(options.cwd, options.signal)
     await this.assertStorageSeparated(source.state.root)
@@ -113,16 +113,16 @@ export class ChangeLedgerEngine {
       const duplicate = existing.find(manifest => manifest.kind === 'turn'
         && manifest.sessionId === options.sessionId
         && manifest.turn === options.turn
-        && manifest.turnEndSeq === options.turnEndSeq)
+        && manifest.turnStartSeq === options.turnStartSeq)
       if (duplicate !== undefined) return summarize(duplicate)
 
       const manifest = await this.createLocked({
         cwd: source.state.root,
         kind: 'turn',
         sessionId: options.sessionId,
-        label: `Turn ${String(options.turn)} checkpoint`,
+        label: `Before turn ${String(options.turn)} checkpoint`,
         turn: options.turn,
-        turnEndSeq: options.turnEndSeq,
+        turnStartSeq: options.turnStartSeq,
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       })
       const checkpoints = [...existing.filter(point => point.kind === 'turn' && point.sessionId === options.sessionId), manifest]
@@ -138,7 +138,7 @@ export class ChangeLedgerEngine {
     }
   }
 
-  /** Find the newest checkpoint for one completed session turn. */
+  /** Find the prompt-anchored checkpoint captured before one session turn. */
   async findTurnCheckpoint(options: {
     readonly cwd: string
     readonly sessionId: string
@@ -149,7 +149,10 @@ export class ChangeLedgerEngine {
     const source = await discoverRepository(options.cwd, options.signal)
     await this.assertStorageSeparated(source.state.root)
     const manifest = (await this.store.listManifests(source.state.root)).find(point =>
-      point.kind === 'turn' && point.sessionId === options.sessionId && point.turn === options.turn)
+      point.kind === 'turn'
+      && point.sessionId === options.sessionId
+      && point.turn === options.turn
+      && point.turnStartSeq !== undefined)
     return manifest === undefined ? undefined : summarize(manifest)
   }
 
@@ -185,6 +188,10 @@ export class ChangeLedgerEngine {
     return {
       restorePoint: summarize(manifest),
       currentTreeHash: current.treeHash,
+      currentRepository: current.source.state,
+      ...(current.source.state.head === undefined ? {} : { currentHead: current.source.state.head }),
+      ...(current.source.state.branch === undefined ? {} : { currentBranch: current.source.state.branch }),
+      ...(current.source.state.operation === undefined ? {} : { currentOperation: current.source.state.operation }),
       headChanged: repositoryHeadChanged(manifest.repository, current.source.state),
       operationChanged: manifest.repository.operation !== current.source.state.operation,
       changes: diffTrees(manifest.entries, current.entries),
@@ -198,6 +205,8 @@ export class ChangeLedgerEngine {
     readonly sessionId?: string
     readonly paths?: readonly string[]
     readonly allowHeadChange?: boolean
+    readonly expectedCurrentTreeHash?: string
+    readonly expectedRepository?: RestorePointManifest['repository']
     readonly signal?: AbortSignal
   }): Promise<RestorePlan> {
     await this.ready
@@ -206,6 +215,12 @@ export class ChangeLedgerEngine {
     await this.assertStorageSeparated(source.state.root)
     const manifest = await this.store.readManifest(source.state.root, options.restorePointId)
     const current = await captureStableTree({ cwd: source.state.root, config: this.config, ...(options.signal === undefined ? {} : { signal: options.signal }) })
+    if (options.expectedCurrentTreeHash !== undefined && options.expectedCurrentTreeHash !== current.treeHash) {
+      throw new ChangeLedgerError('PLAN_STALE', 'workspace changed after inspection; inspect and plan again')
+    }
+    if (options.expectedRepository !== undefined && !sameRepositoryFence(options.expectedRepository, current.source.state)) {
+      throw new ChangeLedgerError('PLAN_STALE_REPOSITORY', 'Git repository state changed after inspection; inspect and plan again')
+    }
     assertRepositoryCompatible(manifest, current.source.state, options.allowHeadChange === true)
     const changes = diffTrees(manifest.entries, current.entries)
     if (changes.length === 0) {
@@ -439,6 +454,7 @@ export class ChangeLedgerEngine {
     readonly label?: string
     readonly parentRestorePoint?: string
     readonly turn?: number
+    readonly turnStartSeq?: number
     readonly turnEndSeq?: number
     readonly signal?: AbortSignal
   }): Promise<RestorePointManifest> {
@@ -467,6 +483,7 @@ export class ChangeLedgerEngine {
         ...(options.label === undefined ? {} : { label: options.label }),
         ...(options.parentRestorePoint === undefined ? {} : { parentRestorePoint: options.parentRestorePoint }),
         ...(options.turn === undefined ? {} : { turn: options.turn }),
+        ...(options.turnStartSeq === undefined ? {} : { turnStartSeq: options.turnStartSeq }),
         ...(options.turnEndSeq === undefined ? {} : { turnEndSeq: options.turnEndSeq }),
         createdAt: Date.now(),
         treeHash: tree.treeHash,
@@ -601,6 +618,7 @@ function summarize(manifest: RestorePointManifest): RestorePointSummary {
     ...(manifest.label === undefined ? {} : { label: manifest.label }),
     ...(manifest.parentRestorePoint === undefined ? {} : { parentRestorePoint: manifest.parentRestorePoint }),
     ...(manifest.turn === undefined ? {} : { turn: manifest.turn }),
+    ...(manifest.turnStartSeq === undefined ? {} : { turnStartSeq: manifest.turnStartSeq }),
     ...(manifest.turnEndSeq === undefined ? {} : { turnEndSeq: manifest.turnEndSeq }),
     createdAt: manifest.createdAt,
     treeHash: manifest.treeHash,
@@ -610,6 +628,7 @@ function summarize(manifest: RestorePointManifest): RestorePointSummary {
     ...(manifest.lastRestoredAt === undefined ? {} : { lastRestoredAt: manifest.lastRestoredAt }),
     ...(manifest.repository.head === undefined ? {} : { head: manifest.repository.head }),
     ...(manifest.repository.branch === undefined ? {} : { branch: manifest.repository.branch }),
+    ...(manifest.repository.operation === undefined ? {} : { operation: manifest.repository.operation }),
     stagedPathCount: manifest.repository.stagedPaths.length,
   }
 }

@@ -77,11 +77,11 @@ test('captures hidden turn checkpoints, finds them by session turn, and restores
     cwd: f.workspace,
     sessionId: 'session-web',
     turn: 1,
-    turnEndSeq: 9,
+    turnStartSeq: 4,
   })
   assert.equal(checkpoint.kind, 'turn')
   assert.equal(checkpoint.turn, 1)
-  assert.equal(checkpoint.turnEndSeq, 9)
+  assert.equal(checkpoint.turnStartSeq, 4)
   assert.equal((await f.engine.list({ cwd: f.workspace })).length, 0)
   assert.equal((await f.engine.list({ cwd: f.workspace, includeTurnCheckpoints: true })).length, 1)
   assert.equal((await f.engine.findTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-web', turn: 1 }))?.id, checkpoint.id)
@@ -106,12 +106,12 @@ test('turn checkpoint retention prunes only the oldest checkpoint in the same se
   })
   await f.engine.initialize()
   await seedCommitted(f.workspace, { 'state.txt': 'one\n' })
-  const first = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 's1', turn: 1, turnEndSeq: 3 })
+  const first = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 's1', turn: 1, turnStartSeq: 1 })
   await writeFile(join(f.workspace, 'state.txt'), 'two\n')
-  const second = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 's1', turn: 2, turnEndSeq: 7 })
-  const other = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 's2', turn: 1, turnEndSeq: 4 })
+  const second = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 's1', turn: 2, turnStartSeq: 5 })
+  const other = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 's2', turn: 1, turnStartSeq: 1 })
   await writeFile(join(f.workspace, 'state.txt'), 'three\n')
-  const third = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 's1', turn: 3, turnEndSeq: 11 })
+  const third = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 's1', turn: 3, turnStartSeq: 9 })
 
   const points = await f.engine.list({ cwd: f.workspace, includeTurnCheckpoints: true })
   assert.deepEqual(new Set(points.map(point => point.id)), new Set([second.id, third.id, other.id]))
