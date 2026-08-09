@@ -362,7 +362,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
     }
   }
 
-  const actionLabel = mode === 'both' ? '恢复并重新开始' : '恢复文件'
+  const actionLabel = mode === 'both' ? '恢复并从这里继续' : '恢复文件'
   const radioName = `dcl-rewind-${sessionId}-${String(matched.messageSeq)}`
   const branchChanged = ready !== null && ready.checkpointBranch !== ready.currentBranch
 
@@ -378,7 +378,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
         onClose={close}
         title="恢复到发送这条消息之前"
         closeLabel="关闭"
-        description="先看看哪些文件会恢复，再决定是否重新开始。当前对话会保留。"
+        description="查看恢复的文件，选择适合你的回退方式。当前会话不受影响。"
         className="dcl-rewind-dialog"
         contentClassName="dcl-rewind-content"
         footer={(
@@ -400,7 +400,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
               <div className="dcl-rewind-options">
                 <label className="dcl-rewind-option" data-selected={mode === 'both'} data-disabled={applying}>
                   <input type="radio" name={radioName} checked={mode === 'both'} disabled={applying} onChange={() => { chooseMode('both') }} />
-                  <span className="dcl-rewind-option-content"><strong>恢复文件并重新开始</strong><span className="dcl-rewind-option-description">恢复文件、创建新对话，并把这条消息放回输入框。</span></span>
+                  <span className="dcl-rewind-option-content"><strong>恢复文件并从这里继续</strong><span className="dcl-rewind-option-description">创建一个从这里开始的新会话（当前对话会保留）</span></span>
                 </label>
                 <label className="dcl-rewind-option" data-selected={mode === 'code'} data-disabled={applying}>
                   <input type="radio" name={radioName} checked={mode === 'code'} disabled={applying} onChange={() => { chooseMode('code') }} />
@@ -409,7 +409,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
               </div>
               <div className="dcl-rewind-summary">
                 <strong>将恢复 {String(ready.totalChanges)} 个文件</strong>
-                <span>{mode === 'both' ? '恢复后在新对话里重新发送' : '当前对话保持不变'}</span>
+                <span>{mode === 'both' ? '恢复后在新对话里继续' : '当前对话保持不变'}</span>
               </div>
               {sharedBlocked && (
                 <p className="dcl-rewind-error">这个项目目录还有别的对话正在运行。恢复文件会影响到它们，因此本次操作已被阻止。请等那些对话结束或停止后，再重新检查。</p>

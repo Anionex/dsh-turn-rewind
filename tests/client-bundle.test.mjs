@@ -156,7 +156,7 @@ test('rewind dialog restores files in two modes and allows reviewed Git history 
   }
 
   const both = await run('both', ready, { mode: 'both', sessionId: 'session-child', rescuePointId: 'rp_rescue' })
-  assert.equal(both.primary.props.children, '恢复并重新开始')
+  assert.equal(both.primary.props.children, '恢复并从这里继续')
   assert.equal(both.opened, 'session-child')
   assert.equal(both.restoredPrompt, '修复这个问题')
   assert.deepEqual(JSON.parse(both.request.options.body), {
