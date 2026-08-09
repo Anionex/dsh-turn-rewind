@@ -89,9 +89,10 @@ type Preview = ReadyPreview
 const PATH = '/change-ledger/rewind'
 const STYLE_ID = '@dsh-external/change-ledger/rewind'
 const styles = `
-.dcl-rewind-tail{display:inline-flex;align-items:center;align-self:center;order:-1;height:24px;margin-right:2px}
-.dcl-rewind-trigger{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 6px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;cursor:pointer}
+.dcl-rewind-tail{display:inline-flex;align-items:center;align-self:center;order:0;height:24px;margin-left:2px}
+.dcl-rewind-trigger{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer}
 .dcl-rewind-trigger:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
+[data-time-hover-root="true"]>:last-child:has(>.dcl-rewind-tail)>:not(button):not(.dcl-rewind-tail){order:1}
 .dcl-rewind-dialog{box-sizing:border-box;width:min(560px,100%);max-height:calc(100dvh - 48px)}
 .dcl-rewind-content{min-width:0;min-height:0;overflow-y:auto;overscroll-behavior:contain}
 .dcl-rewind-body{display:flex;flex-direction:column;gap:14px;width:100%;min-width:0;max-width:100%;box-sizing:border-box}
@@ -322,7 +323,6 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
       <Tooltip label={`回退到第 ${String(matched.turn)} 轮结束时`} side="bottom">
         <button type="button" className="dcl-rewind-trigger" onClick={show} aria-label={`回退到第 ${String(matched.turn)} 轮结束时`}>
           <IconRefreshOutline16 size={16} />
-          <span>回退</span>
         </button>
       </Tooltip>
       <Modal
