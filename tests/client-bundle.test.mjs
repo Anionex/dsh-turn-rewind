@@ -17,10 +17,12 @@ test('browser bundle registers the turn-tail selector and anchors only finalized
               return {
                 useCallback: value => value,
                 useEffect() { throw new Error('component was mounted during registration') },
+                useLayoutEffect() { throw new Error('component was mounted during registration') },
                 useRef() { throw new Error('component was mounted during registration') },
                 useState() { throw new Error('component was mounted during registration') },
               }
             }
+            if (id === 'react-dom') return { createPortal: value => value }
             if (id === '@deepseek-ai/dsh-client-ui-primitives') {
               return { Button() {}, IconRefreshOutline16() {}, Modal() {}, Tooltip() {} }
             }
@@ -55,11 +57,12 @@ test('browser bundle registers the turn-tail selector and anchors only finalized
     effect(setup) { setup() },
     sessions: { open(sessionId) { openedSession = sessionId } },
     slots: {
-      inject(name, install) { assert.equal(name, 'conversation.chat.turnTail'); install() },
+      inject(name, install) { assert.equal(name, 'conversation.session.header.actions'); install() },
       register(entry, component) { registration = { entry, component }; return () => {} },
     },
   })
-  assert.equal(registration.entry.name, 'conversation.chat.turnTail')
+  assert.equal(registration.entry.name, 'conversation.session.header.actions')
+  assert.equal(registration.entry.id, 'change-ledger-rewind-portals')
   const injected = registration.entry.inject()
   injected.openSession('session-child')
   assert.equal(openedSession, 'session-child')
@@ -80,6 +83,7 @@ test('rewind dialog scopes restore plans by mode and opens conversation results'
   const react = {
     useCallback: value => value,
     useEffect() {},
+    useLayoutEffect() {},
     useRef: value => ({ current: value }),
     useState(initial) {
       const index = stateIndex
@@ -101,6 +105,7 @@ test('rewind dialog scopes restore plans by mode and opens conversation results'
           plugin = record.factory((id) => {
             if (id === 'react/jsx-runtime') return jsxRuntime
             if (id === 'react') return react
+            if (id === 'react-dom') return { createPortal: value => value }
             if (id === '@deepseek-ai/dsh-client-ui-primitives') return primitives
             throw new Error(`unexpected browser dependency ${id}`)
           })

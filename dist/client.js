@@ -5,15 +5,17 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.inject = void 0;
 exports.selectRewindTurn = selectRewindTurn;
 exports.apply = apply;
+exports.RewindTurnPortals = RewindTurnPortals;
 exports.RewindTurnTail = RewindTurnTail;
 const jsx_runtime_1 = require("react/jsx-runtime");
 const react_1 = require("react");
+const react_dom_1 = require("react-dom");
 const dsh_client_ui_primitives_1 = require("@deepseek-ai/dsh-client-ui-primitives");
 const PATH = '/change-ledger/rewind';
 const STYLE_ID = '@dsh-external/change-ledger/rewind';
 const styles = `
-.dcl-rewind-tail{display:flex;align-items:center;height:28px;margin-top:4px}
-.dcl-rewind-trigger{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 8px;border:0;border-radius:14px;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;cursor:pointer}
+.dcl-rewind-tail{display:inline-flex;align-items:center;align-self:center;order:-1;height:24px;margin-right:2px}
+.dcl-rewind-trigger{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 6px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;cursor:pointer}
 .dcl-rewind-trigger:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
 .dcl-rewind-body{display:flex;flex-direction:column;gap:14px;min-width:min(560px,calc(100vw - 64px))}
 .dcl-rewind-options{display:flex;flex-direction:column;gap:8px}
@@ -40,7 +42,7 @@ function selectRewindTurn(owner) {
         ? { turn: node.turn, seq: owner.seq }
         : null;
 }
-/** Browser plugin entry: register one compact action under every finalized assistant turn. */
+/** Browser plugin entry: bridge every finalized assistant action row to the rewind UI. */
 exports.inject = ['slots', 'sessions'];
 function apply(ctx) {
     ctx.effect(() => {
@@ -53,11 +55,44 @@ function apply(ctx) {
         document.head.appendChild(tag);
         return () => { tag.remove(); };
     }, 'change-ledger: rewind styles');
-    ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
-        name: 'conversation.chat.turnTail',
-        select: selectRewindTurn,
+    ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+        name: 'conversation.session.header.actions',
+        id: 'change-ledger-rewind-portals',
+        order: 100,
         inject: () => ({ openSession: (sessionId) => { ctx.sessions.open(sessionId); } }),
-    }, RewindTurnTail));
+    }, RewindTurnPortals));
+}
+/** Session-scoped bridge that portals rewind controls into finalized assistant action rows. */
+function RewindTurnPortals({ sessionId, openSession, useSession }) {
+    const nodes = useSession(snapshot => snapshot.nodes);
+    const [targets, setTargets] = (0, react_1.useState)([]);
+    (0, react_1.useLayoutEffect)(() => {
+        let active = true;
+        let queued = false;
+        const refresh = () => {
+            if (!active)
+                return;
+            const next = collectPortalTargets(nodes);
+            setTargets(current => samePortalTargets(current, next) ? current : next);
+        };
+        const queueRefresh = () => {
+            if (queued || !active)
+                return;
+            queued = true;
+            queueMicrotask(() => {
+                queued = false;
+                refresh();
+            });
+        };
+        refresh();
+        const observer = new MutationObserver(queueRefresh);
+        observer.observe(document.body, { childList: true, subtree: true });
+        return () => {
+            active = false;
+            observer.disconnect();
+        };
+    }, [nodes]);
+    return targets.map(target => (0, react_dom_1.createPortal)((0, jsx_runtime_1.jsx)(RewindTurnTail, { matched: target.matched, sessionId: sessionId, openSession: openSession }), target.container, `${sessionId}:${String(target.matched.seq)}`));
 }
 /** Turn-tail action and its review-first code/conversation restore dialog. */
 function RewindTurnTail({ matched, sessionId, openSession }) {
@@ -235,6 +270,38 @@ function decodePreview(value) {
         ...(typeof record.planId === 'string' ? { planId: record.planId } : {}),
         ...(typeof record.confirmation === 'string' ? { confirmation: record.confirmation } : {}),
     };
+}
+function collectPortalTargets(nodes) {
+    const rows = new Map();
+    for (const element of Array.from(document.querySelectorAll('[data-chat-flow-kind="assistant"][data-chat-anchor-key]'))) {
+        const key = element.dataset.chatAnchorKey;
+        if (key !== undefined)
+            rows.set(key, element);
+    }
+    const targets = [];
+    for (const node of nodes) {
+        if (node.kind !== 'assistant')
+            continue;
+        const matched = selectRewindTurn({ nodes, seq: node.seq });
+        if (matched === null)
+            continue;
+        const row = rows.get(`node:${String(node.seq)}`);
+        const messageRoot = row?.querySelector(':scope > [data-time-hover-root="true"]');
+        const actions = messageRoot?.lastElementChild;
+        if (!(actions instanceof HTMLElement) || actions.querySelector(':scope > button') === null)
+            continue;
+        targets.push({ container: actions, matched });
+    }
+    return targets;
+}
+function samePortalTargets(left, right) {
+    return left.length === right.length && left.every((target, index) => {
+        const other = right[index];
+        return other !== undefined
+            && target.container === other.container
+            && target.matched.seq === other.matched.seq
+            && target.matched.turn === other.matched.turn;
+    });
 }
 async function responseJson(response) {
     const value = await response.json();

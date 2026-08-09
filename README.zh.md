@@ -91,7 +91,7 @@ dsh --profile web --dump-config | grep change-ledger
 
 ## 使用流程
 
-在 Web Profile 中，每个已落定的 Assistant Turn 都会通过官方 `conversation.chat.turnTail` 扩展点显示一个紧凑的**回退**入口。打开后才按需读取检查点，展示有界的逐路径变化，并提供三种模式：
+在 Web Profile 中，每个已落定的 Assistant Turn 都会在原生 Copy/Branch 操作旁显示一个紧凑的**回退**入口。这个 Session 级桥接不会占用单一胜出的 `conversation.chat.turnTail` 链，因此 DSH 官方的“产物”行可以和回退按钮同时显示。打开回退后才按需读取检查点，展示有界的逐路径变化，并提供三种模式：
 
 | 模式 | 代码 | 对话 |
 | --- | --- | --- |

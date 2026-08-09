@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Button,
   IconRefreshOutline16,
@@ -17,6 +18,10 @@ interface TurnTailOwnerLike {
   readonly seq: number
 }
 
+interface ConversationSnapshotLike {
+  readonly nodes: readonly ConversationNodeLike[]
+}
+
 interface RewindMatch {
   readonly turn: number
   readonly seq: number
@@ -28,15 +33,27 @@ interface RewindTailProps {
   readonly openSession: (sessionId: string) => void
 }
 
+interface RewindPortalBridgeProps {
+  readonly sessionId: string
+  readonly openSession: (sessionId: string) => void
+  readonly useSession: <T>(selector: (snapshot: ConversationSnapshotLike) => T) => T
+}
+
+interface RewindPortalTarget {
+  readonly container: HTMLElement
+  readonly matched: RewindMatch
+}
+
 interface SlotsLike {
   inject(name: string, install: () => unknown): void
   register(
     entry: {
       readonly name: string
-      readonly select: (owner: TurnTailOwnerLike) => RewindMatch | null
+      readonly id: string
+      readonly order: number
       readonly inject: () => { readonly openSession: (sessionId: string) => void }
     },
-    component: (props: RewindTailProps) => ReactNode,
+    component: (props: RewindPortalBridgeProps) => ReactNode,
   ): () => void
 }
 
@@ -72,8 +89,8 @@ type Preview = ReadyPreview
 const PATH = '/change-ledger/rewind'
 const STYLE_ID = '@dsh-external/change-ledger/rewind'
 const styles = `
-.dcl-rewind-tail{display:flex;align-items:center;height:28px;margin-top:4px}
-.dcl-rewind-trigger{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 8px;border:0;border-radius:14px;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;cursor:pointer}
+.dcl-rewind-tail{display:inline-flex;align-items:center;align-self:center;order:-1;height:24px;margin-right:2px}
+.dcl-rewind-trigger{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 6px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;cursor:pointer}
 .dcl-rewind-trigger:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
 .dcl-rewind-body{display:flex;flex-direction:column;gap:14px;min-width:min(560px,calc(100vw - 64px))}
 .dcl-rewind-options{display:flex;flex-direction:column;gap:8px}
@@ -102,7 +119,7 @@ export function selectRewindTurn(owner: TurnTailOwnerLike): RewindMatch | null {
     : null
 }
 
-/** Browser plugin entry: register one compact action under every finalized assistant turn. */
+/** Browser plugin entry: bridge every finalized assistant action row to the rewind UI. */
 export const inject = ['slots', 'sessions']
 export function apply(ctx: ClientContextLike): void {
   ctx.effect(() => {
@@ -114,11 +131,49 @@ export function apply(ctx: ClientContextLike): void {
     document.head.appendChild(tag)
     return () => { tag.remove() }
   }, 'change-ledger: rewind styles')
-  ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
-    name: 'conversation.chat.turnTail',
-    select: selectRewindTurn,
+  ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+    name: 'conversation.session.header.actions',
+    id: 'change-ledger-rewind-portals',
+    order: 100,
     inject: () => ({ openSession: (sessionId: string) => { ctx.sessions.open(sessionId) } }),
-  }, RewindTurnTail))
+  }, RewindTurnPortals))
+}
+
+/** Session-scoped bridge that portals rewind controls into finalized assistant action rows. */
+export function RewindTurnPortals({ sessionId, openSession, useSession }: RewindPortalBridgeProps): ReactNode {
+  const nodes = useSession(snapshot => snapshot.nodes)
+  const [targets, setTargets] = useState<readonly RewindPortalTarget[]>([])
+
+  useLayoutEffect(() => {
+    let active = true
+    let queued = false
+    const refresh = (): void => {
+      if (!active) return
+      const next = collectPortalTargets(nodes)
+      setTargets(current => samePortalTargets(current, next) ? current : next)
+    }
+    const queueRefresh = (): void => {
+      if (queued || !active) return
+      queued = true
+      queueMicrotask(() => {
+        queued = false
+        refresh()
+      })
+    }
+    refresh()
+    const observer = new MutationObserver(queueRefresh)
+    observer.observe(document.body, { childList: true, subtree: true })
+    return () => {
+      active = false
+      observer.disconnect()
+    }
+  }, [nodes])
+
+  return targets.map(target => createPortal(
+    <RewindTurnTail matched={target.matched} sessionId={sessionId} openSession={openSession} />,
+    target.container,
+    `${sessionId}:${String(target.matched.seq)}`,
+  ))
 }
 
 /** Turn-tail action and its review-first code/conversation restore dialog. */
@@ -359,6 +414,41 @@ function decodePreview(value: unknown): Preview {
     ...(typeof record.planId === 'string' ? { planId: record.planId } : {}),
     ...(typeof record.confirmation === 'string' ? { confirmation: record.confirmation } : {}),
   }
+}
+
+function collectPortalTargets(nodes: readonly ConversationNodeLike[]): readonly RewindPortalTarget[] {
+  const rows = new Map<string, HTMLElement>()
+  for (const element of Array.from(document.querySelectorAll<HTMLElement>(
+    '[data-chat-flow-kind="assistant"][data-chat-anchor-key]',
+  ))) {
+    const key = element.dataset.chatAnchorKey
+    if (key !== undefined) rows.set(key, element)
+  }
+  const targets: RewindPortalTarget[] = []
+  for (const node of nodes) {
+    if (node.kind !== 'assistant') continue
+    const matched = selectRewindTurn({ nodes, seq: node.seq })
+    if (matched === null) continue
+    const row = rows.get(`node:${String(node.seq)}`)
+    const messageRoot = row?.querySelector<HTMLElement>(':scope > [data-time-hover-root="true"]')
+    const actions = messageRoot?.lastElementChild
+    if (!(actions instanceof HTMLElement) || actions.querySelector(':scope > button') === null) continue
+    targets.push({ container: actions, matched })
+  }
+  return targets
+}
+
+function samePortalTargets(
+  left: readonly RewindPortalTarget[],
+  right: readonly RewindPortalTarget[],
+): boolean {
+  return left.length === right.length && left.every((target, index) => {
+    const other = right[index]
+    return other !== undefined
+      && target.container === other.container
+      && target.matched.seq === other.matched.seq
+      && target.matched.turn === other.matched.turn
+  })
 }
 
 async function responseJson(response: Response): Promise<unknown> {
