@@ -4,7 +4,7 @@
 
 Message-anchored project-file recovery for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), with an option to restart from the restored request.
 
-**Turn Rewind** is the user-facing feature, repository, and Profile Bundle name. **Change Ledger** is the durable restore engine underneath it: the `ctx.changeLedger` service, `change_ledger_*` tools, on-disk format, and storage path keep that name because they describe the reusable snapshot and recovery layer rather than the Web action alone.
+**Turn Rewind** is the user-facing feature, repository, and Profile Bundle name. **Change Ledger** is the durable restore engine underneath it: the `ctx.changeLedger` service, on-disk format, and storage path keep that name because they describe the reusable snapshot and recovery layer rather than the Web action alone.
 
 Change Ledger gives a DSH session an explicit safety boundary around workspace mutations:
 
@@ -13,11 +13,11 @@ create restore point
         ↓
 agent / user / external tools modify the worktree
         ↓
-inspect exact path-level drift
+preview exact path-level drift
         ↓
-plan a full or selective restore
+review a full or selective restore plan
         ↓
-echo the short-lived confirmation + approve in DSH
+press the final restore button in the rewind dialog
         ↓
 create rescue point → restore → verify
 ```
@@ -52,9 +52,9 @@ The durable format is documented in [docs/FORMAT.md](docs/FORMAT.md). The securi
 
 ## Safety contract
 
-- **Explicit only:** the tool descriptions instruct the model to create a point only after an explicit user request.
-- **Read before write:** `change_ledger_plan_restore` returns an expiring confirmation value but changes no files.
-- **Human gate:** `change_ledger_apply_restore` and `change_ledger_delete` always return a DSH `ask` decision before dispatch. An unattended `approval: never` profile fails closed.
+- **Explicit only:** nothing is restored automatically — every restore starts from the user pressing the final button in the Web dialog, or from an explicit call through the service API.
+- **Read before write:** the dialog preview generates an expiring, session-bound plan from the current tree and changes no files.
+- **Human gate:** the dialog's reviewed impact plus the final restore button is the human decision; direct mutation requests without a live session-bound plan pair fail closed.
 - **Rescue before mutation:** every restore captures the current eligible tree as a durable rescue point before changing a path.
 - **No silent omission:** unsupported submodules, sparse checkouts, oversized files, aggregate limits, and unsupported file types fail point creation.
 - **No path escape:** every durable path is canonical and workspace-relative; restore refuses symlink parents and non-empty directory replacement.
@@ -118,34 +118,6 @@ Before mutation, Turn Rewind rechecks the selected files and repository state, t
 
 DSH Session logs are append-only, so “restart” creates a new Session instead of truncating the original. For the first message, the Host creates a blank Session in the same working directory; for later messages, it forks at the previous completed `turn/end`. A child may reuse an ancestor's prompt checkpoint only while both the selected `user/message` and its exact `turn/start` remain inside every durable `seedLength` fence. Direct child checkpoints take priority and sibling checkpoints never mix. **Branch** creates only a conversation branch and keeps project files unchanged; **Turn Rewind** always restores project files, optionally followed by a new conversation with the selected prompt restored to the composer. The original Session is always retained.
 
-Example requests:
-
-```text
-Create a Change Ledger restore point called "before auth refactor".
-
-Inspect restore point rp_... and show the first 100 changed paths.
-
-Plan restoring only src/auth.ts and tests/auth.test.ts from rp_....
-
-Apply plan plan_... with confirmation RESTORE-....
-```
-
-The last step still opens the normal DSH approval prompt. A confirmation copied from the plan does not bypass approval.
-
-## Tools
-
-| Tool | Mutation | Purpose |
-| --- | --- | --- |
-| `change_ledger_create` | State store only | Capture a user restore point. |
-| `change_ledger_list` | None | Paginate points; rescue points are hidden by default. |
-| `change_ledger_inspect` | None | Paginate current drift from a point. |
-| `change_ledger_plan_restore` | In-memory plan only | Select exact paths and mint an expiring confirmation. |
-| `change_ledger_apply_restore` | Workspace | Approval-gated rescue, restore, and verification. |
-| `change_ledger_delete` | State store | Approval-gated deletion and blob garbage collection. |
-| `change_ledger_recovery_list` | None | Paginate interrupted operations and their rescue points. |
-
-All model-visible list, inspect, recovery, plan, and apply payloads are paginated or summarized. The same-process service API returns complete structured values to trusted plugin consumers.
-
 ## Configuration
 
 Override configuration in the profile patch layer:
@@ -169,11 +141,11 @@ All size and user-point retention limits fail loudly. Automatic turn checkpoints
 
 Before writing any path, a restore creates a rescue point and a durable operation journal. If DSH stops with a non-terminal journal, the next plugin startup marks it `interrupted` unless another live DSH process still owns that workspace lock.
 
-Use `change_ledger_recovery_list` to find the operation's `rescuePointId`, inspect that rescue point, then use the normal plan/apply flow for the affected paths. Rescue points remain ordinary, inspectable restore points until explicitly deleted.
+Recovery uses the public `ctx.changeLedger` service API: `listRecovery` finds the operation's `rescuePointId`, `inspect` reviews that rescue point, then `planRestore`/`applyRestore` handle the affected paths. Rescue points remain ordinary, inspectable restore points until explicitly deleted.
 
 ## Public service
 
-Other Cordis plugins can inject `changeLedger` and call the same lifecycle without parsing model-facing text:
+Other Cordis plugins can inject `changeLedger` and call the same lifecycle through the structured service API:
 
 ```ts
 export const inject = ['changeLedger']

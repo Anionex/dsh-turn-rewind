@@ -12,7 +12,7 @@ Workspace restoration requires all of the following:
 2. a fresh in-memory plan generated from the current tree;
 3. an exact short-lived confirmation value;
 4. the same DSH session when the plan was session-bound;
-5. an explicit human decision: the normal DSH approval outcome for model-facing tools, or the Web rewind dialog's reviewed impact plus final restore button for a direct browser action;
+5. an explicit human decision: the Web rewind dialog's reviewed impact plus final restore button for a direct browser action, or an equivalent human approval path implemented by a trusted service-API consumer;
 6. still-fresh selected-path hashes and the exact reviewed HEAD/branch/operation fence under the workspace lock;
 7. a durable rescue point and operation journal.
 
@@ -22,7 +22,7 @@ Restore-and-restart verifies that the durable checkpoint still names the exact `
 
 Restore-and-restart restores files first, then creates the conversation child. If child creation fails, the adapter immediately applies the first restore's rescue point to compensate the file change. If compensation also fails, the ordinary durable restore journals and rescue points remain available for manual recovery rather than hiding a partial outcome. Any running Agent using the same canonical worktree, including the source Session, blocks Web restoration before mutation and is rechecked at apply time; idle Agents do not create a concurrent writer risk. A reviewed HEAD or branch difference is allowed because restoration never moves refs, HEAD, the branch, or the index; a changed or newly active Git operation remains blocked.
 
-An absent approval channel fails closed through DSH's standard `ask` behavior.
+An absent or expired confirmation fails closed at apply time: the engine applies a restore only when the confirmation exactly matches a fresh session-bound plan.
 
 ## Filesystem containment
 

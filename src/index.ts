@@ -5,7 +5,6 @@
 import { Service, type Context } from 'cordis'
 import { ChangeLedgerEngine } from './engine.js'
 import { installRewindHttp, TurnCheckpointCoordinator } from './rewind-host.js'
-import { registerTools } from './tools.js'
 import type { ChangeLedgerConfig } from './types.js'
 
 export * from './engine.js'
@@ -21,14 +20,12 @@ declare module 'cordis' {
 
 /** Cordis service exposed as `ctx.changeLedger` for other DSH plugins. */
 export class ChangeLedgerService extends Service {
-  static inject = ['tools']
   readonly engine: ChangeLedgerEngine
 
-  /** Register the service, startup reconciliation, and model-facing tools. */
+  /** Register the service and startup reconciliation. */
   constructor(ctx: Context, config: ChangeLedgerConfig = {}) {
     super(ctx, 'changeLedger')
     this.engine = new ChangeLedgerEngine(config)
-    registerTools(ctx, this.engine)
     const checkpoints = new TurnCheckpointCoordinator(this.engine)
     ctx.inject(['agents'], (scope: Context) => { checkpoints.install(scope) })
     ctx.inject(['httpServer', 'sessions', 'sessionQuery', 'apiProxy', 'agents'], (scope: Context) => {

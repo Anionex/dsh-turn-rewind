@@ -16,9 +16,8 @@ declare module 'cordis' {
 }
 /** Cordis service exposed as `ctx.changeLedger` for other DSH plugins. */
 export declare class ChangeLedgerService extends Service {
-    static inject: string[];
     readonly engine: ChangeLedgerEngine;
-    /** Register the service, startup reconciliation, and model-facing tools. */
+    /** Register the service and startup reconciliation. */
     constructor(ctx: Context, config?: ChangeLedgerConfig);
     /** Wait for startup reconciliation. */
     initialize(): ReturnType<ChangeLedgerEngine['initialize']>;

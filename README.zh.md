@@ -4,7 +4,7 @@
 
 为 DeepSeek Harness 提供 Turn 级项目文件恢复，并可选择从恢复后的这一轮继续新对话。
 
-**Turn Rewind** 是用户看到的功能名、仓库名和 Profile Bundle 名。**Change Ledger** 是底层持久恢复引擎；`ctx.changeLedger` 服务、`change_ledger_*` 工具、磁盘格式和存储路径继续保留这个名字，因为它们描述的是可复用的快照与恢复层，而不只是 Web 上的回退按钮。
+**Turn Rewind** 是用户看到的功能名、仓库名和 Profile Bundle 名。**Change Ledger** 是底层持久恢复引擎；`ctx.changeLedger` 服务、磁盘格式和存储路径继续保留这个名字，因为它们描述的是可复用的快照与恢复层，而不只是 Web 上的回退按钮。
 
 它给 DSH Session 增加一条明确的安全边界：
 
@@ -13,11 +13,11 @@
     ↓
 Agent / 用户 / 外部程序修改工作树
     ↓
-检查逐路径变化
+预览逐路径变化
     ↓
-规划全部或部分恢复
+审阅全部或部分恢复计划
     ↓
-回填短期确认码 + 通过 DSH 人工批准
+在回退弹窗中按下最终恢复按钮
     ↓
 先建救援点 → 恢复 → 哈希验证
 ```
@@ -52,9 +52,9 @@ Agent / 用户 / 外部程序修改工作树
 
 ## 安全契约
 
-- **只做显式操作：**工具说明要求模型仅在用户明确提出时创建恢复点。
-- **先读后写：**`change_ledger_plan_restore` 只生成短期计划和确认码，不修改文件。
-- **人工门禁：**`change_ledger_apply_restore` 与 `change_ledger_delete` 在执行前固定返回 DSH `ask`；无人值守的 `approval: never` 配置会 fail closed。
+- **只做显式操作：**任何恢复都不会自动发生——每一次恢复都从用户在 Web 弹窗中按下最终按钮开始，或来自对服务 API 的显式调用。
+- **先读后写：**弹窗预览基于当前工作树生成短期、会话绑定的计划，不修改任何文件。
+- **人工门禁：**弹窗中审阅受影响文件并按下最终恢复按钮就是人的决定；没有实时会话绑定计划对的直接修改请求一律 fail closed。
 - **先救援再修改：**恢复任何文件前，先持久化当前 eligible tree 的救援点。
 - **不静默漏文件：**遇到 submodule、sparse checkout、超限文件、总量超限或特殊文件类型时，创建恢复点直接失败。
 - **不允许路径逃逸：**所有持久路径必须是规范的工作树相对路径；恢复拒绝穿过 symlink 父目录，也拒绝覆盖非空目录。
@@ -116,34 +116,6 @@ dsh --profile web --dump-config | grep turn-rewind
 
 DSH Session 日志只追加不改写，因此“恢复文件并从这里继续”会创建新 Session，而不是截断原对话。选中第一条消息时，Host 会在同一目录创建空 Session；选中后续消息时，会在上一轮 `turn/end` 处分叉。只有所选 `user/message` 和对应的精确 `turn/start` 都低于每一层持久 `seedLength` 时，子 Session 才能复用祖先保存的状态；子 Session 自己的状态优先，兄弟分支绝不混用。**分支新对话**只创建对话分支且保持项目文件不变；**Turn Rewind**一定恢复项目文件，再由用户决定是否创建新对话并把原消息文字填入新对话的输入框。原 Session 始终保留。
 
-可以直接向 Agent 提出：
-
-```text
-创建一个名为“重构鉴权前”的 Change Ledger 恢复点。
-
-检查恢复点 rp_...，展示前 100 条变化。
-
-规划只恢复 rp_... 中的 src/auth.ts 和 tests/auth.test.ts。
-
-使用确认码 RESTORE-... 执行 plan_...。
-```
-
-最后一步仍会弹出 DSH 标准人工批准框。拿到计划确认码不等于绕过批准。
-
-## 工具
-
-| 工具 | 是否修改 | 用途 |
-| --- | --- | --- |
-| `change_ledger_create` | 只写状态目录 | 创建用户恢复点。 |
-| `change_ledger_list` | 否 | 分页列出恢复点；默认隐藏自动救援点。 |
-| `change_ledger_inspect` | 否 | 分页查看当前工作树相对恢复点的变化。 |
-| `change_ledger_plan_restore` | 只写内存计划 | 选择精确路径并生成短期确认码。 |
-| `change_ledger_apply_restore` | 工作树 | 经批准后建立救援点、恢复并验证。 |
-| `change_ledger_delete` | 状态目录 | 经批准后删除恢复点并回收无引用 blob。 |
-| `change_ledger_recovery_list` | 否 | 分页查看中断操作及其救援点。 |
-
-模型可见的列表、检查、故障恢复、计划和执行结果均有分页或截断上限；同进程服务 API 会向可信插件返回完整结构化数据。
-
 ## 配置
 
 在 Profile 的 patch 层覆盖：
@@ -167,7 +139,7 @@ DSH Session 日志只追加不改写，因此“恢复文件并从这里继续�
 
 任何路径写入前，插件都会先创建救援点和持久 operation journal。如果 DSH 在非终态操作期间退出，下次启动会把该操作标记为 `interrupted`；如果另一个仍存活的 DSH 进程持有工作树锁，则不会误判其操作。
 
-使用 `change_ledger_recovery_list` 找到 `rescuePointId`，检查该救援点，然后针对 operation 中的路径走正常的 plan/apply 流程。救援点在被显式删除前始终是普通、可检查的恢复点。
+恢复通过公开的 `ctx.changeLedger` 服务 API 进行：用 `listRecovery` 找到操作的 `rescuePointId`，用 `inspect` 审阅该救援点，再对相关路径走 `planRestore`/`applyRestore`。救援点在被显式删除前始终是普通、可检查的恢复点。
 
 ## 公共服务
 
