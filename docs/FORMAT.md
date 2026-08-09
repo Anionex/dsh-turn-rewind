@@ -38,6 +38,7 @@ interface RestorePointManifestV1 {
   label?: string
   parentRestorePoint?: string
   turn?: number
+  turnStartSeq?: number
   turnEndSeq?: number
   createdAt: number
   treeHash: string
@@ -62,7 +63,7 @@ interface SymlinkEntry {
 }
 ```
 
-`turn` manifests are automatic, hidden checkpoints used by the Web rewind surface. They require `sessionId`, `turn`, and the inclusive `turnEndSeq`; those fields are rejected on `user` and `rescue` manifests. This is an additive version-1 shape: pre-existing version-1 user and rescue manifests remain valid, while malformed or partially anchored turn manifests fail closed.
+`turn` manifests are automatic, hidden checkpoints used by the Web rewind surface. New checkpoints require `sessionId`, `turn`, and the inclusive `turnStartSeq` observed before the Agent enters its first step. Version-1 checkpoints written by the earlier assistant-tail implementation may instead carry `turnEndSeq`; readers preserve them for format compatibility, but prompt-anchored Web rewind never binds them to a user message. Exactly one turn boundary is required, and turn metadata is rejected on `user` and `rescue` manifests. Malformed or partially anchored turn manifests fail closed.
 
 Entry keys are canonical Git-style relative paths using `/`. Absolute paths, empty segments, `.` segments, `..` segments, and NUL bytes are rejected before filesystem resolution.
 

@@ -18,9 +18,9 @@ Workspace restoration requires all of the following:
 
 The Web rewind adapter obtains the same session-bound plan and exact confirmation from a same-origin preview request, then sends both only after the user reviews the affected files and presses the final restore button. Direct mutation requests without that live plan pair fail closed. Conversation-only branching is deliberately absent and remains the responsibility of DSH's native Branch action.
 
-Restore-and-continue verifies that the durable checkpoint still names the exact `turn/end` event before delegating child creation to DSH's official Host API. A forked Session may resolve that checkpoint through its parent lineage only while the boundary remains below every durable `seedLength`, every ancestor contains the same turn and seq, and the checkpoint names that exact seq. A direct checkpoint wins over an inherited checkpoint, sibling checkpoints are isolated, and malformed or missing lineage fails closed. The Host owns seed creation, model-target inheritance, persistence, and Workspace attachment. The original append-only Session remains intact.
+Restore-and-restart verifies that the durable checkpoint still names the exact `turn/start` before the selected `user/message`. A forked Session may resolve that checkpoint through its parent lineage only while both event sequences remain below every durable `seedLength` and every ancestor contains the same message and turn boundary. A direct checkpoint wins over an inherited checkpoint, sibling checkpoints are isolated, and malformed or missing lineage fails closed. The first message restarts through Host `session.create`; later messages fork at the previous completed `turn/end`. The Host owns seed creation, model-target inheritance, persistence, and Workspace attachment. The original append-only Session remains intact.
 
-Restore-and-continue restores files first, then creates the conversation child. If child creation fails, the adapter immediately applies the first restore's rescue point to compensate the file change. If compensation also fails, the ordinary durable restore journals and rescue points remain available for manual recovery rather than hiding a partial outcome. A second running Agent using the same canonical worktree blocks Web restoration before mutation and is rechecked at apply time; idle Agents do not create a concurrent writer risk.
+Restore-and-restart restores files first, then creates the conversation child. If child creation fails, the adapter immediately applies the first restore's rescue point to compensate the file change. If compensation also fails, the ordinary durable restore journals and rescue points remain available for manual recovery rather than hiding a partial outcome. Any running Agent using the same canonical worktree, including the source Session, blocks Web restoration before mutation and is rechecked at apply time; idle Agents do not create a concurrent writer risk. A reviewed HEAD or branch difference is allowed because restoration never moves refs, HEAD, the branch, or the index; a changed or newly active Git operation remains blocked.
 
 An absent approval channel fails closed through DSH's standard `ask` behavior.
 
@@ -46,7 +46,7 @@ Restore journals are written before worktree mutation. A failed restore attempts
 - It does not restore Git index entries, refs, commits, stash state, ignored files, submodules, or repository operation metadata.
 - It does not preserve extended attributes, ACLs, ownership, timestamps, or hard-link identity.
 - It does not provide confidentiality or tamper resistance against the same operating-system user. State files are owner-only by default, but the host user remains trusted.
-- It automatically captures bounded, hidden checkpoints after completed DSH turns when the rewind adapter is active; it never automatically applies one. User and rescue restore points remain explicit.
+- It automatically captures bounded, hidden checkpoints before the first step of newly observed DSH turns when the rewind adapter is active; it never automatically applies one. User and rescue restore points remain explicit.
 
 ## Reporting
 
