@@ -387,7 +387,7 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
               <div className="dcl-rewind-options">
                 <label className="dcl-rewind-option" data-selected={mode === 'both'} data-disabled={applying}>
                   <input type="radio" name={radioName} checked={mode === 'both'} disabled={applying} onChange={() => { chooseMode('both') }} />
-                  <span className="dcl-rewind-option-content"><strong>恢复文件并从这里继续</strong><span className="dcl-rewind-option-description">恢复项目文件，然后创建并打开从这一轮继续的新对话。原对话保留。</span></span>
+                  <span className="dcl-rewind-option-content"><strong>恢复文件并从这里继续</strong><span className="dcl-rewind-option-description">创建一个从这里开始的新会话（当前对话会保留）</span></span>
                 </label>
                 <label className="dcl-rewind-option" data-selected={mode === 'code'} data-disabled={applying}>
                   <input type="radio" name={radioName} checked={mode === 'code'} disabled={applying} onChange={() => { chooseMode('code') }} />
@@ -398,9 +398,6 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
                 <strong>将恢复 {String(ready.totalChanges)} 个文件</strong>
                 <span>{mode === 'both' ? '恢复后从这里继续新对话' : '当前对话保持不变'}</span>
               </div>
-              {ready.totalChanges > 0 && !sharedBlocked && (
-                <p className="dcl-rewind-backup">恢复前会自动备份当前项目文件。恢复失败时会自动还原，不会让项目停留在只恢复了一部分的状态。</p>
-              )}
               {sharedBlocked && (
                 <p className="dcl-rewind-error">这个项目目录还有其他对话正在运行。恢复文件会影响那些对话，因此当前操作已被阻止。请等待它们结束或先停止运行，再重新检查。</p>
               )}
@@ -431,6 +428,7 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
           )}
           {completed !== null && <p className="dcl-rewind-status">{completed}</p>}
           {error !== null && <p className="dcl-rewind-error">{error}</p>}
+          {error !== null && <p className="dcl-rewind-backup">恢复前会自动备份当前项目文件。恢复失败时会自动还原，不会让项目停留在只恢复了一部分的状态。</p>}
           {!loading && (preview?.status !== 'ready' || stale || planMissing || sharedBlocked || driftBlocked) && <Button className="dcl-rewind-retry" variant="outline" size="sm" onClick={() => { void load(true) }}>重新检查</Button>}
         </div>
       </Modal>
