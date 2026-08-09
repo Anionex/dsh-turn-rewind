@@ -7,4 +7,4 @@ This repository is an independent DSH Profile Bundle. Do not modify DeepSeek Har
 - Never recursively delete worktree content.
 - A restore must remain plan-gated, approval-gated, rescue-first, journaled, and post-verified.
 - Run `pnpm run check` before pushing.
-- Commit generated `dist/` because Profile Bundle installation consumes built JavaScript directly.
+- Commit generated `lib/` because Profile Bundle installation consumes built JavaScript directly.

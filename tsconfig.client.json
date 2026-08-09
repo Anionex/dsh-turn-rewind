@@ -13,7 +13,8 @@
     "rootDir": "src/client",
     "outDir": ".client-build",
     "sourceMap": true,
-    "declaration": false,
+    "declaration": true,
+    "declarationDir": "lib/types/client",
     "skipLibCheck": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true

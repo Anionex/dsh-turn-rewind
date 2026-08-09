@@ -10,7 +10,7 @@ import {
   ChangeLedgerEngine,
   TurnCheckpointCoordinator,
   createRewindHttpHandler,
-} from '../dist/index.js'
+} from '../lib/index.js'
 
 const execFileAsync = promisify(execFile)
 

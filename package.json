@@ -4,31 +4,35 @@
   "private": true,
   "description": "Turn-level conversation and workspace rewind for DeepSeek Harness, powered by a persistent Change Ledger",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
     },
-    "./client": "./dist/client.js",
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
     "./core": {
-      "types": "./dist/engine.d.ts",
-      "default": "./dist/engine.js"
+      "types": "./lib/types/engine.d.ts",
+      "default": "./lib/engine.js"
     },
     "./format": {
-      "types": "./dist/types.d.ts",
-      "default": "./dist/types.js"
+      "types": "./lib/types/types.d.ts",
+      "default": "./lib/types.js"
     },
     "./rewind-host": {
-      "types": "./dist/rewind-host.d.ts",
-      "default": "./dist/rewind-host.js"
+      "types": "./lib/types/rewind-host.d.ts",
+      "default": "./lib/rewind-host.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "files": [
-    "dist",
+    "lib",
+    "src",
     "docs",
     "cordis.patch.yml",
     "README.md",
@@ -51,6 +55,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.client.json && node scripts/wrap-client.mjs",
     "check": "tsc -p tsconfig.json && pnpm run build && node --test tests/*.test.mjs && pnpm pack --dry-run",
+    "prepack": "pnpm run build",
     "test": "pnpm run build && node --test tests/*.test.mjs"
   },
   "keywords": [

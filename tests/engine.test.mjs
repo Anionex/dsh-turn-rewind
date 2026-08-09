@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
-import { ChangeLedgerEngine, ChangeLedgerError, LEDGER_FORMAT_VERSION, resolveConfig } from '../dist/index.js'
+import { ChangeLedgerEngine, ChangeLedgerError, LEDGER_FORMAT_VERSION, resolveConfig } from '../lib/index.js'
 
 const execFileAsync = promisify(execFile)
 

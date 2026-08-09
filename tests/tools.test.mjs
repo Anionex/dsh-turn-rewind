@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { registerTools } from '../dist/tools.js'
+import { registerTools } from '../lib/tools.js'
 
 function harness(engine) {
   const definitions = new Map()

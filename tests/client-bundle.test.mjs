@@ -4,7 +4,7 @@ import vm from 'node:vm'
 import test from 'node:test'
 
 test('browser bundle registers the turn-tail selector and anchors only finalized assistant turns', async () => {
-  const source = await readFile(new URL('../dist/client.js', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
   let plugin
   const context = {
     AbortController,
@@ -76,7 +76,7 @@ test('browser bundle registers the turn-tail selector and anchors only finalized
 })
 
 test('rewind dialog scopes restore plans by mode and opens conversation results', async () => {
-  const source = await readFile(new URL('../dist/client.js', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
   const Button = function Button() {}
   const primitives = {
     Button,

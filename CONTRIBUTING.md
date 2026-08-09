@@ -13,6 +13,8 @@ pnpm install --frozen-lockfile
 pnpm run check
 ```
 
+The repository commits the generated `lib/` runtime and declarations so a Git checkout is directly installable as a DSH Profile Bundle. Keep `dsh.bundle.patch`, `package.json#files`, and the `lib/` entry points aligned, and do not add machine-local `file:`, `link:`, or absolute-path development dependencies.
+
 Behavioral changes must include a real temporary-Git-repository test. Restore-path changes require coverage for the successful path, stale or invalid input, and failure recovery. Durable format changes require an update to `docs/FORMAT.md` and must reject old or unknown shapes unless an explicit migration is shipped.
 
 ## Design constraints
