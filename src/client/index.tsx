@@ -322,12 +322,12 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
       if (resultMode !== mode) throw new Error(`服务器返回了不匹配的回退模式：${resultMode}`)
       if (mode === 'code') {
         requiredString(result.rescuePointId, 'rescuePointId')
-        setCompleted('项目文件已恢复；当前对话保持不变。操作前的文件已保存在自动备份中。')
+        setCompleted('项目文件已恢复；当前对话保持不变。恢复前的文件已自动备份。')
         return
       }
       const childSessionId = requiredString(result.sessionId, 'sessionId')
       requiredString(result.rescuePointId, 'rescuePointId')
-      setCompleted('项目文件已恢复，并已创建从这里继续的新对话。操作前的文件已保存在自动备份中。')
+      setCompleted('项目文件已恢复，并已创建从这里继续的新对话。恢复前的文件已自动备份。')
       try {
         openSession(childSessionId)
         setOpen(false)
@@ -350,17 +350,17 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
 
   return (
     <div className="dcl-rewind-tail">
-      <Tooltip label={`恢复到第 ${String(matched.turn)} 轮结束时的文件`} side="bottom">
-        <button type="button" className="dcl-rewind-trigger" onClick={show} aria-label={`恢复到第 ${String(matched.turn)} 轮结束时的文件`}>
+      <Tooltip label={`恢复到第 ${String(matched.turn)} 轮结束时的文件状态`} side="bottom">
+        <button type="button" className="dcl-rewind-trigger" onClick={show} aria-label={`恢复到第 ${String(matched.turn)} 轮结束时的文件状态`}>
           <RewindIcon size={16} />
         </button>
       </Tooltip>
       <Modal
         open={open}
         onClose={close}
-        title={`恢复第 ${String(matched.turn)} 轮结束时的项目文件`}
+        title={`将项目文件恢复到第 ${String(matched.turn)} 轮结束时的状态`}
         closeLabel="关闭"
-        description="先查看将要恢复的文件，再选择是否从这里继续新对话。原对话始终保留。"
+        description="先查看将恢复的文件，再选择是否从这里继续新对话。当前对话不会受影响。"
         className="dcl-rewind-dialog"
         contentClassName="dcl-rewind-content"
         footer={(
@@ -375,7 +375,7 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
         <div className="dcl-rewind-body">
           {loading && <p className="dcl-rewind-status">正在检查可以恢复的项目文件…</p>}
           {preview?.status === 'pending' && <p className="dcl-rewind-status">这一轮的文件状态仍在保存，请稍后重新检查。</p>}
-          {preview?.status === 'missing' && <p className="dcl-rewind-error">没有保存这一轮的文件状态。它可能早于 Turn Rewind 启用时间，或已经超过保留期限。</p>}
+          {preview?.status === 'missing' && <p className="dcl-rewind-error">没有保存这一轮的文件状态。可能是在回退功能启用之前，或已超过保留期限。</p>}
           {preview?.status === 'failed' && <p className="dcl-rewind-error">无法读取这一轮的文件状态：{preview.error}</p>}
           {ready !== null && (
             <>
@@ -394,12 +394,12 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
                 <span>{mode === 'both' ? '恢复后从这里继续新对话' : '当前对话保持不变'}</span>
               </div>
               {sharedBlocked && (
-                <p className="dcl-rewind-error">这个项目目录还有其他对话正在运行。恢复文件会影响那些对话，因此当前操作已被阻止。请等待它们结束或先停止运行，再重新检查。</p>
+                <p className="dcl-rewind-error">这个项目目录还有其他对话正在运行。恢复文件会影响那些对话，因此当前操作已被阻止。请等待这些对话结束，或先将其停止，再重新检查。</p>
               )}
-              {driftBlocked && <p className="dcl-rewind-warning">项目的版本状态已经变化，当前无法安全恢复。请先完成或取消正在进行的版本控制操作，然后重新检查。</p>}
+              {driftBlocked && <p className="dcl-rewind-warning">项目当前的版本状态已发生变化，暂时无法安全恢复。请先完成或取消正在进行的版本控制操作，然后重新检查。</p>}
               {planMissing && <p className="dcl-rewind-error">恢复信息已经失效，请重新检查文件。</p>}
               {stale && <p className="dcl-rewind-error">项目文件在检查后又发生了变化。为避免覆盖新修改，这次恢复已失效，请重新检查。</p>}
-              {ready.totalChanges === 0 && <p className="dcl-rewind-status">项目文件已经和这一轮结束时一致，无需恢复。如需从这里开始新对话，请使用回复旁的“分支新对话”按钮。</p>}
+              {ready.totalChanges === 0 && <p className="dcl-rewind-status">项目文件已与第 {String(matched.turn)} 轮结束时的状态一致，无需恢复。如需开始新对话，请使用回复旁的“分支新对话”按钮。</p>}
               {ready.changes.length > 0 && (
                 <div className="dcl-rewind-files">
                   {ready.changes.map(change => <div className="dcl-rewind-file" key={change.path}><code>{change.path}</code><span className="dcl-rewind-kind">{fileRecoveryLabel(change.kind)}</span></div>)}
@@ -412,7 +412,7 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
           )}
           {completed !== null && <p className="dcl-rewind-status">{completed}</p>}
           {error !== null && <p className="dcl-rewind-error">{error}</p>}
-          {error !== null && <p className="dcl-rewind-backup">恢复前会自动备份当前项目文件。恢复失败时会自动还原，不会让项目停留在只恢复了一部分的状态。</p>}
+          {error !== null && <p className="dcl-rewind-backup">恢复前会自动备份当前文件；若恢复失败会自动还原，项目不会停留在只恢复了一部分的状态。</p>}
           {!loading && (preview?.status !== 'ready' || stale || planMissing || sharedBlocked || driftBlocked) && <Button className="dcl-rewind-retry" variant="outline" size="sm" onClick={() => { void load(true) }}>重新检查</Button>}
         </div>
       </Modal>
@@ -551,11 +551,11 @@ function friendlyError(error: unknown): string {
   if (!(error instanceof RewindRequestError)) return messageOf(error)
   switch (error.code) {
     case 'PLAN_STALE': return '项目文件在检查后又发生了变化。为避免覆盖新修改，请重新检查后再恢复。'
-    case 'WORKSPACE_IN_USE': return '这个项目目录还有其他对话正在运行。请等待它们结束或先停止运行，再重新检查。'
+    case 'WORKSPACE_IN_USE': return '这个项目目录还有其他对话正在运行。请等待这些对话结束，或先将其停止，再重新检查。'
     case 'WORKSPACE_LOCKED': return '另一个恢复操作正在处理这个项目目录。请等待它完成后重新检查。'
-    case 'NO_CHANGES': return '项目文件已经和这一轮结束时一致，无需恢复。需要新对话时请使用“分支新对话”。'
+    case 'NO_CHANGES': return '项目文件已与所选轮次结束时的状态一致，无需恢复。需要新对话时请使用“分支新对话”。'
     case 'RESTORE_FAILED_ROLLED_BACK': return '恢复未能完成，项目文件已自动还原到操作前的状态。'
-    case 'CONVERSATION_REWIND_FAILED': return '文件已经恢复，但无法创建继续对话；项目文件已自动还原。'
+    case 'CONVERSATION_REWIND_FAILED': return '文件已恢复，但无法创建新对话；项目文件已自动还原。'
     default: return error.message
   }
 }

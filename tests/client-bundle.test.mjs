@@ -177,7 +177,7 @@ test('rewind dialog restores files in two modes without a duplicate confirmation
   assert.equal(modal.props.className, 'dcl-rewind-dialog')
   assert.equal(modal.props.contentClassName, 'dcl-rewind-content')
   const trigger = findNode(blockedTree, node => node.type === 'button' && node.props.className === 'dcl-rewind-trigger')
-  assert.equal(trigger.props['aria-label'], '恢复到第 3 轮结束时的文件')
+  assert.equal(trigger.props['aria-label'], '恢复到第 3 轮结束时的文件状态')
   assert.equal(findNode(trigger, node => node.type === 'span' && node.props.children === '回退'), undefined)
   assert.ok(findNode(trigger, node => typeof node.type === 'function' && node.type.name === 'RewindIcon'))
   const blocked = findNode(blockedTree, node => node.type === Button && node.props.variant === 'primary')
