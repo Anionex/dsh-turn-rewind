@@ -391,7 +391,7 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
                 </label>
                 <label className="dcl-rewind-option" data-selected={mode === 'code'} data-disabled={applying}>
                   <input type="radio" name={radioName} checked={mode === 'code'} disabled={applying} onChange={() => { chooseMode('code') }} />
-                  <span className="dcl-rewind-option-content"><strong>只恢复文件</strong><span className="dcl-rewind-option-description">当前对话保持不变，只恢复这一轮结束时的项目文件。</span></span>
+                  <span className="dcl-rewind-option-content"><strong>只恢复文件</strong><span className="dcl-rewind-option-description">只将文件恢复到当时轮次结束时的状态。</span></span>
                 </label>
               </div>
               <div className="dcl-rewind-summary">
