@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-为 DeepSeek Harness 提供 Turn 级对话与工作树回退，并以**持久、可检查、可安全恢复**的恢复点作为基础。
+为 DeepSeek Harness 提供 Turn 级项目文件恢复，并可选择从恢复后的这一轮继续新对话。
 
 **Turn Rewind** 是用户看到的功能名、仓库名和 Profile Bundle 名。**Change Ledger** 是底层持久恢复引擎；`ctx.changeLedger` 服务、`change_ledger_*` 工具、磁盘格式和存储路径继续保留这个名字，因为它们描述的是可复用的快照与恢复层，而不只是 Web 上的回退按钮。
 
@@ -30,7 +30,7 @@ Agent / 用户 / 外部程序修改工作树
 
 ![Copy 和 Branch 之后的 Turn Rewind 图标](docs/assets/turn-rewind-action.png)
 
-打开后会先展示审阅弹窗，可选择同时恢复代码与对话、仅恢复代码或仅回退对话：
+打开后会先展示受影响文件，可选择“恢复文件并从这里继续”或“只恢复文件”：
 
 ![Turn Rewind 审阅弹窗](docs/assets/turn-rewind-dialog.png)
 
@@ -99,21 +99,22 @@ dsh --profile web --dump-config | grep turn-rewind
 
 本仓库是标准 DSH Profile Bundle：`package.json` 声明 `dsh.bundle.patch`，`cordis.patch.yml` 直接挂载 `@dsh-external/turn-rewind`，不修改 DSH 主仓库。
 
-当 Profile 同时提供 DSH Agent 服务时，插件会在每个已完成 Turn 后同步占用 Agent 的 idle maintenance 边界，先完成隐藏检查点，再允许排队输入启动下一轮。插件不会为其开始观察 Turn 边界之前恢复的历史记录伪造检查点，因为当前工作区可能早已不再代表过去那一轮。Web Profile 还会提供同源 `/turn-rewind` 接口：返回有界预览，为会修改代码的模式生成普通的短期、会话绑定恢复计划，并把对话重建委托给 DSH 官方 Host fork 生命周期。Turn 完成只会捕获状态，绝不会自动执行回退。
+当 Profile 同时提供 DSH Agent 服务时，插件会在每个已完成 Turn 后同步占用 Agent 的 idle maintenance 边界，先保存隐藏的文件状态，再允许排队输入启动下一轮。插件不会为其开始观察 Turn 边界之前恢复的历史记录伪造文件状态，因为当前项目文件可能早已不再代表过去那一轮。Web Profile 还会提供同源 `/turn-rewind` 接口：分页返回文件预览，生成短期、会话绑定的恢复授权，并把“从这里继续”的子 Session 创建委托给 DSH 官方 Host fork 生命周期。Turn 完成只会保存状态，绝不会自动恢复文件。
 
 ## 使用流程
 
-在 Web Profile 中，每个已落定的 Assistant Turn 都会在原生 Copy、Branch 操作之后的第三位显示一个紧凑、无文字的**回退**图标。这个 Session 级桥接不会占用单一胜出的 `conversation.chat.turnTail` 链，因此 DSH 官方的“产物”行可以和回退按钮同时显示。打开回退后才按需读取检查点，展示有界的逐路径变化，并提供三种模式：
+在 Web Profile 中，每个已落定的 Assistant Turn 都会在原生 Copy、Branch 操作之后的第三位显示一个紧凑、无文字的**回退**图标。图标使用明确的向后/撤销箭头，而不是“重试”圆形箭头。打开后按需检查保存的文件状态，先显示简洁预览，需要时可“查看全部文件”，并提供两种模式：
 
 | 模式 | 代码 | 对话 |
 | --- | --- | --- |
-| **同时恢复代码与对话**（默认） | 明确勾选确认并创建救援点后恢复工作树。 | 创建并自动打开截至所选 Turn 的子 Session。 |
-| **仅恢复代码** | 明确勾选确认并创建救援点后恢复工作树。 | 当前 Session 保持原位且内容不变。 |
-| **仅回退对话** | 当前工作树保持不变。 | 创建并自动打开截至所选 Turn 的子 Session。 |
+| **恢复文件并从这里继续**（默认） | 自动备份当前状态后恢复项目文件。 | 创建并自动打开截至所选 Turn 的子 Session。 |
+| **只恢复文件** | 自动备份当前状态后恢复项目文件。 | 当前 Session 保持原位且内容不变。 |
 
-HEAD、分支或进行中的 Git 操作发生漂移时，只会阻止会修改代码的模式；纯对话回退仍可执行。如果当前工作树已经与所选 Turn 一致，“同时恢复”会安全退化为只创建对话版本。如果组合回退已经恢复代码、但随后创建对话失败，Change Ledger 会自动使用操作前救援点恢复原代码。
+弹窗和最终主按钮就是确认流程，不再要求重复勾选。文件会按实际结果显示为“恢复之前的版本”“找回文件”“移除后来新增的文件”“恢复文件权限”或“恢复之前的文件类型”。底层文件状态、恢复授权和自动备份标识默认收进折叠的“操作详情”。如果项目文件已经与所选 Turn 一致，Turn Rewind 不会退化为 Branch，而是提示无需恢复并引导用户使用原生 **Branch**。
 
-DSH Session 日志是 append-only，因此对话回退的底层实现是：让官方 Host API 从精确的已完成 Turn 边界创建子 Session，再自动打开该子 Session。Fork 子 Session 只有在目标边界位于每一层持久化 `seedLength` 围栏内、并仍与祖先的精确 `turn/end` 一致时，才能复用祖先检查点；这样既支持连续回退，也不会把子 Session 后续历史错误标成旧检查点。这一实现细节不等于现有的 **Branch** 操作：Branch 保留当前代码，而组合 Rewind 会同时恢复代码与对话上下文；原 Session 始终保留。
+真正修改前，Turn Rewind 会再次检查所选文件和项目版本状态，并先创建自动备份。预览后出现的新变化会让本次恢复失效。同一工作树如果还有其他 Session 正在运行，恢复会被阻止，因为文件变化也会影响那些对话；仅处于空闲状态的 Session 不会阻止恢复。如果“恢复并继续”在创建新对话时失败，Change Ledger 会自动从备份恢复操作前的文件。
+
+DSH Session 日志是 append-only，因此“从这里继续”的底层实现是：让官方 Host API 从精确的已完成 Turn 边界创建子 Session，再自动打开该子 Session。Fork 子 Session 只有在目标边界位于每一层持久化 `seedLength` 围栏内、并仍与祖先的精确 `turn/end` 一致时，才能复用祖先文件状态；子 Session 自己的状态优先，兄弟分支之间不会混用。**Branch** 只创建对话分支且保持项目文件不变；**Turn Rewind** 一定恢复项目文件，并可选择是否随后创建对话分支。原 Session 始终保留。
 
 可以直接向 Agent 提出：
 
@@ -148,7 +149,7 @@ DSH Session 日志是 append-only，因此对话回退的底层实现是：让�
 在 Profile 的 patch 层覆盖：
 
 ```yaml
-- id: change-ledger
+- id: turn-rewind
   config:
     storageDir: ~/.dsh/change-ledger/v1
     maxRestorePoints: 50

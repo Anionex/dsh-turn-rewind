@@ -12,15 +12,15 @@ Workspace restoration requires all of the following:
 2. a fresh in-memory plan generated from the current tree;
 3. an exact short-lived confirmation value;
 4. the same DSH session when the plan was session-bound;
-5. an explicit human decision: the normal DSH approval outcome for model-facing tools, or the Web rewind dialog's mode selection and acknowledgement for a direct browser action;
+5. an explicit human decision: the normal DSH approval outcome for model-facing tools, or the Web rewind dialog's reviewed impact plus final restore button for a direct browser action;
 6. still-fresh selected-path hashes and the exact reviewed HEAD/branch/operation fence under the workspace lock;
 7. a durable rescue point and operation journal.
 
-The Web rewind adapter obtains the same session-bound plan and exact confirmation from a same-origin preview request, then sends both only after the user selects a code-affecting mode and confirms the browser dialog. Direct mutation requests without that live plan pair fail closed. Conversation-only rewind sends neither value because it does not mutate the workspace.
+The Web rewind adapter obtains the same session-bound plan and exact confirmation from a same-origin preview request, then sends both only after the user reviews the affected files and presses the final restore button. Direct mutation requests without that live plan pair fail closed. Conversation-only branching is deliberately absent and remains the responsibility of DSH's native Branch action.
 
-Conversation rewind verifies that the durable checkpoint still names the exact `turn/end` event before delegating child creation to DSH's official Host API. A forked Session may resolve that checkpoint through its parent lineage only while the boundary remains below every durable `seedLength`, every ancestor contains the same turn and seq, and the checkpoint names that exact seq. The Host owns seed creation, model-target inheritance, persistence, and Workspace attachment. The original append-only Session remains intact.
+Restore-and-continue verifies that the durable checkpoint still names the exact `turn/end` event before delegating child creation to DSH's official Host API. A forked Session may resolve that checkpoint through its parent lineage only while the boundary remains below every durable `seedLength`, every ancestor contains the same turn and seq, and the checkpoint names that exact seq. A direct checkpoint wins over an inherited checkpoint, sibling checkpoints are isolated, and malformed or missing lineage fails closed. The Host owns seed creation, model-target inheritance, persistence, and Workspace attachment. The original append-only Session remains intact.
 
-Combined rewind restores code first, then creates the conversation child. If child creation fails, the adapter immediately applies the first restore's rescue point to compensate the code change. If compensation also fails, the ordinary durable restore journals and rescue points remain available for manual recovery rather than hiding a partial outcome.
+Restore-and-continue restores files first, then creates the conversation child. If child creation fails, the adapter immediately applies the first restore's rescue point to compensate the file change. If compensation also fails, the ordinary durable restore journals and rescue points remain available for manual recovery rather than hiding a partial outcome. A second running Agent using the same canonical worktree blocks Web restoration before mutation and is rechecked at apply time; idle Agents do not create a concurrent writer risk.
 
 An absent approval channel fails closed through DSH's standard `ask` behavior.
 

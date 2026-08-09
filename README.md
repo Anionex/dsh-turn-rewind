@@ -2,7 +2,7 @@
 
 [中文说明](README.zh.md)
 
-Turn-level conversation and working-tree rewind for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), backed by persistent, reviewable restore points.
+Turn-level project-file recovery for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), with an option to continue from the restored turn.
 
 **Turn Rewind** is the user-facing feature, repository, and Profile Bundle name. **Change Ledger** is the durable restore engine underneath it: the `ctx.changeLedger` service, `change_ledger_*` tools, on-disk format, and storage path keep that name because they describe the reusable snapshot and recovery layer rather than the Web action alone.
 
@@ -30,7 +30,7 @@ Rewind appears as the third icon beside DSH's native Copy and Branch actions:
 
 ![Turn Rewind action beside Copy and Branch](docs/assets/turn-rewind-action.png)
 
-Opening it presents a review-first choice between restoring code and conversation together, restoring code only, or rewinding conversation only:
+Opening it shows the affected files and offers two choices: restore the files and continue from that turn, or restore only the files:
 
 ![Turn Rewind review dialog](docs/assets/turn-rewind-dialog.png)
 
@@ -101,21 +101,22 @@ Restart a running profile after changing its bundle list.
 
 The package is a DSH Profile Bundle. `package.json` declares `dsh.bundle.patch`, and `cordis.patch.yml` mounts `@dsh-external/turn-rewind` without a DSH core patch.
 
-When the profile also provides the DSH Agent service, the plugin claims the Agent's idle maintenance boundary after each completed turn and captures a hidden checkpoint before queued work may start another turn. It deliberately does not synthesize checkpoints for history resumed before the plugin observed its turn boundary, because the current workspace may no longer represent that earlier turn. In Web profiles, the same-origin `/turn-rewind` endpoint exposes a bounded preview, mints the ordinary short-lived, session-bound restore plan used by code-affecting modes, and delegates conversation reconstruction to DSH's official Host fork lifecycle. It never restores merely because a turn completed.
+When the profile also provides the DSH Agent service, the plugin claims the Agent's idle maintenance boundary after each completed turn and captures a hidden checkpoint before queued work may start another turn. It deliberately does not synthesize checkpoints for history resumed before the plugin observed its turn boundary, because the current project files may no longer represent that earlier turn. In Web profiles, the same-origin `/turn-rewind` endpoint exposes a paged file preview, mints the ordinary short-lived, session-bound restore plan, and delegates “continue from here” child creation to DSH's official Host fork lifecycle. It never restores merely because a turn completed.
 
 ## User flow
 
-In the Web profile, each finalized assistant turn gains a compact, icon-only **Rewind** action in the third position after the native Copy and Branch controls. The session-scoped bridge deliberately does not claim the single-winner `conversation.chat.turnTail` chain, so DSH's Produced-files row and Rewind remain visible together. Opening Rewind fetches the checkpoint lazily, shows every affected path up to the bounded preview cap, and offers three modes:
+In the Web profile, each finalized assistant turn gains a compact, icon-only **Rewind** action in the third position after the native Copy and Branch controls. The icon is a backward/undo arrow rather than a retry symbol. Opening Rewind checks the saved file state lazily, shows a concise preview with a “view all files” action, and offers two modes:
 
 | Mode | Code | Conversation |
 | --- | --- | --- |
-| **Code and conversation** (default) | Restores the worktree after an explicit acknowledgement and rescue point. | Creates and opens a child Session ending at the selected turn. |
-| **Code only** | Restores the worktree after an explicit acknowledgement and rescue point. | Leaves the current Session open and unchanged. |
-| **Conversation only** | Leaves the current worktree unchanged. | Creates and opens a child Session ending at the selected turn. |
+| **Restore files and continue** (default) | Restores the project files after automatically backing up their current state. | Creates and opens a child Session ending at the selected turn. |
+| **Restore files only** | Restores the project files after automatically backing up their current state. | Leaves the current Session open and unchanged. |
 
-HEAD, branch, or in-progress Git-operation drift blocks only modes that would change code; conversation-only rewind remains available. If the worktree already matches the selected turn, the combined mode safely reduces to conversation-only. If conversation creation fails after a combined code restore, Change Ledger automatically restores the pre-operation code from the rescue point.
+The dialog itself is the confirmation: there is no duplicate checkbox. It describes each file as restoring an earlier version, finding a deleted file, removing a later-added file, or restoring permissions/type. Internal checkpoint, plan, and backup identifiers live under collapsed operation details. If the project files already match the selected turn, Turn Rewind performs no action and directs the user to the native **Branch** button for conversation-only branching.
 
-DSH Session logs are append-only, so conversation rewind is implemented by asking the official Host API to create a child from the exact completed-turn boundary and then opening that child. A forked child may reuse an ancestor's checkpoint only while the requested boundary is inside every durable `seedLength` fence and still matches the ancestor's exact `turn/end`; this allows repeated rewind without relabeling later child history. This implementation detail does not make it equivalent to the existing **Branch** action: Branch preserves the current code, while combined Rewind restores both code and conversational context. The original Session is always retained.
+Before mutation, Turn Rewind rechecks the selected files and repository state, then creates an automatic backup. Changes made after preview invalidate the operation. Another running Session using the same worktree blocks restoration because file recovery would affect that conversation too; idle Sessions do not block. If child creation fails after “restore and continue,” Change Ledger automatically restores the pre-operation files from the backup.
+
+DSH Session logs are append-only, so “continue from here” asks the official Host API to create a child at the exact completed-turn boundary and then opens that child. A forked child may reuse an ancestor's checkpoint only while the requested boundary is inside every durable `seedLength` fence and still matches the ancestor's exact `turn/end`; direct child checkpoints take priority and sibling checkpoints never mix. **Branch** creates only a conversation branch and keeps project files unchanged; **Turn Rewind** always restores project files, optionally followed by a conversation branch. The original Session is always retained.
 
 Example requests:
 
@@ -150,7 +151,7 @@ All model-visible list, inspect, recovery, plan, and apply payloads are paginate
 Override configuration in the profile patch layer:
 
 ```yaml
-- id: change-ledger
+- id: turn-rewind
   config:
     storageDir: ~/.dsh/change-ledger/v1
     maxRestorePoints: 50
