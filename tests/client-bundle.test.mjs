@@ -192,7 +192,7 @@ test('rewind dialog restores files in two modes without a duplicate confirmation
   })
   const noFiles = findNode(noFilesTree, node => node.type === Button && node.props.variant === 'primary')
   assert.equal(noFiles.props.disabled, true)
-  assert.ok(findNode(noFilesTree, node => node.type === 'p' && String(node.props.children).includes('Branch')))
+  assert.ok(findNode(noFilesTree, node => node.type === 'p' && String(node.props.children).includes('分支新对话')))
 
   stateIndex = 0
   values = [true, false, { status: 'failed', error: 'transient' }, 'both', false, false, false, null, null, null]

@@ -407,7 +407,7 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
               {driftBlocked && <p className="dcl-rewind-warning">项目的版本状态已经变化，当前无法安全恢复。请先完成或取消正在进行的版本控制操作，然后重新检查。</p>}
               {planMissing && <p className="dcl-rewind-error">恢复信息已经失效，请重新检查文件。</p>}
               {stale && <p className="dcl-rewind-error">项目文件在检查后又发生了变化。为避免覆盖新修改，这次恢复已失效，请重新检查。</p>}
-              {ready.totalChanges === 0 && <p className="dcl-rewind-status">项目文件已经和这一轮结束时一致，无需恢复。如需从这里开始新对话，请使用回复旁的 Branch 按钮。</p>}
+              {ready.totalChanges === 0 && <p className="dcl-rewind-status">项目文件已经和这一轮结束时一致，无需恢复。如需从这里开始新对话，请使用回复旁的“分支新对话”按钮。</p>}
               {ready.changes.length > 0 && (
                 <div className="dcl-rewind-files">
                   {ready.changes.map(change => <div className="dcl-rewind-file" key={change.path}><code>{change.path}</code><span className="dcl-rewind-kind">{fileRecoveryLabel(change.kind)}</span></div>)}
@@ -571,7 +571,7 @@ function friendlyError(error: unknown): string {
     case 'PLAN_STALE': return '项目文件在检查后又发生了变化。为避免覆盖新修改，请重新检查后再恢复。'
     case 'WORKSPACE_IN_USE': return '这个项目目录还有其他对话正在运行。请等待它们结束或先停止运行，再重新检查。'
     case 'WORKSPACE_LOCKED': return '另一个恢复操作正在处理这个项目目录。请等待它完成后重新检查。'
-    case 'NO_CHANGES': return '项目文件已经和这一轮结束时一致，无需恢复。需要新对话时请使用 Branch。'
+    case 'NO_CHANGES': return '项目文件已经和这一轮结束时一致，无需恢复。需要新对话时请使用“分支新对话”。'
     case 'RESTORE_FAILED_ROLLED_BACK': return '恢复未能完成，项目文件已自动还原到操作前的状态。'
     case 'CONVERSATION_REWIND_FAILED': return '文件已经恢复，但无法创建继续对话；项目文件已自动还原。'
     default: return error.message
