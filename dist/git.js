@@ -6,12 +6,7 @@ import { canonicalDirectory, isNodeError, validateRelativePath } from './path-ut
 const GIT_MAX_BUFFER = 32 * 1024 * 1024;
 /** Discover the Git worktree owning `cwd` and enumerate tracked/non-ignored paths. */
 export async function discoverRepository(cwd, signal) {
-    const canonicalCwd = await canonicalDirectory(cwd);
-    const rootRaw = await git(canonicalCwd, ['rev-parse', '--show-toplevel'], signal);
-    const root = await realpath(stripLineEnding(rootRaw));
-    if (!isAbsolute(root)) {
-        throw new ChangeLedgerError('GIT_ROOT_INVALID', `git returned a non-absolute worktree root: ${JSON.stringify(root)}`);
-    }
+    const root = await discoverRepositoryRoot(cwd, signal);
     const sparse = (await gitOptional(root, ['config', '--bool', '--get', 'core.sparseCheckout'], signal))?.trim() === 'true';
     if (sparse) {
         throw new ChangeLedgerError('SPARSE_CHECKOUT_UNSUPPORTED', 'sparse-checkout worktrees are not supported because absent paths are ambiguous');
@@ -43,6 +38,16 @@ export async function discoverRepository(cwd, signal) {
         },
         paths,
     };
+}
+/** Resolve the canonical Git worktree root owning `cwd` without inventorying its files. */
+export async function discoverRepositoryRoot(cwd, signal) {
+    const canonicalCwd = await canonicalDirectory(cwd);
+    const rootRaw = await git(canonicalCwd, ['rev-parse', '--show-toplevel'], signal);
+    const root = await realpath(stripLineEnding(rootRaw));
+    if (!isAbsolute(root)) {
+        throw new ChangeLedgerError('GIT_ROOT_INVALID', `git returned a non-absolute worktree root: ${JSON.stringify(root)}`);
+    }
+    return root;
 }
 /** Return true when two repository fences refer to the same checkout state. */
 export function sameRepositoryFence(left, right) {

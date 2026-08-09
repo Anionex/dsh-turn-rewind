@@ -1,14 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { ChangeLedgerError, errorMessage } from './errors.js';
+import { discoverRepositoryRoot } from './git.js';
 export const REWIND_HTTP_PATH = '/change-ledger/rewind';
 const BODY_LIMIT = 64 * 1024;
 const CHANGE_PREVIEW_LIMIT = 200;
-/** In-memory capture status used to distinguish a pending checkpoint from a permanent miss. */
+/** In-memory capture status and same-boundary retry state for turn checkpoints. */
 export class TurnCheckpointCoordinator {
     engine;
     scheduled = new Map();
     pending = new Set();
     failures = new Map();
+    retries = new Map();
+    workspaceTails = new Map();
     constructor(engine) {
         this.engine = engine;
     }
@@ -29,6 +32,20 @@ export class TurnCheckpointCoordinator {
         const error = this.failures.get(key);
         return error === undefined ? { status: 'missing' } : { status: 'failed', error };
     }
+    /** Retry a failed capture only while the Agent remains at the same idle turn boundary. */
+    retry(sessionId, turn) {
+        const key = checkpointKey(sessionId, turn);
+        const target = this.retries.get(key);
+        if (target === undefined || target.agent.status !== 'idle')
+            return false;
+        const end = target.agent.session.events.findLast(event => event.type === 'turn/end');
+        if (end?.seq !== target.turnEndSeq || end.data.turn !== turn) {
+            this.retries.delete(key);
+            return false;
+        }
+        this.schedule(target.ctx, target.agent);
+        return this.pending.has(key);
+    }
     schedule(ctx, agent) {
         if (agent.status !== 'idle')
             return;
@@ -45,25 +62,50 @@ export class TurnCheckpointCoordinator {
         const key = checkpointKey(agent.id, turn);
         this.pending.add(key);
         this.failures.delete(key);
+        this.retries.delete(key);
         try {
             void agent.runMaintenance(async (signal) => {
-                await this.engine.createTurnCheckpoint({
-                    cwd,
-                    sessionId: agent.id,
-                    turn: turn,
-                    turnEndSeq: end.seq,
-                    signal,
+                const workspace = await discoverRepositoryRoot(cwd, signal);
+                await this.serializeWorkspace(workspace, signal, async () => {
+                    await this.engine.createTurnCheckpoint({
+                        cwd: workspace,
+                        sessionId: agent.id,
+                        turn: turn,
+                        turnEndSeq: end.seq,
+                        signal,
+                    });
                 });
             }).catch((error) => {
-                this.failures.set(key, errorMessage(error));
-                ctx.logger.warn(`[change-ledger] turn checkpoint failed for ${agent.id} turn ${String(turn)}: ${errorMessage(error)}`);
+                this.recordFailure(ctx, agent, key, turn, end.seq, error);
             }).finally(() => { this.pending.delete(key); });
         }
         catch (error) {
             this.pending.delete(key);
-            this.scheduled.delete(agent.id);
-            this.failures.set(key, errorMessage(error));
+            this.recordFailure(ctx, agent, key, turn, end.seq, error);
         }
+    }
+    async serializeWorkspace(workspace, signal, task) {
+        const previous = this.workspaceTails.get(workspace) ?? Promise.resolve();
+        const current = previous.catch(() => undefined).then(async () => {
+            signal.throwIfAborted();
+            await task();
+        });
+        this.workspaceTails.set(workspace, current);
+        try {
+            await current;
+        }
+        finally {
+            if (this.workspaceTails.get(workspace) === current)
+                this.workspaceTails.delete(workspace);
+        }
+    }
+    recordFailure(ctx, agent, key, turn, turnEndSeq, error) {
+        if (this.scheduled.get(agent.id) === turnEndSeq)
+            this.scheduled.delete(agent.id);
+        const message = errorMessage(error);
+        this.failures.set(key, message);
+        this.retries.set(key, { ctx, agent, turnEndSeq });
+        ctx.logger.warn(`[change-ledger] turn checkpoint failed for ${agent.id} turn ${String(turn)}: ${message}`);
     }
 }
 /** Register the same-origin preview/apply endpoint consumed by the browser half. */
@@ -85,6 +127,8 @@ export function createRewindHttpHandler(ctx, engine, coordinator) {
                 const cwd = await sessionCwd(ctx, sessionId);
                 const checkpoint = await engine.findTurnCheckpoint({ cwd, sessionId, turn });
                 if (checkpoint === undefined) {
+                    if (url.searchParams.get('retry') === '1')
+                        coordinator.retry(sessionId, turn);
                     json(response, 200, coordinator.state(sessionId, turn));
                     return;
                 }

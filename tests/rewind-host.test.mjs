@@ -57,12 +57,117 @@ test('idle turn capture runs as Agent maintenance and persists the completed bou
   const coordinator = new TurnCheckpointCoordinator(f.engine)
   coordinator.install(ctx)
   let checkpoint
-  for (let attempt = 0; attempt < 50 && checkpoint === undefined; attempt += 1) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
     await new Promise(resolve => setTimeout(resolve, 20))
     checkpoint = await f.engine.findTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-web', turn: 2 })
+    if (checkpoint !== undefined && coordinator.state('session-web', 2).status === 'missing') break
   }
   assert.equal(checkpoint?.turnEndSeq, 8)
   assert.equal(coordinator.state('session-web', 2).status, 'missing')
+})
+
+test('idle turn capture serializes agents that share one repository root', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const nested = join(f.workspace, 'nested')
+  await mkdir(nested)
+  const capture = f.engine.createTurnCheckpoint.bind(f.engine)
+  let active = 0
+  let maxActive = 0
+  f.engine.createTurnCheckpoint = async (options) => {
+    active += 1
+    maxActive = Math.max(maxActive, active)
+    try {
+      await new Promise(resolve => setTimeout(resolve, 40))
+      return await capture(options)
+    } finally {
+      active -= 1
+    }
+  }
+  const agents = [
+    idleAgent('session-one', f.workspace, 1, 4),
+    idleAgent('session-two', nested, 2, 8),
+  ]
+  const ctx = {
+    agents: { list: () => agents },
+    logger: { warn() {} },
+    on() { return () => {} },
+  }
+  const coordinator = new TurnCheckpointCoordinator(f.engine)
+  coordinator.install(ctx)
+
+  await eventually(async () => {
+    const first = await f.engine.findTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-one', turn: 1 })
+    const second = await f.engine.findTurnCheckpoint({ cwd: nested, sessionId: 'session-two', turn: 2 })
+    return (first !== undefined && second !== undefined)
+      || coordinator.state('session-one', 1).status === 'failed'
+      || coordinator.state('session-two', 2).status === 'failed'
+  })
+
+  assert.equal(maxActive, 1)
+  assert.equal((await f.engine.findTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-one', turn: 1 }))?.turnEndSeq, 4)
+  assert.equal((await f.engine.findTurnCheckpoint({ cwd: nested, sessionId: 'session-two', turn: 2 }))?.turnEndSeq, 8)
+})
+
+test('failed idle turn capture retries only while the same boundary remains current', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const capture = f.engine.createTurnCheckpoint.bind(f.engine)
+  let attempts = 0
+  f.engine.createTurnCheckpoint = async (options) => {
+    attempts += 1
+    if (attempts === 1) throw new Error('transient capture failure')
+    return capture(options)
+  }
+  const agent = idleAgent('session-retry', f.workspace, 3, 12)
+  const coordinator = new TurnCheckpointCoordinator(f.engine)
+  coordinator.install({
+    agents: { list: () => [agent] },
+    logger: { warn() {} },
+    on() { return () => {} },
+  })
+  await eventually(() => coordinator.state('session-retry', 3).status === 'failed')
+
+  const ctx = {
+    sessions: { get: () => agent.session },
+    sessionQuery: { readSession: async () => { throw new Error('unexpected cold read') } },
+    apiProxy: { sessions: { fork: async () => { throw new Error('unexpected fork') } } },
+  }
+  const handler = createRewindHttpHandler(ctx, f.engine, coordinator)
+  const retried = await request(handler, 'GET', '/change-ledger/rewind?sessionId=session-retry&turn=3&retry=1')
+  assert.equal(retried.body.status, 'pending')
+  await eventually(async () => (await f.engine.findTurnCheckpoint({
+    cwd: f.workspace,
+    sessionId: 'session-retry',
+    turn: 3,
+  })) !== undefined)
+  assert.equal(attempts, 2)
+
+  const preview = await request(handler, 'GET', '/change-ledger/rewind?sessionId=session-retry&turn=3')
+  assert.equal(preview.body.status, 'ready')
+})
+
+test('failed idle turn capture cannot be relabeled after the Agent advances', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  let attempts = 0
+  f.engine.createTurnCheckpoint = async () => {
+    attempts += 1
+    throw new Error('persistent capture failure')
+  }
+  const agent = idleAgent('session-advanced', f.workspace, 3, 12)
+  const coordinator = new TurnCheckpointCoordinator(f.engine)
+  coordinator.install({
+    agents: { list: () => [agent] },
+    logger: { warn() {} },
+    on() { return () => {} },
+  })
+  await eventually(() => coordinator.state('session-advanced', 3).status === 'failed')
+  agent.session.events = [{ type: 'turn/end', seq: 16, data: { turn: 4 } }]
+
+  assert.equal(coordinator.retry('session-advanced', 3), false)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(attempts, 1)
 })
 
 test('HTTP preview mints a session-bound plan and code apply restores the checkpoint', async (t) => {
@@ -268,4 +373,21 @@ function sessionEvents() {
     { type: 'assistant/message', seq: 3, data: {} },
     { type: 'turn/end', seq: 4, data: { turn: 1 } },
   ]
+}
+
+function idleAgent(id, cwd, turn, seq) {
+  return {
+    id,
+    status: 'idle',
+    session: { id, header: { cwd }, events: [{ type: 'turn/end', seq, data: { turn } }] },
+    runMaintenance(task) { return task(new AbortController().signal) },
+  }
+}
+
+async function eventually(predicate) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (await predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  assert.fail('condition was not reached before timeout')
 }

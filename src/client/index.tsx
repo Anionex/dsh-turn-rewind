@@ -139,7 +139,7 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
     loadAbort.current = null
   }, [])
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (retry = false) => {
     loadAbort.current?.abort()
     const controller = new AbortController()
     loadAbort.current = controller
@@ -147,7 +147,8 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
     setError(null)
     setCompleted(null)
     try {
-      const response = await fetch(`${PATH}?sessionId=${encodeURIComponent(sessionId)}&turn=${String(matched.turn)}`, {
+      const retryQuery = retry ? '&retry=1' : ''
+      const response = await fetch(`${PATH}?sessionId=${encodeURIComponent(sessionId)}&turn=${String(matched.turn)}${retryQuery}`, {
         method: 'GET', headers: { accept: 'application/json' }, cache: 'no-store', signal: controller.signal,
       })
       const value = await responseJson(response)
@@ -325,7 +326,7 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
           )}
           {completed !== null && <p>{completed}</p>}
           {error !== null && <p className="dcl-rewind-error">{error}</p>}
-          {!loading && preview?.status !== 'ready' && <Button variant="outline" size="sm" onClick={() => { void load() }}>重试</Button>}
+          {!loading && preview?.status !== 'ready' && <Button variant="outline" size="sm" onClick={() => { void load(true) }}>重试</Button>}
         </div>
       </Modal>
     </div>

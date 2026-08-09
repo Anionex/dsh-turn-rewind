@@ -15,12 +15,7 @@ export interface RepositorySnapshotSource {
 
 /** Discover the Git worktree owning `cwd` and enumerate tracked/non-ignored paths. */
 export async function discoverRepository(cwd: string, signal?: AbortSignal): Promise<RepositorySnapshotSource> {
-  const canonicalCwd = await canonicalDirectory(cwd)
-  const rootRaw = await git(canonicalCwd, ['rev-parse', '--show-toplevel'], signal)
-  const root = await realpath(stripLineEnding(rootRaw))
-  if (!isAbsolute(root)) {
-    throw new ChangeLedgerError('GIT_ROOT_INVALID', `git returned a non-absolute worktree root: ${JSON.stringify(root)}`)
-  }
+  const root = await discoverRepositoryRoot(cwd, signal)
 
   const sparse = (await gitOptional(root, ['config', '--bool', '--get', 'core.sparseCheckout'], signal))?.trim() === 'true'
   if (sparse) {
@@ -60,6 +55,17 @@ export async function discoverRepository(cwd: string, signal?: AbortSignal): Pro
     },
     paths,
   }
+}
+
+/** Resolve the canonical Git worktree root owning `cwd` without inventorying its files. */
+export async function discoverRepositoryRoot(cwd: string, signal?: AbortSignal): Promise<string> {
+  const canonicalCwd = await canonicalDirectory(cwd)
+  const rootRaw = await git(canonicalCwd, ['rev-parse', '--show-toplevel'], signal)
+  const root = await realpath(stripLineEnding(rootRaw))
+  if (!isAbsolute(root)) {
+    throw new ChangeLedgerError('GIT_ROOT_INVALID', `git returned a non-absolute worktree root: ${JSON.stringify(root)}`)
+  }
+  return root
 }
 
 /** Return true when two repository fences refer to the same checkout state. */

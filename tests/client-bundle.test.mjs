@@ -7,6 +7,7 @@ test('browser bundle registers the turn-tail selector and anchors only finalized
   const source = await readFile(new URL('../dist/client.js', import.meta.url), 'utf8')
   let plugin
   const context = {
+    AbortController,
     window: {
       __ModuleLoader__: {
         load(record) {
@@ -93,6 +94,7 @@ test('rewind dialog scopes restore plans by mode and opens conversation results'
   }
   let plugin
   const context = {
+    AbortController,
     window: {
       __ModuleLoader__: {
         load(record) {
@@ -188,6 +190,21 @@ test('rewind dialog scopes restore plans by mode and opens conversation results'
   })
   const codeUnavailable = findNode(noCodeTree, node => node.type === Button && node.props.variant === 'primary')
   assert.equal(codeUnavailable.props.disabled, true)
+
+  stateIndex = 0
+  values = [true, false, { status: 'failed', error: 'transient' }, 'both', false, false, null, null]
+  let retryUrl
+  context.fetch = async (url) => {
+    retryUrl = url
+    return { ok: true, json: async () => ({ status: 'pending' }) }
+  }
+  const failedTree = plugin.RewindTurnTail({
+    matched: { turn: 3, seq: 8 }, sessionId: 'session-source', openSession() {},
+  })
+  const retry = findNode(failedTree, node => node.type === Button && node.props.size === 'sm')
+  retry.props.onClick()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(retryUrl, '/change-ledger/rewind?sessionId=session-source&turn=3&retry=1')
 })
 
 function findNode(value, predicate) {

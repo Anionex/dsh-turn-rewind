@@ -92,12 +92,14 @@ declare module 'cordis' {
     }
 }
 export declare const REWIND_HTTP_PATH = "/change-ledger/rewind";
-/** In-memory capture status used to distinguish a pending checkpoint from a permanent miss. */
+/** In-memory capture status and same-boundary retry state for turn checkpoints. */
 export declare class TurnCheckpointCoordinator {
     private readonly engine;
     private readonly scheduled;
     private readonly pending;
     private readonly failures;
+    private readonly retries;
+    private readonly workspaceTails;
     constructor(engine: ChangeLedgerEngine);
     /** Install idle-boundary capture listeners while the Agent service is present. */
     install(ctx: Context): void;
@@ -106,7 +108,11 @@ export declare class TurnCheckpointCoordinator {
         readonly status: 'pending' | 'failed' | 'missing';
         readonly error?: string;
     };
+    /** Retry a failed capture only while the Agent remains at the same idle turn boundary. */
+    retry(sessionId: string, turn: number): boolean;
     private schedule;
+    private serializeWorkspace;
+    private recordFailure;
 }
 /** Register the same-origin preview/apply endpoint consumed by the browser half. */
 export declare function installRewindHttp(ctx: Context, engine: ChangeLedgerEngine, coordinator: TurnCheckpointCoordinator): void;
