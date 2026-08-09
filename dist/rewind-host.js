@@ -197,9 +197,8 @@ export function createRewindHttpHandler(ctx, engine, coordinator) {
                     if (restoreResult === undefined)
                         throw forkError;
                     try {
-                        const cwd = await sessionCwd(ctx, sessionId);
                         const rollbackPlan = await engine.planRestore({
-                            cwd,
+                            cwd: checkpoint.cwd,
                             restorePointId: restoreResult.rescuePointId,
                             sessionId,
                         });
@@ -224,19 +223,18 @@ export function createRewindHttpHandler(ctx, engine, coordinator) {
         }
     };
 }
-async function sessionCwd(ctx, sessionId) {
-    const live = ctx.sessions.get(sessionId);
-    const cwd = live?.header.cwd ?? (await ctx.sessionQuery.readSession(sessionId)).header.cwd;
-    if (cwd === undefined)
-        throw new ChangeLedgerError('WORKSPACE_REQUIRED', `session ${sessionId} has no workspace`);
-    return cwd;
-}
 async function readSession(ctx, sessionId) {
     const live = ctx.sessions.get(sessionId);
-    return live ?? { id: sessionId, ...await ctx.sessionQuery.readSession(sessionId) };
+    if (live !== undefined)
+        return live;
+    const stored = await ctx.sessionQuery.readSession(sessionId);
+    return { id: sessionId, header: stored.session, events: stored.events };
 }
 async function resolveTurnCheckpoint(ctx, engine, sessionId, turn) {
-    const cwd = await sessionCwd(ctx, sessionId);
+    let current = await readSession(ctx, sessionId);
+    const cwd = current.header.cwd;
+    if (cwd === undefined)
+        throw new ChangeLedgerError('WORKSPACE_REQUIRED', `session ${sessionId} has no workspace`);
     const direct = await engine.findTurnCheckpoint({ cwd, sessionId, turn });
     if (direct !== undefined) {
         if (direct.turnEndSeq === undefined) {
@@ -244,7 +242,6 @@ async function resolveTurnCheckpoint(ctx, engine, sessionId, turn) {
         }
         return { id: direct.id, turnEndSeq: direct.turnEndSeq, cwd };
     }
-    let current = await readSession(ctx, sessionId);
     const boundary = current.events.find(event => event.type === 'turn/end' && event.data.turn === turn);
     if (boundary === undefined)
         return undefined;

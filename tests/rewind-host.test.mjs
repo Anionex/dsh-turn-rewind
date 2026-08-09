@@ -299,6 +299,37 @@ test('forked conversations inherit exact seeded-turn checkpoints from their pare
   assert.deepEqual(forkRequest.payload, { sessionId: 'session-child', atSeq: 4 })
 })
 
+test('persisted fork lineage uses the session-query snapshot contract', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const checkpoint = await f.engine.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-parent', turn: 1, turnEndSeq: 4 })
+  const events = sessionEvents()
+  const stored = new Map([
+    ['session-child', { session: { cwd: f.workspace, parentSession: 'session-parent', seedLength: 5 }, events }],
+    ['session-parent', { session: { cwd: f.workspace }, events }],
+  ])
+  const reads = []
+  const ctx = {
+    sessions: { get: () => undefined },
+    sessionQuery: {
+      async readSession(id) {
+        reads.push(id)
+        const snapshot = stored.get(id)
+        if (snapshot === undefined) throw new Error(`unexpected persisted session ${id}`)
+        return snapshot
+      },
+    },
+    apiProxy: { sessions: { fork: async () => { throw new Error('unexpected fork') } } },
+  }
+  const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
+  const preview = await request(handler, 'GET', '/change-ledger/rewind?sessionId=session-child&turn=1')
+
+  assert.equal(preview.status, 200)
+  assert.equal(preview.body.status, 'ready')
+  assert.equal(preview.body.checkpointId, checkpoint.id)
+  assert.deepEqual(reads, ['session-child', 'session-parent'])
+})
+
 test('fork lineage never exposes a parent checkpoint beyond the durable seed boundary', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)

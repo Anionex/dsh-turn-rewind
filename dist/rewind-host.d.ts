@@ -29,7 +29,7 @@ interface SessionsLike {
 }
 interface SessionQueryLike {
     readSession(id: string): Promise<{
-        readonly header: SessionHeaderLike;
+        readonly session: SessionHeaderLike;
         readonly events: readonly SessionEventLike[];
     }>;
 }
