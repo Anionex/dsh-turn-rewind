@@ -1,8 +1,8 @@
 {
-  "name": "@dsh-external/change-ledger",
+  "name": "@dsh-external/turn-rewind",
   "version": "0.1.0",
   "private": true,
-  "description": "Persistent, reviewable, and safely restorable workspace change sets for DeepSeek Harness",
+  "description": "Turn-level conversation and workspace rewind for DeepSeek Harness, powered by a persistent Change Ledger",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -59,15 +59,16 @@
     "cordis",
     "restore-point",
     "workspace",
-    "change-ledger"
+    "change-ledger",
+    "turn-rewind"
   ],
   "license": "BSD-3-Clause",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dsh-external/dsh-change-ledger.git"
+    "url": "git+https://github.com/dsh-external/dsh-turn-rewind.git"
   },
   "bugs": {
-    "url": "https://github.com/dsh-external/dsh-change-ledger/issues"
+    "url": "https://github.com/dsh-external/dsh-turn-rewind/issues"
   },
   "peerDependencies": {
     "cordis": "^4.0.0-rc.7"

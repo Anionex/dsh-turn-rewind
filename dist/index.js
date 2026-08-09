@@ -1,6 +1,6 @@
 /**
- * DSH Change Ledger: persistent, inspectable, approval-gated workspace restore points.
- * @module @dsh-external/change-ledger
+ * DSH Turn Rewind, powered by persistent, inspectable, approval-gated Change Ledger restore points.
+ * @module @dsh-external/turn-rewind
  */
 import { Service } from 'cordis';
 import { ChangeLedgerEngine } from './engine.js';

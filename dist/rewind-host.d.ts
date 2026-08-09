@@ -92,7 +92,7 @@ declare module 'cordis' {
         }): void;
     }
 }
-export declare const REWIND_HTTP_PATH = "/change-ledger/rewind";
+export declare const REWIND_HTTP_PATH = "/turn-rewind";
 /** In-memory capture status and same-boundary retry state for turn checkpoints. */
 export declare class TurnCheckpointCoordinator {
     private readonly engine;

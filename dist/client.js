@@ -1,4 +1,4 @@
-window.__ModuleLoader__.load({ id: "@dsh-external/change-ledger", factory: (require) => {
+window.__ModuleLoader__.load({ id: "@dsh-external/turn-rewind", factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -11,8 +11,8 @@ const jsx_runtime_1 = require("react/jsx-runtime");
 const react_1 = require("react");
 const react_dom_1 = require("react-dom");
 const dsh_client_ui_primitives_1 = require("@deepseek-ai/dsh-client-ui-primitives");
-const PATH = '/change-ledger/rewind';
-const STYLE_ID = '@dsh-external/change-ledger/rewind';
+const PATH = '/turn-rewind';
+const STYLE_ID = '@dsh-external/turn-rewind';
 const styles = `
 .dcl-rewind-tail{display:inline-flex;align-items:center;align-self:center;order:0;height:24px;margin-left:2px}
 .dcl-rewind-trigger{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer}
@@ -55,15 +55,15 @@ function apply(ctx) {
         if (document.querySelector(`style[data-plugin-css="${STYLE_ID}"]`) !== null)
             return () => { };
         const tag = document.createElement('style');
-        tag.dataset.plugin = '@dsh-external/change-ledger';
+        tag.dataset.plugin = '@dsh-external/turn-rewind';
         tag.dataset.pluginCss = STYLE_ID;
         tag.textContent = styles;
         document.head.appendChild(tag);
         return () => { tag.remove(); };
-    }, 'change-ledger: rewind styles');
+    }, 'turn-rewind: styles');
     ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
         name: 'conversation.session.header.actions',
-        id: 'change-ledger-rewind-portals',
+        id: 'turn-rewind-portals',
         order: 100,
         inject: () => ({ openSession: (sessionId) => { ctx.sessions.open(sessionId); } }),
     }, RewindTurnPortals));

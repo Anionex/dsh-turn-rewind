@@ -162,7 +162,7 @@ test('failed idle turn capture retries only while the same boundary remains curr
     apiProxy: { sessions: { fork: async () => { throw new Error('unexpected fork') } } },
   }
   const handler = createRewindHttpHandler(ctx, f.engine, coordinator)
-  const retried = await request(handler, 'GET', '/change-ledger/rewind?sessionId=session-retry&turn=3&retry=1')
+  const retried = await request(handler, 'GET', '/turn-rewind?sessionId=session-retry&turn=3&retry=1')
   assert.equal(retried.body.status, 'pending')
   await eventually(async () => (await f.engine.findTurnCheckpoint({
     cwd: f.workspace,
@@ -171,7 +171,7 @@ test('failed idle turn capture retries only while the same boundary remains curr
   })) !== undefined)
   assert.equal(attempts, 2)
 
-  const preview = await request(handler, 'GET', '/change-ledger/rewind?sessionId=session-retry&turn=3')
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-retry&turn=3')
   assert.equal(preview.body.status, 'ready')
 })
 
@@ -213,13 +213,13 @@ test('HTTP preview mints a session-bound plan and code apply restores the checkp
   }
   const handler = createRewindHttpHandler(ctx, f.engine, coordinator)
 
-  const preview = await request(handler, 'GET', '/change-ledger/rewind?sessionId=session-web&turn=1')
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-web&turn=1')
   assert.equal(preview.status, 200)
   assert.equal(preview.body.status, 'ready')
   assert.equal(preview.body.totalChanges, 1)
   assert.deepEqual(preview.body.changes, [{ path: 'code.txt', kind: 'modified' }])
 
-  const applied = await request(handler, 'POST', '/change-ledger/rewind', {
+  const applied = await request(handler, 'POST', '/turn-rewind', {
     mode: 'code',
     sessionId: 'session-web',
     planId: preview.body.planId,
@@ -251,7 +251,7 @@ test('conversation rewind validates the checkpoint boundary and delegates to the
     },
   }
   const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
-  const result = await request(handler, 'POST', '/change-ledger/rewind', {
+  const result = await request(handler, 'POST', '/turn-rewind', {
     mode: 'conversation', sessionId: 'session-web', turn: 1, checkpointId: checkpoint.id,
   })
   assert.equal(result.status, 200)
@@ -286,12 +286,12 @@ test('forked conversations inherit exact seeded-turn checkpoints from their pare
     },
   }
   const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
-  const preview = await request(handler, 'GET', '/change-ledger/rewind?sessionId=session-child&turn=1')
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-child&turn=1')
   assert.equal(preview.status, 200)
   assert.equal(preview.body.status, 'ready')
   assert.equal(preview.body.checkpointId, checkpoint.id)
 
-  const result = await request(handler, 'POST', '/change-ledger/rewind', {
+  const result = await request(handler, 'POST', '/turn-rewind', {
     mode: 'conversation', sessionId: 'session-child', turn: 1, checkpointId: checkpoint.id,
   })
   assert.equal(result.status, 200)
@@ -322,7 +322,7 @@ test('persisted fork lineage uses the session-query snapshot contract', async (t
     apiProxy: { sessions: { fork: async () => { throw new Error('unexpected fork') } } },
   }
   const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
-  const preview = await request(handler, 'GET', '/change-ledger/rewind?sessionId=session-child&turn=1')
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-child&turn=1')
 
   assert.equal(preview.status, 200)
   assert.equal(preview.body.status, 'ready')
@@ -346,7 +346,7 @@ test('fork lineage never exposes a parent checkpoint beyond the durable seed bou
     apiProxy: { sessions: { fork: async () => { throw new Error('unexpected fork') } } },
   }
   const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
-  const preview = await request(handler, 'GET', '/change-ledger/rewind?sessionId=session-child&turn=1')
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-child&turn=1')
   assert.equal(preview.status, 200)
   assert.equal(preview.body.status, 'missing')
 })
@@ -368,8 +368,8 @@ test('combined rewind restores code before creating the conversation child', asy
     },
   }
   const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
-  const preview = await request(handler, 'GET', '/change-ledger/rewind?sessionId=session-web&turn=1')
-  const result = await request(handler, 'POST', '/change-ledger/rewind', {
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-web&turn=1')
+  const result = await request(handler, 'POST', '/turn-rewind', {
     mode: 'both', sessionId: 'session-web', turn: 1, checkpointId: checkpoint.id,
     planId: preview.body.planId, confirmation: preview.body.confirmation,
   })
@@ -396,7 +396,7 @@ test('combined rewind without code drift creates only the conversation child', a
     },
   }
   const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
-  const result = await request(handler, 'POST', '/change-ledger/rewind', {
+  const result = await request(handler, 'POST', '/turn-rewind', {
     mode: 'both', sessionId: 'session-web', turn: 1, checkpointId: checkpoint.id,
   })
   assert.equal(result.status, 200)
@@ -426,10 +426,10 @@ test('combined rewind without a plan rejects code drift introduced after preview
     },
   }
   const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
-  const preview = await request(handler, 'GET', '/change-ledger/rewind?sessionId=session-web&turn=1')
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-web&turn=1')
   assert.equal(preview.body.totalChanges, 0)
   await writeFile(join(f.workspace, 'code.txt'), 'changed after preview\n')
-  const result = await request(handler, 'POST', '/change-ledger/rewind', {
+  const result = await request(handler, 'POST', '/turn-rewind', {
     mode: 'both', sessionId: 'session-web', turn: 1, checkpointId: checkpoint.id,
   })
   assert.equal(result.status, 409)
@@ -456,8 +456,8 @@ test('combined rewind compensates code when conversation creation fails', async 
     },
   }
   const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
-  const preview = await request(handler, 'GET', '/change-ledger/rewind?sessionId=session-web&turn=1')
-  const result = await request(handler, 'POST', '/change-ledger/rewind', {
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-web&turn=1')
+  const result = await request(handler, 'POST', '/turn-rewind', {
     mode: 'both', sessionId: 'session-web', turn: 1, checkpointId: checkpoint.id,
     planId: preview.body.planId, confirmation: preview.body.confirmation,
   })

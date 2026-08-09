@@ -62,7 +62,7 @@ test('browser bundle registers the turn-tail selector and anchors only finalized
     },
   })
   assert.equal(registration.entry.name, 'conversation.session.header.actions')
-  assert.equal(registration.entry.id, 'change-ledger-rewind-portals')
+  assert.equal(registration.entry.id, 'turn-rewind-portals')
   assert.match(style.textContent, /\.dcl-rewind-dialog\{[^}]*width:min\(560px,100%\)/)
   assert.match(style.textContent, /\.dcl-rewind-body\{[^}]*width:100%;min-width:0;max-width:100%;box-sizing:border-box/)
   assert.match(style.textContent, /\.dcl-rewind-trigger\{[^}]*justify-content:center;width:24px;height:24px;padding:0/)
@@ -222,7 +222,7 @@ test('rewind dialog scopes restore plans by mode and opens conversation results'
   assert.equal(retry.props.className, 'dcl-rewind-retry')
   retry.props.onClick()
   await new Promise(resolve => setTimeout(resolve, 0))
-  assert.equal(retryUrl, '/change-ledger/rewind?sessionId=session-source&turn=3&retry=1')
+  assert.equal(retryUrl, '/turn-rewind?sessionId=session-source&turn=3&retry=1')
 })
 
 function findNode(value, predicate) {

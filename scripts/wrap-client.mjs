@@ -9,7 +9,7 @@ const source = (await readFile(built, 'utf8')).replace(/\n?\/\/# sourceMappingUR
 const sourceMap = JSON.parse(await readFile(builtMap, 'utf8'))
 sourceMap.file = 'client.js'
 sourceMap.sources = sourceMap.sources.map(sourcePath => `../src/client/${sourcePath.replace(/^\.\.\//, '')}`)
-const banner = 'window.__ModuleLoader__.load({ id: "@dsh-external/change-ledger", factory: (require) => {\nvar module = { exports: {} }; var exports = module.exports;\n'
+const banner = 'window.__ModuleLoader__.load({ id: "@dsh-external/turn-rewind", factory: (require) => {\nvar module = { exports: {} }; var exports = module.exports;\n'
 const footer = '\nreturn module.exports; } });\n//# sourceMappingURL=client.js.map\n'
 
 await mkdir(dist, { recursive: true })

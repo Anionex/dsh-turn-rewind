@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { ChangeLedgerError, errorMessage } from './errors.js';
 import { discoverRepositoryRoot } from './git.js';
-export const REWIND_HTTP_PATH = '/change-ledger/rewind';
+export const REWIND_HTTP_PATH = '/turn-rewind';
 const BODY_LIMIT = 64 * 1024;
 const CHANGE_PREVIEW_LIMIT = 200;
 /** In-memory capture status and same-boundary retry state for turn checkpoints. */

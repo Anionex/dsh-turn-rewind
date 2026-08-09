@@ -96,7 +96,7 @@ declare module 'cordis' {
   }
 }
 
-export const REWIND_HTTP_PATH = '/change-ledger/rewind'
+export const REWIND_HTTP_PATH = '/turn-rewind'
 const BODY_LIMIT = 64 * 1024
 const CHANGE_PREVIEW_LIMIT = 200
 
