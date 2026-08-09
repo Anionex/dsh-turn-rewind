@@ -180,9 +180,9 @@ test('rewind dialog restores files in two modes and allows reviewed Git history 
     matched: { messageSeq: 2, promptText: '修复这个问题' }, sessionId: 'session-source', async openRestoredSession() {},
   })
   const modal = findNode(blockedTree, node => node.type === primitives.Modal)
-  assert.equal(modal.props.title, '回到发送这条消息之前')
+  assert.equal(modal.props.title, '恢复到发送这条消息之前')
   const trigger = findNode(blockedTree, node => node.type === 'button' && node.props.className === 'dcl-rewind-trigger')
-  assert.equal(trigger.props['aria-label'], '回到发送这条消息之前')
+  assert.equal(trigger.props['aria-label'], '恢复到发送这条消息之前')
   assert.ok(findNode(trigger, node => typeof node.type === 'function' && node.type.name === 'RewindIcon'))
   const blocked = findNode(blockedTree, node => node.type === Button && node.props.variant === 'primary')
   assert.equal(blocked.props.disabled, true)

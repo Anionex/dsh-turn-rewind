@@ -344,7 +344,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
       }
       const childSessionId = requiredString(result.sessionId, 'sessionId')
       requiredString(result.rescuePointId, 'rescuePointId')
-      setCompleted('项目文件已恢复，并已创建从这里继续的新对话。恢复前的文件已自动备份。')
+      setCompleted('项目文件已恢复，并已创建新对话。恢复前的文件已自动备份。')
       try {
         await openRestoredSession(childSessionId, matched.promptText)
         setOpen(false)
@@ -368,15 +368,15 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
 
   return (
     <div className="dcl-rewind-tail">
-      <Tooltip label="回到发送这条消息之前" side="bottom">
-        <button type="button" className="dcl-rewind-trigger" onClick={show} aria-label="回到发送这条消息之前">
+      <Tooltip label="恢复到发送这条消息之前" side="bottom">
+        <button type="button" className="dcl-rewind-trigger" onClick={show} aria-label="恢复到发送这条消息之前">
           <RewindIcon size={16} />
         </button>
       </Tooltip>
       <Modal
         open={open}
         onClose={close}
-        title="回到发送这条消息之前"
+        title="恢复到发送这条消息之前"
         closeLabel="关闭"
         description="先看看哪些文件会恢复，再决定是否重新开始。当前对话会保留。"
         className="dcl-rewind-dialog"
@@ -393,18 +393,18 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
         <div className="dcl-rewind-body">
           {loading && <p className="dcl-rewind-status">正在检查可以恢复的项目文件…</p>}
           {preview?.status === 'pending' && <p className="dcl-rewind-status">这条消息发送前的文件还在保存，请稍后再试。</p>}
-          {preview?.status === 'missing' && <p className="dcl-rewind-error">没有保存发送这条消息前的文件。可能是当时还没启用回退功能，或记录已超过保留期限。</p>}
-          {preview?.status === 'failed' && <p className="dcl-rewind-error">没能保存发送这条消息前的文件：{preview.error}</p>}
+          {preview?.status === 'missing' && <p className="dcl-rewind-error">没有保存这条消息发送前的文件。可能是当时还没启用回退功能，或记录已超过保留期限。</p>}
+          {preview?.status === 'failed' && <p className="dcl-rewind-error">没能保存这条消息发送前的文件：{preview.error}</p>}
           {ready !== null && (
             <>
               <div className="dcl-rewind-options">
                 <label className="dcl-rewind-option" data-selected={mode === 'both'} data-disabled={applying}>
                   <input type="radio" name={radioName} checked={mode === 'both'} disabled={applying} onChange={() => { chooseMode('both') }} />
-                  <span className="dcl-rewind-option-content"><strong>恢复文件并重新开始</strong><span className="dcl-rewind-option-description">恢复文件后创建新对话，并把这条消息放回输入框。</span></span>
+                  <span className="dcl-rewind-option-content"><strong>恢复文件并重新开始</strong><span className="dcl-rewind-option-description">恢复文件、创建新对话，并把这条消息放回输入框。</span></span>
                 </label>
                 <label className="dcl-rewind-option" data-selected={mode === 'code'} data-disabled={applying}>
                   <input type="radio" name={radioName} checked={mode === 'code'} disabled={applying} onChange={() => { chooseMode('code') }} />
-                  <span className="dcl-rewind-option-content"><strong>只恢复文件</strong><span className="dcl-rewind-option-description">恢复发送这条消息之前的文件，当前对话保持不变。</span></span>
+                  <span className="dcl-rewind-option-content"><strong>只恢复文件</strong><span className="dcl-rewind-option-description">恢复这条消息发送前的文件，当前对话保持不变。</span></span>
                 </label>
               </div>
               <div className="dcl-rewind-summary">
@@ -412,17 +412,17 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
                 <span>{mode === 'both' ? '恢复后在新对话里重新发送' : '当前对话保持不变'}</span>
               </div>
               {sharedBlocked && (
-                <p className="dcl-rewind-error">这个项目目录还有其他对话正在运行。恢复文件会影响那些对话，因此当前操作已被阻止。请等待这些对话结束，或先将其停止，再重新检查。</p>
+                <p className="dcl-rewind-error">这个项目目录还有别的对话正在运行。恢复文件会影响到它们，因此本次操作已被阻止。请等那些对话结束或停止后，再重新检查。</p>
               )}
               {ready.headChanged && !ready.operationChanged && (
                 <p className="dcl-rewind-warning">{branchChanged
-                  ? '现在所在的 Git 分支和发送这条消息时不同。恢复不会切换分支，只会把当时的文件内容写入当前分支。'
+                  ? '当前所在的 Git 分支和发送这条消息时不同。恢复不会切换分支，只会把当时的文件内容恢复到当前分支。'
                   : '这条消息之后有了新的 Git 提交。恢复只会改文件，不会撤销提交；完成后这些文件会显示为未提交修改。'}</p>
               )}
               {driftBlocked && <p className="dcl-rewind-warning">Git 正在进行合并、变基或类似操作。请先完成或取消这次 Git 操作，再重新检查。</p>}
-              {planMissing && <p className="dcl-rewind-error">恢复信息已经失效，请重新检查文件。</p>}
+              {planMissing && <p className="dcl-rewind-error">恢复信息已经失效，请重新检查。</p>}
               {stale && <p className="dcl-rewind-error">项目文件在检查后又发生了变化。为避免覆盖新修改，这次恢复已失效，请重新检查。</p>}
-              {ready.totalChanges === 0 && <p className="dcl-rewind-status">项目文件已经是发送这条消息之前的状态，不用恢复。想重新开始时，可以使用“分支新对话”。</p>}
+              {ready.totalChanges === 0 && <p className="dcl-rewind-status">项目文件已经是这条消息发送前的状态，无需恢复。想重新开始时，可以使用“分支新对话”。</p>}
               {ready.changes.length > 0 && (
                 <div className="dcl-rewind-files">
                   {ready.changes.map(change => <div className="dcl-rewind-file" key={change.path}><code>{change.path}</code><span className="dcl-rewind-kind">{fileRecoveryLabel(change.kind)}</span></div>)}
@@ -605,9 +605,14 @@ function friendlyError(error: unknown): string {
   if (!(error instanceof RewindRequestError)) return messageOf(error)
   switch (error.code) {
     case 'PLAN_STALE': return '项目文件在检查后又发生了变化。为避免覆盖新修改，请重新检查后再恢复。'
-    case 'WORKSPACE_IN_USE': return '这个项目目录还有其他对话正在运行。请等待这些对话结束，或先将其停止，再重新检查。'
+    case 'PLAN_STALE_REPOSITORY': return 'Git 状态在检查后又发生了变化，恢复已失效。请重新检查后再试。'
+    case 'WORKSPACE_IN_USE': return '这个项目目录还有别的对话正在运行。请等那些对话结束或停止后，再重新检查。'
     case 'WORKSPACE_LOCKED': return '另一个恢复操作正在处理这个项目目录。请等待它完成后重新检查。'
-    case 'NO_CHANGES': return '项目文件已经是发送这条消息之前的状态，不用恢复。想重新开始时，可以使用“分支新对话”。'
+    case 'HEAD_CHANGED': return '项目的提交或分支已发生变化。为避免覆盖新改动，请重新检查后再恢复。'
+    case 'REPOSITORY_CHANGED': return '这个项目目录已不属于原来的 Git 工作区，无法恢复。'
+    case 'GIT_OPERATION_CHANGED': return 'Git 正在执行其他操作。请先完成或取消该操作，再重新检查。'
+    case 'RESTORE_POINT_NOT_FOUND': return '没有找到对应的文件状态，可能已被清理。'
+    case 'NO_CHANGES': return '项目文件已经是这条消息发送前的状态，无需恢复。想重新开始时，可以使用“分支新对话”。'
     case 'RESTORE_FAILED_ROLLED_BACK': return '恢复未能完成，项目文件已自动还原到操作前的状态。'
     case 'CONVERSATION_REWIND_FAILED': return '文件已恢复，但无法创建新对话；项目文件已自动还原。'
     default: return error.message
