@@ -1,8 +1,10 @@
-# DSH Change Ledger
+# DSH Turn Rewind
 
 [中文说明](README.zh.md)
 
-Persistent, reviewable, and safely restorable working-tree change sets for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
+Turn-level conversation and working-tree rewind for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), backed by persistent, reviewable restore points.
+
+**Turn Rewind** is the user-facing feature, repository, and Profile Bundle name. **Change Ledger** is the durable restore engine underneath it: the `ctx.changeLedger` service, `change_ledger_*` tools, on-disk format, and storage path keep that name because they describe the reusable snapshot and recovery layer rather than the Web action alone.
 
 Change Ledger gives a DSH session an explicit safety boundary around workspace mutations:
 
@@ -22,7 +24,17 @@ create rescue point → restore → verify
 
 It never commits, stashes, resets, switches branches, edits the Git index, or decides automatically that a change should be reverted.
 
-## Why this is a standalone service
+## Preview
+
+Rewind appears as the third icon beside DSH's native Copy and Branch actions:
+
+![Turn Rewind action beside Copy and Branch](docs/assets/turn-rewind-action.png)
+
+Opening it presents a review-first choice between restoring code and conversation together, restoring code only, or rewinding conversation only:
+
+![Turn Rewind review dialog](docs/assets/turn-rewind-dialog.png)
+
+## Why it has a Change Ledger engine
 
 A diff button can show current changes, but it does not own a durable restore lifecycle. Change Ledger owns:
 
@@ -79,21 +91,21 @@ Build the checked-out plugin, then add it to each DSH profile that should expose
 pnpm install --frozen-lockfile
 pnpm run check
 
-dsh plugin --profile web add /path/to/dsh-change-ledger
-dsh plugin --profile headless add /path/to/dsh-change-ledger
+dsh plugin --profile web add /path/to/dsh-turn-rewind
+dsh plugin --profile headless add /path/to/dsh-turn-rewind
 
-dsh --profile web --dump-config | grep change-ledger
+dsh --profile web --dump-config | grep turn-rewind
 ```
 
 Restart a running profile after changing its bundle list.
 
-The package is a DSH Profile Bundle. `package.json` declares `dsh.bundle.patch`, and `cordis.patch.yml` mounts `@dsh-external/change-ledger` without a DSH core patch.
+The package is a DSH Profile Bundle. `package.json` declares `dsh.bundle.patch`, and `cordis.patch.yml` mounts `@dsh-external/turn-rewind` without a DSH core patch.
 
-When the profile also provides the DSH Agent service, the plugin claims the Agent's idle maintenance boundary after each completed turn and captures a hidden checkpoint before queued work may start another turn. It deliberately does not synthesize checkpoints for history resumed before the plugin observed its turn boundary, because the current workspace may no longer represent that earlier turn. In Web profiles, the same-origin `/change-ledger/rewind` endpoint exposes a bounded preview, mints the ordinary short-lived, session-bound restore plan used by code-affecting modes, and delegates conversation reconstruction to DSH's official Host fork lifecycle. It never restores merely because a turn completed.
+When the profile also provides the DSH Agent service, the plugin claims the Agent's idle maintenance boundary after each completed turn and captures a hidden checkpoint before queued work may start another turn. It deliberately does not synthesize checkpoints for history resumed before the plugin observed its turn boundary, because the current workspace may no longer represent that earlier turn. In Web profiles, the same-origin `/turn-rewind` endpoint exposes a bounded preview, mints the ordinary short-lived, session-bound restore plan used by code-affecting modes, and delegates conversation reconstruction to DSH's official Host fork lifecycle. It never restores merely because a turn completed.
 
 ## User flow
 
-In the Web profile, each finalized assistant turn gains a compact **Rewind** action beside the native Copy/Branch controls. The session-scoped bridge deliberately does not claim the single-winner `conversation.chat.turnTail` chain, so DSH's Produced-files row and Rewind remain visible together. Opening Rewind fetches the checkpoint lazily, shows every affected path up to the bounded preview cap, and offers three modes:
+In the Web profile, each finalized assistant turn gains a compact, icon-only **Rewind** action in the third position after the native Copy and Branch controls. The session-scoped bridge deliberately does not claim the single-winner `conversation.chat.turnTail` chain, so DSH's Produced-files row and Rewind remain visible together. Opening Rewind fetches the checkpoint lazily, shows every affected path up to the bounded preview cap, and offers three modes:
 
 | Mode | Code | Conversation |
 | --- | --- | --- |
@@ -175,7 +187,7 @@ export async function apply(ctx: Context) {
 }
 ```
 
-The complete exported types are available from `@dsh-external/change-ledger/format`; the engine is available from `@dsh-external/change-ledger/core` for non-Cordis tests and trusted integrations.
+The complete exported types are available from `@dsh-external/turn-rewind/format`; the engine is available from `@dsh-external/turn-rewind/core` for non-Cordis tests and trusted integrations.
 
 ## Development
 

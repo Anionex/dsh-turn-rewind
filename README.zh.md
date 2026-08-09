@@ -1,8 +1,10 @@
-# DSH Change Ledger
+# DSH Turn Rewind
 
 [English](README.md)
 
-为 DeepSeek Harness 提供**持久、可检查、可安全恢复**的工作树变更集。
+为 DeepSeek Harness 提供 Turn 级对话与工作树回退，并以**持久、可检查、可安全恢复**的恢复点作为基础。
+
+**Turn Rewind** 是用户看到的功能名、仓库名和 Profile Bundle 名。**Change Ledger** 是底层持久恢复引擎；`ctx.changeLedger` 服务、`change_ledger_*` 工具、磁盘格式和存储路径继续保留这个名字，因为它们描述的是可复用的快照与恢复层，而不只是 Web 上的回退按钮。
 
 它给 DSH Session 增加一条明确的安全边界：
 
@@ -22,7 +24,17 @@ Agent / 用户 / 外部程序修改工作树
 
 插件**不会**自动 commit、stash、reset、切分支、修改 Git index，也不会替用户判断某项改动“应该回滚”。
 
-## 为什么它不是一个 Diff 按钮
+## 效果预览
+
+回退入口是 DSH 原生 Copy、Branch 之后的第三个纯图标：
+
+![Copy 和 Branch 之后的 Turn Rewind 图标](docs/assets/turn-rewind-action.png)
+
+打开后会先展示审阅弹窗，可选择同时恢复代码与对话、仅恢复代码或仅回退对话：
+
+![Turn Rewind 审阅弹窗](docs/assets/turn-rewind-dialog.png)
+
+## 为什么底层需要 Change Ledger
 
 普通 Git 面板可以展示当前 diff，但不拥有完整、持久的恢复生命周期。Change Ledger 独立负责：
 
@@ -77,21 +89,21 @@ Agent / 用户 / 外部程序修改工作树
 pnpm install --frozen-lockfile
 pnpm run check
 
-dsh plugin --profile web add /path/to/dsh-change-ledger
-dsh plugin --profile headless add /path/to/dsh-change-ledger
+dsh plugin --profile web add /path/to/dsh-turn-rewind
+dsh plugin --profile headless add /path/to/dsh-turn-rewind
 
-dsh --profile web --dump-config | grep change-ledger
+dsh --profile web --dump-config | grep turn-rewind
 ```
 
 修改 Profile Bundle 后需要重启对应 DSH 进程。
 
-本仓库是标准 DSH Profile Bundle：`package.json` 声明 `dsh.bundle.patch`，`cordis.patch.yml` 直接挂载 `@dsh-external/change-ledger`，不修改 DSH 主仓库。
+本仓库是标准 DSH Profile Bundle：`package.json` 声明 `dsh.bundle.patch`，`cordis.patch.yml` 直接挂载 `@dsh-external/turn-rewind`，不修改 DSH 主仓库。
 
-当 Profile 同时提供 DSH Agent 服务时，插件会在每个已完成 Turn 后同步占用 Agent 的 idle maintenance 边界，先完成隐藏检查点，再允许排队输入启动下一轮。插件不会为其开始观察 Turn 边界之前恢复的历史记录伪造检查点，因为当前工作区可能早已不再代表过去那一轮。Web Profile 还会提供同源 `/change-ledger/rewind` 接口：返回有界预览，为会修改代码的模式生成普通的短期、会话绑定恢复计划，并把对话重建委托给 DSH 官方 Host fork 生命周期。Turn 完成只会捕获状态，绝不会自动执行回退。
+当 Profile 同时提供 DSH Agent 服务时，插件会在每个已完成 Turn 后同步占用 Agent 的 idle maintenance 边界，先完成隐藏检查点，再允许排队输入启动下一轮。插件不会为其开始观察 Turn 边界之前恢复的历史记录伪造检查点，因为当前工作区可能早已不再代表过去那一轮。Web Profile 还会提供同源 `/turn-rewind` 接口：返回有界预览，为会修改代码的模式生成普通的短期、会话绑定恢复计划，并把对话重建委托给 DSH 官方 Host fork 生命周期。Turn 完成只会捕获状态，绝不会自动执行回退。
 
 ## 使用流程
 
-在 Web Profile 中，每个已落定的 Assistant Turn 都会在原生 Copy/Branch 操作旁显示一个紧凑的**回退**入口。这个 Session 级桥接不会占用单一胜出的 `conversation.chat.turnTail` 链，因此 DSH 官方的“产物”行可以和回退按钮同时显示。打开回退后才按需读取检查点，展示有界的逐路径变化，并提供三种模式：
+在 Web Profile 中，每个已落定的 Assistant Turn 都会在原生 Copy、Branch 操作之后的第三位显示一个紧凑、无文字的**回退**图标。这个 Session 级桥接不会占用单一胜出的 `conversation.chat.turnTail` 链，因此 DSH 官方的“产物”行可以和回退按钮同时显示。打开回退后才按需读取检查点，展示有界的逐路径变化，并提供三种模式：
 
 | 模式 | 代码 | 对话 |
 | --- | --- | --- |
@@ -173,7 +185,7 @@ export async function apply(ctx: Context) {
 }
 ```
 
-完整格式类型从 `@dsh-external/change-ledger/format` 导出；可信集成和测试可以从 `@dsh-external/change-ledger/core` 使用独立 Engine。
+完整格式类型从 `@dsh-external/turn-rewind/format` 导出；可信集成和测试可以从 `@dsh-external/turn-rewind/core` 使用独立 Engine。
 
 ## 开发
 
