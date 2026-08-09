@@ -12,6 +12,7 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
     children?: ReactNode
     footer?: ReactNode
     className?: string
+    contentClassName?: string
   }>
   export const Button: ComponentType<{
     variant?: 'primary' | 'ghost' | 'outline' | 'toolbar'

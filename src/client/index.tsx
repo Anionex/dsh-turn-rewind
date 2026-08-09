@@ -92,23 +92,28 @@ const styles = `
 .dcl-rewind-tail{display:inline-flex;align-items:center;align-self:center;order:-1;height:24px;margin-right:2px}
 .dcl-rewind-trigger{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 6px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;cursor:pointer}
 .dcl-rewind-trigger:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
-.dcl-rewind-body{display:flex;flex-direction:column;gap:14px;min-width:min(560px,calc(100vw - 64px))}
-.dcl-rewind-options{display:flex;flex-direction:column;gap:8px}
-.dcl-rewind-option{display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1);cursor:pointer}
+.dcl-rewind-dialog{box-sizing:border-box;width:min(560px,100%);max-height:calc(100dvh - 48px)}
+.dcl-rewind-content{min-width:0;min-height:0;overflow-y:auto;overscroll-behavior:contain}
+.dcl-rewind-body{display:flex;flex-direction:column;gap:14px;width:100%;min-width:0;max-width:100%;box-sizing:border-box}
+.dcl-rewind-options{display:flex;flex-direction:column;gap:8px;min-width:0;max-width:100%}
+.dcl-rewind-option{display:flex;align-items:flex-start;gap:10px;width:100%;min-width:0;box-sizing:border-box;padding:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1);cursor:pointer}
 .dcl-rewind-option[data-selected="true"]{border-color:var(--dsw-alias-state-business-primary)}
 .dcl-rewind-option[data-disabled="true"]{cursor:not-allowed;opacity:.52}
-.dcl-rewind-option input{margin-top:2px}
+.dcl-rewind-option input{flex:none;margin:2px 0 0}
+.dcl-rewind-option-content{display:block;flex:1;min-width:0}
 .dcl-rewind-option strong{display:block;color:var(--dsw-alias-label-primary);font-size:14px}
-.dcl-rewind-option span{display:block;margin-top:3px;color:var(--dsw-alias-label-tertiary);font-size:12px}
-.dcl-rewind-summary{display:flex;gap:16px;color:var(--dsw-alias-label-secondary);font-size:13px}
-.dcl-rewind-files{max-height:220px;overflow:auto;border:1px solid var(--dsw-alias-border-l2);border-radius:10px}
-.dcl-rewind-file{display:flex;justify-content:space-between;gap:16px;padding:8px 10px;border-bottom:1px solid var(--dsw-alias-border-l1);font-size:12px}
-.dcl-rewind-file:last-child{border-bottom:0}.dcl-rewind-file code{overflow:hidden;text-overflow:ellipsis;color:var(--dsw-alias-label-secondary)}
+.dcl-rewind-option-description{display:block;margin-top:3px;overflow-wrap:anywhere;word-break:break-word;color:var(--dsw-alias-label-tertiary);font-size:12px}
+.dcl-rewind-summary{display:flex;flex-wrap:wrap;column-gap:16px;row-gap:4px;min-width:0;color:var(--dsw-alias-label-secondary);font-size:13px}
+.dcl-rewind-files{min-width:0;max-width:100%;box-sizing:border-box;max-height:220px;overflow:auto;border:1px solid var(--dsw-alias-border-l2);border-radius:10px}
+.dcl-rewind-file{display:flex;justify-content:space-between;gap:16px;min-width:0;padding:8px 10px;border-bottom:1px solid var(--dsw-alias-border-l1);font-size:12px}
+.dcl-rewind-file:last-child{border-bottom:0}.dcl-rewind-file code{min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--dsw-alias-label-secondary)}
 .dcl-rewind-kind{flex:none;color:var(--dsw-alias-label-tertiary)}
-.dcl-rewind-warning,.dcl-rewind-error{margin:0;padding:10px 12px;border-radius:10px;font-size:12px;line-height:18px}
+.dcl-rewind-status{margin:0;overflow-wrap:anywhere;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px}
+.dcl-rewind-warning,.dcl-rewind-error{box-sizing:border-box;max-width:100%;margin:0;padding:10px 12px;overflow-wrap:anywhere;word-break:break-word;border-radius:10px;font-size:12px;line-height:18px}
 .dcl-rewind-warning{background:var(--dsw-alias-state-warn-tertiary);color:var(--dsw-alias-state-warn-primary)}
 .dcl-rewind-error{border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 30%,transparent);color:var(--dsw-alias-state-error-primary)}
-.dcl-rewind-ack{display:flex;align-items:flex-start;gap:8px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
+.dcl-rewind-ack{display:flex;align-items:flex-start;gap:8px;min-width:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}.dcl-rewind-ack input{flex:none}.dcl-rewind-ack span{min-width:0;overflow-wrap:anywhere}
+.dcl-rewind-retry{align-self:flex-start}
 `
 
 /** Return the completed turn closed by one assistant-tail anchor. */
@@ -326,6 +331,8 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
         title={`回退到第 ${String(matched.turn)} 轮结束时`}
         closeLabel="关闭"
         description="选择要恢复的范围。原对话始终保留；涉及代码时会再次验证工作区并先创建救援点。"
+        className="dcl-rewind-dialog"
+        contentClassName="dcl-rewind-content"
         footer={(
           <>
             <Button variant="outline" onClick={close} disabled={applying}>取消</Button>
@@ -336,8 +343,8 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
         )}
       >
         <div className="dcl-rewind-body">
-          {loading && <p>正在读取此轮恢复点…</p>}
-          {preview?.status === 'pending' && <p>此轮检查点仍在写入，请稍后重试。</p>}
+          {loading && <p className="dcl-rewind-status">正在读取此轮恢复点…</p>}
+          {preview?.status === 'pending' && <p className="dcl-rewind-status">此轮检查点仍在写入，请稍后重试。</p>}
           {preview?.status === 'missing' && <p className="dcl-rewind-error">没有找到此轮检查点；该轮可能早于插件启用时间或已超过保留窗口。</p>}
           {preview?.status === 'failed' && <p className="dcl-rewind-error">检查点创建失败：{preview.error}</p>}
           {ready !== null && (
@@ -345,15 +352,15 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
               <div className="dcl-rewind-options">
                 <label className="dcl-rewind-option" data-selected={mode === 'both'} data-disabled={applying}>
                   <input type="radio" name={radioName} checked={mode === 'both'} disabled={applying} onChange={() => { chooseMode('both') }} />
-                  <span><strong>同时恢复代码与对话</strong><span>恢复工作区，并创建、打开此轮结束时的对话版本；原对话保留。</span></span>
+                  <span className="dcl-rewind-option-content"><strong>同时恢复代码与对话</strong><span className="dcl-rewind-option-description">恢复工作区，并创建、打开此轮结束时的对话版本；原对话保留。</span></span>
                 </label>
                 <label className="dcl-rewind-option" data-selected={mode === 'code'} data-disabled={applying || ready.totalChanges === 0}>
                   <input type="radio" name={radioName} checked={mode === 'code'} disabled={applying || ready.totalChanges === 0} onChange={() => { chooseMode('code') }} />
-                  <span><strong>仅恢复代码</strong><span>{ready.totalChanges === 0 ? '当前代码已经与该轮一致，无需恢复。' : '对话保持当前位置，只把工作区恢复到此轮结束时。'}</span></span>
+                  <span className="dcl-rewind-option-content"><strong>仅恢复代码</strong><span className="dcl-rewind-option-description">{ready.totalChanges === 0 ? '当前代码已经与该轮一致，无需恢复。' : '对话保持当前位置，只把工作区恢复到此轮结束时。'}</span></span>
                 </label>
                 <label className="dcl-rewind-option" data-selected={mode === 'conversation'} data-disabled={applying}>
                   <input type="radio" name={radioName} checked={mode === 'conversation'} disabled={applying} onChange={() => { chooseMode('conversation') }} />
-                  <span><strong>仅回退对话</strong><span>创建并打开此轮结束时的对话版本；当前代码保持不变。</span></span>
+                  <span className="dcl-rewind-option-content"><strong>仅回退对话</strong><span className="dcl-rewind-option-description">创建并打开此轮结束时的对话版本；当前代码保持不变。</span></span>
                 </label>
               </div>
               <div className="dcl-rewind-summary">
@@ -364,10 +371,10 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
                 <p className="dcl-rewind-warning">Git HEAD、分支或进行中的 Git 操作已经变化。为避免跨历史恢复，请先处理该变化后重新打开。</p>
               )}
               {!restoresCode && (ready.headChanged || ready.operationChanged) && (
-                <p>仅回退对话不会修改工作区，因此不受当前 HEAD 或 Git 操作状态影响。</p>
+                <p className="dcl-rewind-status">仅回退对话不会修改工作区，因此不受当前 HEAD 或 Git 操作状态影响。</p>
               )}
               {planMissing && <p className="dcl-rewind-error">代码恢复计划缺失，请关闭后重新打开回退窗口。</p>}
-              {ready.totalChanges === 0 && <p>当前工作区已经与该轮结束状态一致；“同时回退”将只创建对话版本。</p>}
+              {ready.totalChanges === 0 && <p className="dcl-rewind-status">当前工作区已经与该轮结束状态一致；“同时回退”将只创建对话版本。</p>}
               {ready.changes.length > 0 && (
                 <div className="dcl-rewind-files">
                   {ready.changes.map(change => <div className="dcl-rewind-file" key={change.path}><code>{change.path}</code><span className="dcl-rewind-kind">{kindLabel(change.kind)}</span></div>)}
@@ -379,9 +386,9 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
               )}
             </>
           )}
-          {completed !== null && <p>{completed}</p>}
+          {completed !== null && <p className="dcl-rewind-status">{completed}</p>}
           {error !== null && <p className="dcl-rewind-error">{error}</p>}
-          {!loading && preview?.status !== 'ready' && <Button variant="outline" size="sm" onClick={() => { void load(true) }}>重试</Button>}
+          {!loading && preview?.status !== 'ready' && <Button className="dcl-rewind-retry" variant="outline" size="sm" onClick={() => { void load(true) }}>重试</Button>}
         </div>
       </Modal>
     </div>

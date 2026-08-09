@@ -63,6 +63,9 @@ test('browser bundle registers the turn-tail selector and anchors only finalized
   })
   assert.equal(registration.entry.name, 'conversation.session.header.actions')
   assert.equal(registration.entry.id, 'change-ledger-rewind-portals')
+  assert.match(style.textContent, /\.dcl-rewind-dialog\{[^}]*width:min\(560px,100%\)/)
+  assert.match(style.textContent, /\.dcl-rewind-body\{[^}]*width:100%;min-width:0;max-width:100%;box-sizing:border-box/)
+  assert.doesNotMatch(style.textContent, /min-width:min\(560px/)
   const injected = registration.entry.inject()
   injected.openSession('session-child')
   assert.equal(openedSession, 'session-child')
@@ -185,6 +188,9 @@ test('rewind dialog scopes restore plans by mode and opens conversation results'
   const blockedTree = plugin.RewindTurnTail({
     matched: { turn: 3, seq: 8 }, sessionId: 'session-source', openSession() {},
   })
+  const modal = findNode(blockedTree, node => node.type === primitives.Modal)
+  assert.equal(modal.props.className, 'dcl-rewind-dialog')
+  assert.equal(modal.props.contentClassName, 'dcl-rewind-content')
   const blocked = findNode(blockedTree, node => node.type === Button && node.props.variant === 'primary')
   assert.equal(blocked.props.disabled, true)
 
@@ -207,6 +213,7 @@ test('rewind dialog scopes restore plans by mode and opens conversation results'
     matched: { turn: 3, seq: 8 }, sessionId: 'session-source', openSession() {},
   })
   const retry = findNode(failedTree, node => node.type === Button && node.props.size === 'sm')
+  assert.equal(retry.props.className, 'dcl-rewind-retry')
   retry.props.onClick()
   await new Promise(resolve => setTimeout(resolve, 0))
   assert.equal(retryUrl, '/change-ledger/rewind?sessionId=session-source&turn=3&retry=1')
