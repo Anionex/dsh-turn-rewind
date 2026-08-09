@@ -117,7 +117,6 @@ const styles = `
 .dcl-rewind-warning{background:var(--dsw-alias-state-warn-tertiary);color:var(--dsw-alias-state-warn-primary)}
 .dcl-rewind-error{border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 30%,transparent);color:var(--dsw-alias-state-error-primary)}
 .dcl-rewind-backup{box-sizing:border-box;margin:0;padding:10px 12px;border-radius:10px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
-.dcl-rewind-details{font-size:12px;color:var(--dsw-alias-label-tertiary)}.dcl-rewind-details summary{cursor:pointer;color:var(--dsw-alias-label-secondary)}.dcl-rewind-details dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:5px 10px;margin:10px 0 0}.dcl-rewind-details dt{color:var(--dsw-alias-label-tertiary)}.dcl-rewind-details dd{min-width:0;margin:0;overflow-wrap:anywhere;font-family:monospace;color:var(--dsw-alias-label-secondary)}
 .dcl-rewind-retry{align-self:flex-start}
 `
 
@@ -197,7 +196,6 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
   const [stale, setStale] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [completed, setCompleted] = useState<string | null>(null)
-  const [backupId, setBackupId] = useState<string | null>(null)
   const loadAbort = useRef<AbortController | null>(null)
   const applyPending = useRef(false)
 
@@ -214,7 +212,6 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
     setStale(false)
     setError(null)
     setCompleted(null)
-    setBackupId(null)
     try {
       const retryQuery = retry ? '&retry=1' : ''
       const response = await fetch(`${PATH}?sessionId=${encodeURIComponent(sessionId)}&turn=${String(matched.turn)}${retryQuery}`, {
@@ -324,14 +321,12 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
       const resultMode = requiredString(result.mode, 'mode')
       if (resultMode !== mode) throw new Error(`服务器返回了不匹配的回退模式：${resultMode}`)
       if (mode === 'code') {
-        const rescuePointId = requiredString(result.rescuePointId, 'rescuePointId')
-        setBackupId(rescuePointId)
+        requiredString(result.rescuePointId, 'rescuePointId')
         setCompleted('项目文件已恢复；当前对话保持不变。操作前的文件已保存在自动备份中。')
         return
       }
       const childSessionId = requiredString(result.sessionId, 'sessionId')
-      const rescuePointId = requiredString(result.rescuePointId, 'rescuePointId')
-      setBackupId(rescuePointId)
+      requiredString(result.rescuePointId, 'rescuePointId')
       setCompleted('项目文件已恢复，并已创建从这里继续的新对话。操作前的文件已保存在自动备份中。')
       try {
         openSession(childSessionId)
@@ -413,17 +408,6 @@ export function RewindTurnTail({ matched, sessionId, openSession }: RewindTailPr
               {ready.truncated && (
                 <div className="dcl-rewind-file-actions"><Button variant="outline" size="sm" onClick={() => { void loadAllChanges() }} disabled={loadingDetails}>{loadingDetails ? '正在读取全部文件…' : `查看全部 ${String(ready.totalChanges)} 个文件`}</Button></div>
               )}
-              <details className="dcl-rewind-details">
-                <summary>操作详情</summary>
-                <dl>
-                  <dt>文件状态</dt><dd>{ready.checkpointId}</dd>
-                  <dt>对话边界</dt><dd>turn {String(ready.turn)} / seq {String(ready.turnEndSeq)}</dd>
-                  <dt>恢复授权</dt><dd>{ready.planId ?? '未生成'}</dd>
-                  <dt>版本状态变化</dt><dd>{ready.headChanged || ready.operationChanged ? '是' : '否'}</dd>
-                  <dt>共享目录</dt><dd>{ready.activeSessionIds.length > 0 ? ready.activeSessionIds.join(', ') : '无其他正在运行的对话'}</dd>
-                  {backupId !== null && <><dt>自动备份</dt><dd>{backupId}</dd></>}
-                </dl>
-              </details>
             </>
           )}
           {completed !== null && <p className="dcl-rewind-status">{completed}</p>}
