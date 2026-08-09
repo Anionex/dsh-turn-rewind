@@ -107,9 +107,7 @@ export class TurnCheckpointCoordinator {
   /** Install idle-boundary capture listeners while the Agent service is present. */
   install(ctx: Context): void {
     const schedule = (agent: AgentLike): void => { this.schedule(ctx, agent) }
-    ctx.on('agent/created', ({ agent }) => { schedule(agent) })
     ctx.on('agent/status', ({ agent, status }) => { if (status === 'idle') schedule(agent) })
-    queueMicrotask(() => { for (const agent of ctx.agents.list()) schedule(agent) })
   }
 
   /** Current capture state for a session turn when no durable checkpoint exists yet. */

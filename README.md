@@ -89,7 +89,7 @@ Restart a running profile after changing its bundle list.
 
 The package is a DSH Profile Bundle. `package.json` declares `dsh.bundle.patch`, and `cordis.patch.yml` mounts `@dsh-external/change-ledger` without a DSH core patch.
 
-When the profile also provides the DSH Agent service, the plugin claims the Agent's idle maintenance boundary after each completed turn and captures a hidden checkpoint before queued work may start another turn. In Web profiles, the same-origin `/change-ledger/rewind` endpoint exposes a bounded preview, mints the ordinary short-lived, session-bound restore plan used by code-affecting modes, and delegates conversation reconstruction to DSH's official Host fork lifecycle. It never restores merely because a turn completed.
+When the profile also provides the DSH Agent service, the plugin claims the Agent's idle maintenance boundary after each completed turn and captures a hidden checkpoint before queued work may start another turn. It deliberately does not synthesize checkpoints for history resumed before the plugin observed its turn boundary, because the current workspace may no longer represent that earlier turn. In Web profiles, the same-origin `/change-ledger/rewind` endpoint exposes a bounded preview, mints the ordinary short-lived, session-bound restore plan used by code-affecting modes, and delegates conversation reconstruction to DSH's official Host fork lifecycle. It never restores merely because a turn completed.
 
 ## User flow
 

@@ -56,6 +56,7 @@ test('idle turn capture runs as Agent maintenance and persists the completed bou
   }
   const coordinator = new TurnCheckpointCoordinator(f.engine)
   coordinator.install(ctx)
+  listeners.get('agent/status')({ agent, status: 'idle' })
   let checkpoint
   for (let attempt = 0; attempt < 50; attempt += 1) {
     await new Promise(resolve => setTimeout(resolve, 20))
@@ -64,6 +65,29 @@ test('idle turn capture runs as Agent maintenance and persists the completed bou
   }
   assert.equal(checkpoint?.turnEndSeq, 8)
   assert.equal(coordinator.state('session-web', 2).status, 'missing')
+})
+
+test('install does not relabel resumed idle history as the current workspace state', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  let maintenanceRuns = 0
+  const agent = {
+    ...idleAgent('session-resumed', f.workspace, 5, 20),
+    runMaintenance() {
+      maintenanceRuns += 1
+      return Promise.resolve()
+    },
+  }
+  const coordinator = new TurnCheckpointCoordinator(f.engine)
+  coordinator.install({
+    agents: { list: () => [agent] },
+    logger: { warn() {} },
+    on() { return () => {} },
+  })
+  await Promise.resolve()
+
+  assert.equal(maintenanceRuns, 0)
+  assert.equal(coordinator.state('session-resumed', 5).status, 'missing')
 })
 
 test('idle turn capture serializes agents that share one repository root', async (t) => {
@@ -91,10 +115,12 @@ test('idle turn capture serializes agents that share one repository root', async
   const ctx = {
     agents: { list: () => agents },
     logger: { warn() {} },
-    on() { return () => {} },
+    on(name, listener) { if (name === 'agent/status') statusListener = listener; return () => {} },
   }
+  let statusListener
   const coordinator = new TurnCheckpointCoordinator(f.engine)
   coordinator.install(ctx)
+  for (const agent of agents) statusListener({ agent, status: 'idle' })
 
   await eventually(async () => {
     const first = await f.engine.findTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-one', turn: 1 })
@@ -121,11 +147,13 @@ test('failed idle turn capture retries only while the same boundary remains curr
   }
   const agent = idleAgent('session-retry', f.workspace, 3, 12)
   const coordinator = new TurnCheckpointCoordinator(f.engine)
+  let statusListener
   coordinator.install({
     agents: { list: () => [agent] },
     logger: { warn() {} },
-    on() { return () => {} },
+    on(name, listener) { if (name === 'agent/status') statusListener = listener; return () => {} },
   })
+  statusListener({ agent, status: 'idle' })
   await eventually(() => coordinator.state('session-retry', 3).status === 'failed')
 
   const ctx = {
@@ -157,11 +185,13 @@ test('failed idle turn capture cannot be relabeled after the Agent advances', as
   }
   const agent = idleAgent('session-advanced', f.workspace, 3, 12)
   const coordinator = new TurnCheckpointCoordinator(f.engine)
+  let statusListener
   coordinator.install({
     agents: { list: () => [agent] },
     logger: { warn() {} },
-    on() { return () => {} },
+    on(name, listener) { if (name === 'agent/status') statusListener = listener; return () => {} },
   })
+  statusListener({ agent, status: 'idle' })
   await eventually(() => coordinator.state('session-advanced', 3).status === 'failed')
   agent.session.events = [{ type: 'turn/end', seq: 16, data: { turn: 4 } }]
 

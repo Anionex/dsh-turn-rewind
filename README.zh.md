@@ -87,7 +87,7 @@ dsh --profile web --dump-config | grep change-ledger
 
 本仓库是标准 DSH Profile Bundle：`package.json` 声明 `dsh.bundle.patch`，`cordis.patch.yml` 直接挂载 `@dsh-external/change-ledger`，不修改 DSH 主仓库。
 
-当 Profile 同时提供 DSH Agent 服务时，插件会在每个已完成 Turn 后同步占用 Agent 的 idle maintenance 边界，先完成隐藏检查点，再允许排队输入启动下一轮。Web Profile 还会提供同源 `/change-ledger/rewind` 接口：返回有界预览，为会修改代码的模式生成普通的短期、会话绑定恢复计划，并把对话重建委托给 DSH 官方 Host fork 生命周期。Turn 完成只会捕获状态，绝不会自动执行回退。
+当 Profile 同时提供 DSH Agent 服务时，插件会在每个已完成 Turn 后同步占用 Agent 的 idle maintenance 边界，先完成隐藏检查点，再允许排队输入启动下一轮。插件不会为其开始观察 Turn 边界之前恢复的历史记录伪造检查点，因为当前工作区可能早已不再代表过去那一轮。Web Profile 还会提供同源 `/change-ledger/rewind` 接口：返回有界预览，为会修改代码的模式生成普通的短期、会话绑定恢复计划，并把对话重建委托给 DSH 官方 Host fork 生命周期。Turn 完成只会捕获状态，绝不会自动执行回退。
 
 ## 使用流程
 
