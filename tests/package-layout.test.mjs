@@ -8,6 +8,14 @@ const pkg = JSON.parse(await readFile(new URL('package.json', root), 'utf8'))
 
 test('package is a portable, prebuilt DSH Profile Bundle', async () => {
   assert.equal(pkg.dsh?.bundle?.patch, './cordis.patch.yml')
+  assert.deepEqual(pkg.dsh?.client, {
+    platform: 'web',
+    inject: [
+      '@deepseek-ai/dsh-client-runtime',
+      '@deepseek-ai/dsh-client-ui-conversation',
+    ],
+  })
+  assert.equal(pkg.dshClient, undefined)
   assert.equal(pkg.main, 'lib/index.js')
   assert.equal(pkg.types, 'lib/types/index.d.ts')
   assert.ok(pkg.files.includes('lib'))
