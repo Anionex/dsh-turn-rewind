@@ -12,9 +12,22 @@ interface ConversationNodeLike {
   readonly content?: readonly { readonly type: string; readonly text?: string }[]
 }
 
+interface ConversationChatNodeLike {
+  readonly key: string
+  readonly kind: string
+  readonly data: ConversationNodeLike
+}
+
 interface ConversationSnapshotLike {
   readonly nodes: readonly ConversationNodeLike[]
+  readonly chat?: {
+    readonly nodes: {
+      values(): readonly ConversationChatNodeLike[]
+    }
+  }
 }
+
+type RewindNodeLike = ConversationNodeLike | ConversationChatNodeLike
 
 interface RewindMatch {
   readonly messageSeq: number
@@ -167,7 +180,7 @@ export function apply(ctx: ClientContextLike): void {
 
 /** Session-scoped bridge that portals rewind controls into direct user-message action rows. */
 export function RewindMessagePortals({ sessionId, openRestoredSession, useSession }: RewindPortalBridgeProps): ReactNode {
-  const nodes = useSession(snapshot => snapshot.nodes)
+  const nodes = useSession<readonly RewindNodeLike[]>(snapshot => snapshot.chat?.nodes.values() ?? snapshot.nodes)
   const [targets, setTargets] = useState<readonly RewindPortalTarget[]>([])
 
   useLayoutEffect(() => {
@@ -485,7 +498,18 @@ function decodePreview(value: unknown): Preview {
   }
 }
 
-function collectPortalTargets(nodes: readonly ConversationNodeLike[]): readonly RewindPortalTarget[] {
+/** Resolve one conversation node to its DOM row key and rewind match. */
+export function selectRewindMessageTarget(value: RewindNodeLike): { readonly matched: RewindMatch; readonly rowKey: string } | null {
+  const node = 'key' in value && 'data' in value ? value.data : value
+  const matched = selectRewindMessage(node)
+  if (matched === null) return null
+  return {
+    matched,
+    rowKey: 'key' in value && 'data' in value ? value.key : `node:${String(node.seq)}`,
+  }
+}
+
+function collectPortalTargets(nodes: readonly RewindNodeLike[]): readonly RewindPortalTarget[] {
   const rows = new Map<string, HTMLElement>()
   for (const element of Array.from(document.querySelectorAll<HTMLElement>(
     '[data-chat-flow-kind="user"][data-chat-anchor-key]',
@@ -494,14 +518,14 @@ function collectPortalTargets(nodes: readonly ConversationNodeLike[]): readonly 
     if (key !== undefined) rows.set(key, element)
   }
   const targets: RewindPortalTarget[] = []
-  for (const node of nodes) {
-    const matched = selectRewindMessage(node)
-    if (matched === null) continue
-    const row = rows.get(`node:${String(node.seq)}`)
+  for (const value of nodes) {
+    const target = selectRewindMessageTarget(value)
+    if (target === null) continue
+    const row = rows.get(target.rowKey)
     const messageRoot = row?.querySelector<HTMLElement>(':scope > [data-time-hover-root="true"]')
     const actions = messageRoot?.lastElementChild
     if (!(actions instanceof HTMLElement) || actions.querySelector(':scope > button') === null) continue
-    targets.push({ container: actions, matched })
+    targets.push({ container: actions, matched: target.matched })
   }
   return targets
 }
