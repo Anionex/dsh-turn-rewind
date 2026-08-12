@@ -43,6 +43,26 @@ test('browser bundle anchors rewind to direct user messages and restores their d
   )
   assert.equal(plugin.selectRewindMessage({ kind: 'assistant', seq: 8, turn: 3 }), null)
   assert.deepEqual(
+    JSON.parse(JSON.stringify(plugin.selectRewindMessageTarget({
+      key: '13:input-messageabc',
+      kind: 'user',
+      data: { kind: 'user', seq: 7, content: [{ type: 'text', text: '先改 A' }] },
+    }))),
+    {
+      matched: { messageSeq: 7, promptText: '先改 A' },
+      rowKey: '13:input-messageabc',
+    },
+  )
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(plugin.selectRewindMessageTarget({
+      kind: 'user', seq: 8, content: [{ type: 'text', text: '旧版消息' }],
+    }))),
+    {
+      matched: { messageSeq: 8, promptText: '旧版消息' },
+      rowKey: 'node:8',
+    },
+  )
+  assert.deepEqual(
     ['added', 'deleted', 'modified', 'mode-changed', 'type-changed'].map(kind => plugin.fileRecoveryLabel(kind)),
     ['移除后来新增的文件', '找回文件', '恢复之前的版本', '恢复文件权限', '恢复之前的文件类型'],
   )

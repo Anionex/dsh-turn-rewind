@@ -7,9 +7,20 @@ interface ConversationNodeLike {
         readonly text?: string;
     }[];
 }
+interface ConversationChatNodeLike {
+    readonly key: string;
+    readonly kind: string;
+    readonly data: ConversationNodeLike;
+}
 interface ConversationSnapshotLike {
     readonly nodes: readonly ConversationNodeLike[];
+    readonly chat?: {
+        readonly nodes: {
+            values(): readonly ConversationChatNodeLike[];
+        };
+    };
 }
+type RewindNodeLike = ConversationNodeLike | ConversationChatNodeLike;
 interface RewindMatch {
     readonly messageSeq: number;
     readonly promptText: string;
@@ -60,6 +71,11 @@ export declare function apply(ctx: ClientContextLike): void;
 export declare function RewindMessagePortals({ sessionId, openRestoredSession, useSession }: RewindPortalBridgeProps): ReactNode;
 /** User-message action and its review-first file/conversation restore dialog. */
 export declare function RewindMessageAction({ matched, sessionId, openRestoredSession }: RewindMessageActionProps): ReactNode;
+/** Resolve one conversation node to its DOM row key and rewind match. */
+export declare function selectRewindMessageTarget(value: RewindNodeLike): {
+    readonly matched: RewindMatch;
+    readonly rowKey: string;
+} | null;
 /** Describe the user-visible result of restoring one changed file. */
 export declare function fileRecoveryLabel(kind: ChangeKind): string;
 export {};
