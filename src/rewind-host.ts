@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { Context } from 'cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import { ChangeLedgerError, errorMessage } from './errors.js'
 import type { ChangeLedgerEngine } from './engine.js'
 import { discoverRepositoryRoot } from './git.js'
@@ -82,12 +82,12 @@ interface ApiProxyLike {
   }
 }
 
-declare module 'cordis' {
+declare module '@deepseek-ai/cordis' {
   interface Context {
     agents: AgentsLike
     sessions: SessionsLike
     sessionQuery: SessionQueryLike
-    httpServer: HttpServerLike
+    webServer: HttpServerLike
     apiProxy: ApiProxyLike
   }
 
@@ -209,7 +209,7 @@ export function installRewindHttp(
   engine: ChangeLedgerEngine,
   coordinator: TurnCheckpointCoordinator,
 ): void {
-  ctx.effect(() => ctx.httpServer.register({
+  ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: REWIND_HTTP_PATH,
     handler: createRewindHttpHandler(ctx, engine, coordinator),

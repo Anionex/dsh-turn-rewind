@@ -1,4 +1,4 @@
-import type { Context } from 'cordis';
+import type { Context } from '@deepseek-ai/cordis';
 import type { ChangeLedgerEngine } from './engine.js';
 interface SessionEventLike {
     readonly type: string;
@@ -91,12 +91,12 @@ interface ApiProxyLike {
         }>;
     };
 }
-declare module 'cordis' {
+declare module '@deepseek-ai/cordis' {
     interface Context {
         agents: AgentsLike;
         sessions: SessionsLike;
         sessionQuery: SessionQueryLike;
-        httpServer: HttpServerLike;
+        webServer: HttpServerLike;
         apiProxy: ApiProxyLike;
     }
     interface Events {
