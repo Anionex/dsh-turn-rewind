@@ -103,6 +103,102 @@ test('browser bundle anchors rewind to direct user messages and restores their d
   assert.equal(typeof registration.component, 'function')
 })
 
+test('browser bundle finds user actions through the conversation slot wrapper', async () => {
+  const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
+  let plugin
+  let capturedTargets
+  let cleanup
+  class Element {}
+  const actions = Object.assign(new Element(), {
+    querySelector(selector) {
+      assert.equal(selector, ':scope > button')
+      return {}
+    },
+  })
+  const messageRoot = Object.assign(new Element(), { lastElementChild: actions })
+  const row = Object.assign(new Element(), {
+    dataset: { chatAnchorKey: '13:input-messageabc' },
+    querySelector(selector) {
+      assert.equal(selector, '[data-time-hover-root="true"]')
+      return messageRoot
+    },
+  })
+  const context = {
+    AbortController,
+    HTMLElement: Element,
+    MutationObserver: class MutationObserver {
+      constructor(callback) { this.callback = callback }
+      observe() {}
+      disconnect() {}
+    },
+    queueMicrotask,
+    setTimeout,
+    document: {
+      body: {},
+      querySelectorAll(selector) {
+        assert.equal(selector, '[data-chat-flow-kind="user"][data-chat-anchor-key]')
+        return [row]
+      },
+    },
+    window: {
+      __ModuleLoader__: {
+        load(record) {
+          plugin = record.factory((id) => {
+            if (id === 'react/jsx-runtime') return { jsx() {}, jsxs() {}, Fragment: Symbol('fragment') }
+            if (id === 'react') {
+              return {
+                useCallback: value => value,
+                useEffect() {},
+                useLayoutEffect(setup) { cleanup = setup() },
+                useRef: value => ({ current: value }),
+                useState(initial) {
+                  return [initial, update => {
+                    capturedTargets = typeof update === 'function' ? update(initial) : update
+                  }]
+                },
+              }
+            }
+            if (id === 'react-dom') return { createPortal: value => value }
+            if (id === '@deepseek-ai/dsh-client-ui-primitives') return { Button() {}, Modal() {}, Tooltip() {} }
+            throw new Error(`unexpected browser dependency ${id}`)
+          })
+        },
+      },
+    },
+  }
+  vm.runInNewContext(source, context)
+
+  const rendered = plugin.RewindMessagePortals({
+    sessionId: 'session-source',
+    async openRestoredSession() {},
+    useSession(selector) {
+      return selector({
+        nodes: [],
+        chat: {
+          nodes: {
+            values() {
+              return [{
+                key: '13:input-messageabc',
+                kind: 'user',
+                data: { kind: 'user', seq: 7, content: [{ type: 'text', text: '修复问题' }] },
+              }]
+            },
+          },
+        },
+      })
+    },
+  })
+
+  assert.equal(rendered.length, 0)
+  assert.equal(capturedTargets.length, 1)
+  assert.equal(capturedTargets[0].container, actions)
+  assert.deepEqual(JSON.parse(JSON.stringify(capturedTargets[0].matched)), {
+    messageSeq: 7,
+    promptText: '修复问题',
+  })
+  cleanup()
+})
+
 test('rewind dialog restores files in two modes and allows reviewed Git history drift', async () => {
   const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
   const Button = function Button() {}

@@ -2,20 +2,20 @@
  * DSH Turn Rewind, powered by persistent, inspectable, approval-gated Change Ledger restore points.
  * @module @dsh-external/turn-rewind
  */
-import { Service, type Context } from 'cordis';
+import type { Context } from '@deepseek-ai/cordis';
 import { ChangeLedgerEngine } from './engine.js';
 import type { ChangeLedgerConfig } from './types.js';
 export * from './engine.js';
 export * from './errors.js';
 export * from './rewind-host.js';
 export * from './types.js';
-declare module 'cordis' {
+declare module '@deepseek-ai/cordis' {
     interface Context {
         changeLedger: ChangeLedgerService;
     }
 }
 /** Cordis service exposed as `ctx.changeLedger` for other DSH plugins. */
-export declare class ChangeLedgerService extends Service {
+export declare class ChangeLedgerService {
     readonly engine: ChangeLedgerEngine;
     /** Register the service and startup reconciliation. */
     constructor(ctx: Context, config?: ChangeLedgerConfig);

@@ -1,22 +1,22 @@
 lockfileVersion: '9.0'
 
 settings:
-  autoInstallPeers: true
+  autoInstallPeers: false
   excludeLinksFromLockfile: false
 
 importers:
 
   .:
     devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.3
       '@types/react':
         specifier: 18.3.28
         version: 18.3.28
-      cordis:
-        specifier: ^4.0.0-rc.7
-        version: 4.0.0-rc.7
       react:
         specifier: 18.3.1
         version: 18.3.1
@@ -25,6 +25,21 @@ importers:
         version: 5.9.2
 
 packages:
+
+  '@deepseek-ai/cordis@4.0.1':
+    resolution: {integrity: sha512-YBdskTU2Po1kru3GgcUWUbkTsPMA9LkSQDAY8rBkFJeajdgcQad3QPJZE26JyK99Xb6HaASvoXg2DSUTeN/0Nw==}
+    hasBin: true
+    peerDependencies:
+      '@deepseek-ai/cordis-plugin-include': ^1.0.6
+      '@deepseek-ai/cordis-plugin-loader': ^1.0.2
+    peerDependenciesMeta:
+      '@deepseek-ai/cordis-plugin-include':
+        optional: true
+      '@deepseek-ai/cordis-plugin-loader':
+        optional: true
+
+  '@deepseek-ai/cosmokit@1.8.2':
+    resolution: {integrity: sha512-muBOKtSrUKU5m/xpq8ZXWL6hQ/jgd4PhU2PqH97bcxIiLEJfNwZOGQEx4t/aS/GgxRAR+ra9pMHPMtTHU4sqqA==}
 
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
@@ -37,21 +52,6 @@ packages:
 
   '@types/react@18.3.28':
     resolution: {integrity: sha512-z9VXpC7MWrhfWipitjNdgCauoMLRdIILQsAEV+ZesIzBq/oUlxk0m3ApZuMFCXdnS4U7KrI+l3WRUEGQ8K1QKw==}
-
-  cordis@4.0.0-rc.7:
-    resolution: {integrity: sha512-5nm6ehrSfJhEUV659CctEvyNuBY/AXapw8+ZEw7YENztdzpiT+Ha8nIfkyhfyAgPtJns9aB5On5nzl9Sm6zHeQ==}
-    hasBin: true
-    peerDependencies:
-      '@cordisjs/plugin-include': ^1.0.4
-      '@cordisjs/plugin-loader': ^1.0.0-rc.5
-    peerDependenciesMeta:
-      '@cordisjs/plugin-include':
-        optional: true
-      '@cordisjs/plugin-loader':
-        optional: true
-
-  cosmokit@1.8.1:
-    resolution: {integrity: sha512-PDBv4l90xZKrUsZ0vtoycgZpO/j4iFsqJXrAxsyBDsnQRI7ZMJXIjgDJsKNjd5L8jnVnnlrDCdhkFbTncgCVjQ==}
 
   csstype@3.2.3:
     resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}
@@ -77,6 +77,13 @@ packages:
 
 snapshots:
 
+  '@deepseek-ai/cordis@4.0.1':
+    dependencies:
+      '@deepseek-ai/cosmokit': 1.8.2
+      '@standard-schema/spec': 1.1.0
+
+  '@deepseek-ai/cosmokit@1.8.2': {}
+
   '@standard-schema/spec@1.1.0': {}
 
   '@types/node@24.13.3':
@@ -89,13 +96,6 @@ snapshots:
     dependencies:
       '@types/prop-types': 15.7.15
       csstype: 3.2.3
-
-  cordis@4.0.0-rc.7:
-    dependencies:
-      '@standard-schema/spec': 1.1.0
-      cosmokit: 1.8.1
-
-  cosmokit@1.8.1: {}
 
   csstype@3.2.3: {}
 

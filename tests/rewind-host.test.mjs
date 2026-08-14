@@ -8,11 +8,31 @@ import { promisify } from 'node:util'
 import test from 'node:test'
 import {
   ChangeLedgerEngine,
+  ChangeLedgerService,
   TurnCheckpointCoordinator,
   createRewindHttpHandler,
 } from '../lib/index.js'
 
 const execFileAsync = promisify(execFile)
+
+test('bundle registers its service and waits for the released Web host service', async (t) => {
+  const storageDir = await mkdtemp(join(tmpdir(), 'dsh-turn-rewind-service-'))
+  t.after(() => rm(storageDir, { recursive: true, force: true }))
+  const injections = []
+  let provided
+  const service = new ChangeLedgerService({
+    provide(name, value) { provided = { name, value } },
+    inject(names) { injections.push(names) },
+    logger: { info() {}, warn() {}, error() {} },
+  }, { storageDir })
+
+  assert.deepEqual(provided, { name: 'changeLedger', value: service })
+  assert.deepEqual(injections, [
+    ['agents'],
+    ['webServer', 'sessions', 'sessionQuery', 'apiProxy', 'agents'],
+  ])
+  await service.initialize()
+})
 
 async function fixture() {
   const outer = await mkdtemp(join(tmpdir(), 'dsh-turn-rewind-test-'))
