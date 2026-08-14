@@ -171,6 +171,10 @@ pnpm run check
 
 测试会创建真实的临时 Git 仓库，覆盖全部/部分恢复、stale plan、ignored 路径冲突拒绝、HEAD 变化、救援回滚、崩溃对账、活动锁保护、持久状态完整性、symlink、容量限制、sparse checkout、submodule、删除和 blob GC。
 
+## 关于
+
+DSH Turn Rewind 由 [anionex](https://anionex.me/) 维护。如果你想了解我后续的更多工作，欢迎在 [X](https://x.com/anion_ex) 或 [GitHub](https://github.com/Anionex) 关注我。
+
 ## 许可证
 
 BSD-3-Clause，见 [LICENSE](LICENSE)。

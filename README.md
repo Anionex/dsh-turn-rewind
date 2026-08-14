@@ -173,6 +173,10 @@ pnpm run check
 
 The test suite creates real temporary Git repositories and covers full/selective restore, stale plans, ignored-path collision refusal, HEAD drift, rescue rollback, crash reconciliation, active-lock preservation, durable-state integrity, symlinks, size limits, sparse checkouts, submodules, deletion, and blob garbage collection.
 
+## About
+
+DSH Turn Rewind is maintained by [anionex](https://anionex.me/). If you would like to follow my future work, [follow me on X](https://x.com/anion_ex) or [GitHub](https://github.com/Anionex).
+
 ## License
 
 BSD-3-Clause. See [LICENSE](LICENSE).
