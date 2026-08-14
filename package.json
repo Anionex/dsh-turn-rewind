@@ -1,8 +1,14 @@
 {
-  "name": "@dsh-external/turn-rewind",
+  "name": "@anionex/dsh-turn-rewind",
   "version": "0.1.0",
-  "private": true,
   "description": "Turn-level conversation and workspace rewind for DeepSeek Harness, powered by a persistent Change Ledger",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Anionex/dsh-turn-rewind.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Anionex/dsh-turn-rewind/issues"
+  },
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -68,13 +74,6 @@
     "turn-rewind"
   ],
   "license": "BSD-3-Clause",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/dsh-external/dsh-turn-rewind.git"
-  },
-  "bugs": {
-    "url": "https://github.com/dsh-external/dsh-turn-rewind/issues"
-  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"
   },

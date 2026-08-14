@@ -93,15 +93,15 @@ Build the checked-out plugin, then add it to each DSH profile that should expose
 pnpm install --frozen-lockfile
 pnpm run check
 
-dsh plugin --profile web add /path/to/dsh-turn-rewind
-dsh plugin --profile headless add /path/to/dsh-turn-rewind
+dsh plugin --profile web add @anionex/dsh-turn-rewind
+dsh plugin --profile headless add @anionex/dsh-turn-rewind
 
 dsh --profile web --dump-config | grep turn-rewind
 ```
 
 Restart a running profile after changing its bundle list.
 
-The package is a DSH Profile Bundle. `package.json` declares `dsh.bundle.patch`, and `cordis.patch.yml` mounts `@dsh-external/turn-rewind` without a DSH core patch.
+The package is a DSH Profile Bundle. `package.json` declares `dsh.bundle.patch`, and `cordis.patch.yml` mounts `@anionex/dsh-turn-rewind` without a DSH core patch.
 
 When the profile also provides the DSH Agent service, the plugin captures a hidden checkpoint in the first `agent/pre-step` waterfall before the Agent processes the opening user message. Capture failures are reported but do not reject the user's turn; the corresponding message simply has no usable rewind point. In Web profiles, the same-origin `/turn-rewind` endpoint resolves the selected `user/message` sequence, exposes a paged file preview, mints a short-lived session-bound restore plan, and delegates child creation to DSH's official Host create/fork lifecycle. It never restores files automatically.
 
@@ -162,7 +162,7 @@ export async function apply(ctx: Context) {
 }
 ```
 
-The complete exported types are available from `@dsh-external/turn-rewind/format`; the engine is available from `@dsh-external/turn-rewind/core` for non-Cordis tests and trusted integrations.
+The complete exported types are available from `@anionex/dsh-turn-rewind/format`; the engine is available from `@anionex/dsh-turn-rewind/core` for non-Cordis tests and trusted integrations.
 
 ## Development
 

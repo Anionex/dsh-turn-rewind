@@ -114,7 +114,7 @@ type Preview = ReadyPreview
   | { readonly status: 'failed'; readonly error: string }
 
 const PATH = '/turn-rewind'
-const STYLE_ID = '@dsh-external/turn-rewind'
+const STYLE_ID = '@anionex/dsh-turn-rewind'
 const styles = `
 .dcl-rewind-tail{display:inline-flex;align-items:center;align-self:center;order:0;height:24px;margin-left:2px}
 .dcl-rewind-trigger{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer}
@@ -160,7 +160,7 @@ export function apply(ctx: ClientContextLike): void {
   ctx.effect(() => {
     if (document.querySelector(`style[data-plugin-css="${STYLE_ID}"]`) !== null) return () => {}
     const tag = document.createElement('style')
-    tag.dataset.plugin = '@dsh-external/turn-rewind'
+    tag.dataset.plugin = '@anionex/dsh-turn-rewind'
     tag.dataset.pluginCss = STYLE_ID
     tag.textContent = styles
     document.head.appendChild(tag)
