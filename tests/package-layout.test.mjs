@@ -8,6 +8,10 @@ const pkg = JSON.parse(await readFile(new URL('package.json', root), 'utf8'))
 const workspace = await readFile(new URL('pnpm-workspace.yaml', root), 'utf8')
 
 test('package is a portable, prebuilt DSH Profile Bundle', async () => {
+  assert.equal(pkg.name, '@anionex/dsh-turn-rewind')
+  assert.notEqual(pkg.private, true)
+  assert.equal(pkg.repository?.url, 'git+https://github.com/Anionex/dsh-turn-rewind.git')
+  assert.equal(pkg.bugs?.url, 'https://github.com/Anionex/dsh-turn-rewind/issues')
   assert.equal(pkg.dsh?.bundle?.patch, './cordis.patch.yml')
   assert.deepEqual(pkg.dsh?.client, {
     platform: 'web',

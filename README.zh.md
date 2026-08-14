@@ -91,15 +91,15 @@ Agent / 用户 / 外部程序修改工作树
 pnpm install --frozen-lockfile
 pnpm run check
 
-dsh plugin --profile web add /path/to/dsh-turn-rewind
-dsh plugin --profile headless add /path/to/dsh-turn-rewind
+dsh plugin --profile web add @anionex/dsh-turn-rewind
+dsh plugin --profile headless add @anionex/dsh-turn-rewind
 
 dsh --profile web --dump-config | grep turn-rewind
 ```
 
 修改 Profile Bundle 后需要重启对应 DSH 进程。
 
-本仓库是标准 DSH Profile Bundle：`package.json` 声明 `dsh.bundle.patch`，`cordis.patch.yml` 直接挂载 `@dsh-external/turn-rewind`，不修改 DSH 主仓库。
+本仓库是标准 DSH Profile Bundle：`package.json` 声明 `dsh.bundle.patch`，`cordis.patch.yml` 直接挂载 `@anionex/dsh-turn-rewind`，不修改 DSH 主仓库。
 
 当 Profile 同时提供 DSH Agent 服务时，插件会在每轮第一次 `agent/pre-step`、Agent 开始处理用户消息之前保存隐藏文件状态。保存失败只会让该消息无法回退，不会拦住用户这一轮。Web Profile 还会提供同源 `/turn-rewind` 接口：根据所选 `user/message` 序号找到对应状态，分页返回文件预览，生成短期、会话绑定的恢复授权，并把新对话创建交给 DSH 官方 Host create/fork 生命周期。插件绝不会自动恢复文件。
 
@@ -160,7 +160,7 @@ export async function apply(ctx: Context) {
 }
 ```
 
-完整格式类型从 `@dsh-external/turn-rewind/format` 导出；可信集成和测试可以从 `@dsh-external/turn-rewind/core` 使用独立 Engine。
+完整格式类型从 `@anionex/dsh-turn-rewind/format` 导出；可信集成和测试可以从 `@anionex/dsh-turn-rewind/core` 使用独立 Engine。
 
 ## 开发
 
