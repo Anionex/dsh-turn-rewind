@@ -280,6 +280,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
   }
   const ready = preview?.status === 'ready' ? preview : null
   const hasFileChanges = ready !== null && ready.totalChanges > 0
+  const noFileChanges = ready !== null && ready.totalChanges === 0
   const driftBlocked = hasFileChanges && ready?.operationChanged === true
   const sharedBlocked = (ready?.activeSessionIds.length ?? 0) > 0
   const planMissing = hasFileChanges && ready !== null && !sharedBlocked && !driftBlocked
@@ -289,7 +290,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
     && !applying
     && !loadingDetails
     && completed === null
-    && hasFileChanges
+    && (hasFileChanges || (noFileChanges && mode === 'both'))
     && !driftBlocked
     && !sharedBlocked
     && !planMissing
@@ -335,9 +336,12 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
       messageSeq: ready.messageSeq,
       checkpointId: ready.checkpointId,
     }
-    if (ready.planId === undefined || ready.confirmation === undefined) return
-    body.planId = ready.planId
-    body.confirmation = ready.confirmation
+    if (ready.planId === undefined || ready.confirmation === undefined) {
+      if (!(ready.totalChanges === 0 && mode === 'both')) return
+    } else {
+      body.planId = ready.planId
+      body.confirmation = ready.confirmation
+    }
     applyPending.current = true
     setApplying(true)
     setError(null)
@@ -356,8 +360,10 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
         return
       }
       const childSessionId = requiredString(result.sessionId, 'sessionId')
-      requiredString(result.rescuePointId, 'rescuePointId')
-      setCompleted('项目文件已恢复，并已创建新对话。恢复前的文件已自动备份。')
+      if (result.rescuePointId !== undefined) requiredString(result.rescuePointId, 'rescuePointId')
+      setCompleted(ready.totalChanges === 0
+        ? '已创建新对话，从这里继续（无需恢复文件）。当前对话已保留。'
+        : '项目文件已恢复，并已创建新对话。恢复前的文件已自动备份。')
       try {
         await openRestoredSession(childSessionId, matched.promptText)
         setOpen(false)
@@ -375,7 +381,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
     }
   }
 
-  const actionLabel = mode === 'both' ? '恢复并从这里继续' : '恢复文件'
+  const actionLabel = mode === 'both' ? (ready !== null && ready.totalChanges === 0 ? '从这里继续' : '恢复并从这里继续') : '恢复文件'
   const radioName = `dcl-rewind-${sessionId}-${String(matched.messageSeq)}`
   const branchChanged = ready !== null && ready.checkpointBranch !== ready.currentBranch
 
@@ -421,8 +427,8 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
                 </label>
               </div>
               <div className="dcl-rewind-summary">
-                <strong>将恢复 {String(ready.totalChanges)} 个文件</strong>
-                <span>{mode === 'both' ? '恢复后在新对话里继续' : '当前对话保持不变'}</span>
+                <strong>{ready.totalChanges === 0 ? '无需恢复文件' : `将恢复 ${String(ready.totalChanges)} 个文件`}</strong>
+                <span>{mode === 'both' ? (ready.totalChanges === 0 ? '从这里继续' : '恢复后在新对话里继续') : '当前对话保持不变'}</span>
               </div>
               {sharedBlocked && (
                 <p className="dcl-rewind-error">这个项目目录还有别的对话正在运行。恢复文件会影响到它们，因此本次操作已被阻止。请等那些对话结束或停止后，再重新检查。</p>
@@ -435,7 +441,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
               {driftBlocked && <p className="dcl-rewind-warning">Git 正在进行合并、变基或类似操作。请先完成或取消这次 Git 操作，再重新检查。</p>}
               {planMissing && <p className="dcl-rewind-error">恢复信息已经失效，请重新检查。</p>}
               {stale && <p className="dcl-rewind-error">项目文件在检查后又发生了变化。为避免覆盖新修改，这次恢复已失效，请重新检查。</p>}
-              {ready.totalChanges === 0 && <p className="dcl-rewind-status">项目文件已经是这条消息发送前的状态，无需恢复。想重新开始时，可以使用“分支新对话”。</p>}
+              {ready.totalChanges === 0 && <p className="dcl-rewind-status">项目文件没有变化，无需恢复。选择“恢复文件并从这里继续”，将直接创建新对话。</p>}
               {ready.changes.length > 0 && (
                 <div className="dcl-rewind-files">
                   {ready.changes.map(change => <div className="dcl-rewind-file" key={change.path}><code>{change.path}</code><span className="dcl-rewind-kind">{fileRecoveryLabel(change.kind)}</span></div>)}
@@ -636,7 +642,7 @@ function friendlyError(error: unknown): string {
     case 'REPOSITORY_CHANGED': return '这个项目目录已不属于原来的 Git 工作区，无法恢复。'
     case 'GIT_OPERATION_CHANGED': return 'Git 正在执行其他操作。请先完成或取消该操作，再重新检查。'
     case 'RESTORE_POINT_NOT_FOUND': return '没有找到对应的文件状态，可能已被清理。'
-    case 'NO_CHANGES': return '项目文件已经是这条消息发送前的状态，无需恢复。想重新开始时，可以使用“分支新对话”。'
+    case 'NO_CHANGES': return '这条消息前后没有文件变化，无需恢复文件。'
     case 'RESTORE_FAILED_ROLLED_BACK': return '恢复未能完成，项目文件已自动还原到操作前的状态。'
     case 'CONVERSATION_REWIND_FAILED': return '文件已恢复，但无法创建新对话；项目文件已自动还原。'
     default: return error.message

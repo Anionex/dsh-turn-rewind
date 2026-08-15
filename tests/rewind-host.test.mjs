@@ -380,7 +380,7 @@ test('combined rewind compensates restored files when conversation creation fail
   assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'changed\n')
 })
 
-test('a no-op checkpoint never degrades into conversation branching', async (t) => {
+test('a zero-change rewind branches the conversation only in both mode', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)
   const checkpoint = await f.engine.createTurnCheckpoint({
@@ -391,8 +391,8 @@ test('a no-op checkpoint never degrades into conversation branching', async (t) 
     ['session-web', liveSession('session-web', f.workspace, oneTurnEvents())],
   ]), {
     apiProxy: { sessions: {
-      async create() { created = true; return okSession('unexpected') },
-      async fork() { created = true; return okSession('unexpected') },
+      async create() { created = true; return okSession('forked-session') },
+      async fork() { created = true; return okSession('forked-session') },
     } },
   })
   const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-web&messageSeq=2')
@@ -401,8 +401,15 @@ test('a no-op checkpoint never degrades into conversation branching', async (t) 
   const applied = await request(handler, 'POST', '/turn-rewind', {
     mode: 'both', sessionId: 'session-web', messageSeq: 2, checkpointId: checkpoint.id,
   })
-  assert.equal(applied.body.code, 'NO_CHANGES')
-  assert.equal(created, false)
+  assert.equal(applied.status, 200)
+  assert.equal(applied.body.status, 'completed')
+  assert.equal(applied.body.sessionId, 'forked-session')
+  assert.equal(applied.body.filesRestored, 0)
+  assert.equal(created, true)
+  const codeOnly = await request(handler, 'POST', '/turn-rewind', {
+    mode: 'code', sessionId: 'session-web', messageSeq: 2, checkpointId: checkpoint.id,
+  })
+  assert.equal(codeOnly.body.code, 'NO_CHANGES')
 })
 
 test('preview is paged while details can retrieve the complete file list', async (t) => {
@@ -564,6 +571,73 @@ function preStepAgent(id, cwd, turn, startSeq) {
     session: { id, header: { cwd }, events: [{ type: 'turn/start', seq: startSeq, data: { turn } }] },
   }
 }
+
+
+test('POST with zero file changes and both mode forks a conversation without touching files', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const point = await f.engine.createTurnCheckpoint({
+    cwd: f.workspace, sessionId: 'session-web', turn: 1, turnStartSeq: 1,
+  })
+  const sessions = new Map([['session-web', liveSession('session-web', f.workspace, oneTurnEvents())]])
+  const calls = []
+  const handler = handlerFor(f, sessions, {
+    apiProxy: { sessions: {
+      async create(requestValue) {
+        calls.push(['create', requestValue.payload])
+        return okSession('forked-session')
+      },
+      async fork(requestValue) {
+        calls.push(['fork', requestValue.payload])
+        return okSession('forked-session')
+      },
+    } },
+  })
+
+  const before = await readFile(join(f.workspace, 'code.txt'), 'utf8')
+  const response = await request(handler, 'POST', '/turn-rewind', {
+    mode: 'both', sessionId: 'session-web', messageSeq: 2, checkpointId: point.id,
+  })
+
+  assert.equal(response.status, 200)
+  assert.equal(response.body.status, 'completed')
+  assert.equal(response.body.mode, 'both')
+  assert.equal(response.body.sessionId, 'forked-session')
+  assert.equal(response.body.filesRestored, 0)
+  assert.deepEqual(calls, [['create', { cwd: f.workspace }]])
+  assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), before)
+})
+
+test('POST with zero file changes and code mode still rejects with NO_CHANGES', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const point = await f.engine.createTurnCheckpoint({
+    cwd: f.workspace, sessionId: 'session-web', turn: 1, turnStartSeq: 1,
+  })
+  const sessions = new Map([['session-web', liveSession('session-web', f.workspace, oneTurnEvents())]])
+  const handler = handlerFor(f, sessions)
+  const response = await request(handler, 'POST', '/turn-rewind', {
+    mode: 'code', sessionId: 'session-web', messageSeq: 2, checkpointId: point.id,
+  })
+  assert.equal(response.status, 409)
+  assert.equal(response.body.code, 'NO_CHANGES')
+})
+
+test('GET preview for a zero-change turn is ready without a plan and reports no files', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  await f.engine.createTurnCheckpoint({
+    cwd: f.workspace, sessionId: 'session-web', turn: 1, turnStartSeq: 1,
+  })
+  const sessions = new Map([['session-web', liveSession('session-web', f.workspace, oneTurnEvents())]])
+  const handler = handlerFor(f, sessions)
+  const response = await request(handler, 'GET', '/turn-rewind?sessionId=session-web&messageSeq=2')
+  assert.equal(response.status, 200)
+  assert.equal(response.body.status, 'ready')
+  assert.equal(response.body.totalChanges, 0)
+  assert.equal(response.body.planId, undefined)
+  assert.equal(response.body.confirmation, undefined)
+})
 
 function installedCoordinator(engine, warnings = []) {
   let listener
