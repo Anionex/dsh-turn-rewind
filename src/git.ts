@@ -37,7 +37,14 @@ export async function discoverRepository(cwd: string, signal?: AbortSignal): Pro
   }
 
   const pathOutput = await git(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], signal)
-  const paths = [...new Set(splitNul(pathOutput).map(validateRelativePath))].sort(comparePaths)
+  // `ls-files --others` refuses to descend into embedded repositories, such as a
+  // linked worktree nested inside this checkout; it reports the directory itself
+  // with a trailing slash (for example `nested/`). Those directories are separate
+  // checkouts, not files of this worktree, so exclude them from the snapshot
+  // inventory instead of rejecting the entry as a non-canonical path.
+  const paths = [...new Set(splitNul(pathOutput)
+    .filter((path) => !path.endsWith('/'))
+    .map(validateRelativePath))].sort(comparePaths)
   const head = trimOptional(await gitOptional(root, ['rev-parse', '--verify', '--quiet', 'HEAD'], signal))
   const branch = trimOptional(await gitOptional(root, ['symbolic-ref', '--quiet', '--short', 'HEAD'], signal))
   const stagedOutput = await git(root, ['diff', '--cached', '--name-only', '-z'], signal)
