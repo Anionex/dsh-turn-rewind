@@ -122,6 +122,21 @@ test('turn checkpoint retention prunes only the oldest checkpoint in the same se
   )
 })
 
+test('a nested linked worktree is excluded from the snapshot instead of failing path validation', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  await seedCommitted(f.workspace, { 'src/main.txt': 'alpha\n' })
+  await git(f.workspace, 'worktree', 'add', 'nested', '-b', 'topic/agent')
+  await writeFile(join(f.workspace, 'nested', 'inner.txt'), 'inner checkout\n')
+
+  const point = await f.engine.create({ cwd: f.workspace, sessionId: 'session-a' })
+  assert.equal(point.fileCount, 1)
+  const manifest = await f.engine.store.readManifest(await realpath(f.workspace), point.id)
+  assert.deepEqual(Object.keys(manifest.entries), ['src/main.txt'])
+  const inspection = await f.engine.inspect({ cwd: f.workspace, restorePointId: point.id })
+  assert.equal(inspection.changes.length, 0)
+})
+
 test('worktree discovery preserves legal trailing spaces in the root path', async (t) => {
   const outer = await mkdtemp(join(tmpdir(), 'dsh-change-ledger-space-test-'))
   t.after(async () => rm(outer, { recursive: true, force: true }))
