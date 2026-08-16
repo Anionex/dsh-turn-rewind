@@ -1,6 +1,6 @@
 {
   "name": "@anionex/dsh-turn-rewind",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Turn-level conversation and workspace rewind for DeepSeek Harness, powered by a persistent Change Ledger",
   "repository": {
     "type": "git",
