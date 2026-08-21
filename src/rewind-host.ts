@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
+import { createDeadline } from './deadline.js'
 import { ChangeLedgerError, errorMessage } from './errors.js'
 import type { ChangeLedgerEngine } from './engine.js'
 import { discoverRepositoryRoot } from './git.js'
@@ -152,65 +153,70 @@ export class TurnCheckpointCoordinator {
       return
     }
     const timeoutMs = this.engine.config.turnCheckpointTimeoutMs
-    const outcomeDeadline = AbortSignal.timeout(timeoutMs)
-    const outcomeSignal = AbortSignal.any([signal, outcomeDeadline])
+    const outcomeDeadline = createDeadline(timeoutMs)
+    const outcomeSignal = AbortSignal.any([signal, outcomeDeadline.signal])
     const reserveMs = Math.min(250, Math.max(10, Math.ceil(timeoutMs / 5)))
-    const captureDeadline = AbortSignal.timeout(Math.max(1, timeoutMs - reserveMs))
-    const captureSignal = AbortSignal.any([signal, captureDeadline])
-    const existing = this.captures.get(key)
-    if (existing !== undefined) {
-      await waitWithSignal(existing, captureSignal).catch(() => undefined)
-      return
-    }
-    this.pending.add(key)
-    this.failures.delete(key)
-    this.skips.delete(key)
-    const capture = (async () => {
-      try {
-        const workspace = await discoverRepositoryRoot(cwd, captureSignal)
-        await this.serializeWorkspace(workspace, captureSignal, async () => {
-          try {
-            await this.engine.createTurnCheckpoint({
-              cwd: workspace,
-              sessionId: agent.id,
-              turn,
-              turnStartSeq: start.seq,
-              signal: captureSignal,
-            })
-          } catch (error) {
-            await this.recordFailure(
-              ctx,
-              agent.id,
-              turn,
-              checkpointTimeoutError(error, timeoutMs, captureDeadline, signal),
-              { cwd: workspace, turnStartSeq: start.seq },
-            )
-          }
-        })
-      } catch (error) {
-        await this.recordFailure(
-          ctx,
-          agent.id,
-          turn,
-          checkpointTimeoutError(error, timeoutMs, captureDeadline, signal),
-          { cwd, turnStartSeq: start.seq },
-        )
-      } finally {
-        this.pending.delete(key)
-      }
-    })()
-    this.captures.set(key, capture)
+    const captureDeadline = createDeadline(Math.max(1, timeoutMs - reserveMs))
+    const captureSignal = AbortSignal.any([signal, captureDeadline.signal])
     try {
-      await waitWithSignal(capture, outcomeSignal)
-    } catch (error) {
-      const bounded = checkpointTimeoutError(error, timeoutMs, outcomeDeadline, signal)
-      const message = errorMessage(bounded)
-      this.pending.delete(key)
-      if (bounded instanceof ChangeLedgerError && isCheckpointSkip(bounded.code)) {
-        this.skips.set(key, message)
-      } else {
-        this.failures.set(key, message)
+      const existing = this.captures.get(key)
+      if (existing !== undefined) {
+        await waitWithSignal(existing, captureSignal).catch(() => undefined)
+        return
       }
+      this.pending.add(key)
+      this.failures.delete(key)
+      this.skips.delete(key)
+      const capture = (async () => {
+        try {
+          const workspace = await discoverRepositoryRoot(cwd, captureSignal)
+          await this.serializeWorkspace(workspace, captureSignal, async () => {
+            try {
+              await this.engine.createTurnCheckpoint({
+                cwd: workspace,
+                sessionId: agent.id,
+                turn,
+                turnStartSeq: start.seq,
+                signal: captureSignal,
+              })
+            } catch (error) {
+              await this.recordFailure(
+                ctx,
+                agent.id,
+                turn,
+                checkpointTimeoutError(error, timeoutMs, captureDeadline.signal, signal),
+                { cwd: workspace, turnStartSeq: start.seq },
+              )
+            }
+          })
+        } catch (error) {
+          await this.recordFailure(
+            ctx,
+            agent.id,
+            turn,
+            checkpointTimeoutError(error, timeoutMs, captureDeadline.signal, signal),
+            { cwd, turnStartSeq: start.seq },
+          )
+        } finally {
+          this.pending.delete(key)
+        }
+      })()
+      this.captures.set(key, capture)
+      try {
+        await waitWithSignal(capture, outcomeSignal)
+      } catch (error) {
+        const bounded = checkpointTimeoutError(error, timeoutMs, outcomeDeadline.signal, signal)
+        const message = errorMessage(bounded)
+        this.pending.delete(key)
+        if (bounded instanceof ChangeLedgerError && isCheckpointSkip(bounded.code)) {
+          this.skips.set(key, message)
+        } else {
+          this.failures.set(key, message)
+        }
+      }
+    } finally {
+      captureDeadline.cancel()
+      outcomeDeadline.cancel()
     }
   }
 

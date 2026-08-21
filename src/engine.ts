@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { lstat, realpath } from 'node:fs/promises'
+import { createDeadline } from './deadline.js'
 import { ChangeLedgerError, errorMessage } from './errors.js'
 import {
   discoverRepository,
@@ -229,92 +230,96 @@ export class ChangeLedgerEngine {
     readonly turnStartSeq: number
     readonly signal?: AbortSignal
   }): Promise<RestorePointSummary> {
-    const deadline = AbortSignal.timeout(this.config.turnCheckpointTimeoutMs)
-    const signal = options.signal === undefined ? deadline : AbortSignal.any([options.signal, deadline])
+    const deadline = createDeadline(this.config.turnCheckpointTimeoutMs)
+    const signal = options.signal === undefined ? deadline.signal : AbortSignal.any([options.signal, deadline.signal])
     try {
-      await waitWithSignal(this.ready, signal)
-    } catch (error) {
-      throw checkpointDeadlineError(error, this.config.turnCheckpointTimeoutMs, deadline, options.signal)
-    }
-    if (this.config.turnCheckpointMode === 'off') {
-      throw new ChangeLedgerError('TURN_CHECKPOINT_DISABLED', 'automatic turn checkpoints are disabled')
-    }
-    if (!Number.isSafeInteger(options.turn) || options.turn < 0) {
-      throw new ChangeLedgerError('INVALID_ARGUMENTS', 'turn must be a non-negative safe integer')
-    }
-    if (!Number.isSafeInteger(options.turnStartSeq) || options.turnStartSeq < 0) {
-      throw new ChangeLedgerError('INVALID_ARGUMENTS', 'turnStartSeq must be a non-negative safe integer')
-    }
-    try {
-      const source = await discoverRepository(options.cwd, signal)
-      await this.assertStorageSeparated(source.state.root)
-      const release = await this.acquireWorkspace(source.state.root, signal)
       try {
-        const existing = await waitWithSignal(this.store.listManifests(source.state.root, signal), signal)
-        const duplicate = existing.find(manifest => manifest.kind === 'turn'
-          && manifest.sessionId === options.sessionId
-          && manifest.turn === options.turn
-          && manifest.turnStartSeq === options.turnStartSeq)
-        if (duplicate !== undefined) {
-          if (duplicate.version === 2) await verifyGitCheckpoint(duplicate, signal)
+        await waitWithSignal(this.ready, signal)
+      } catch (error) {
+        throw checkpointDeadlineError(error, this.config.turnCheckpointTimeoutMs, deadline.signal, options.signal)
+      }
+      if (this.config.turnCheckpointMode === 'off') {
+        throw new ChangeLedgerError('TURN_CHECKPOINT_DISABLED', 'automatic turn checkpoints are disabled')
+      }
+      if (!Number.isSafeInteger(options.turn) || options.turn < 0) {
+        throw new ChangeLedgerError('INVALID_ARGUMENTS', 'turn must be a non-negative safe integer')
+      }
+      if (!Number.isSafeInteger(options.turnStartSeq) || options.turnStartSeq < 0) {
+        throw new ChangeLedgerError('INVALID_ARGUMENTS', 'turnStartSeq must be a non-negative safe integer')
+      }
+      try {
+        const source = await discoverRepository(options.cwd, signal)
+        await this.assertStorageSeparated(source.state.root)
+        const release = await this.acquireWorkspace(source.state.root, signal)
+        try {
+          const existing = await waitWithSignal(this.store.listManifests(source.state.root, signal), signal)
+          const duplicate = existing.find(manifest => manifest.kind === 'turn'
+            && manifest.sessionId === options.sessionId
+            && manifest.turn === options.turn
+            && manifest.turnStartSeq === options.turnStartSeq)
+          if (duplicate !== undefined) {
+            if (duplicate.version === 2) await verifyGitCheckpoint(duplicate, signal)
+            await this.store.deleteTurnCheckpointSkip(
+              source.state.root,
+              options.sessionId,
+              options.turn,
+              options.turnStartSeq,
+            ).catch(() => undefined)
+            return summarize(duplicate)
+          }
+
+          throwIfAborted(signal)
+          let manifest: RestorePointManifest
+          if (this.config.turnCheckpointMode === 'legacy') {
+            manifest = await this.createLocked({
+              cwd: source.state.root,
+              kind: 'turn',
+              sessionId: options.sessionId,
+              label: `Before turn ${String(options.turn)} checkpoint`,
+              turn: options.turn,
+              turnStartSeq: options.turnStartSeq,
+              signal,
+              deferGarbageCollection: true,
+            })
+          } else {
+            const id = makeId('rp')
+            const captured = (await captureGitTurnCheckpoint({
+              cwd: source.state.root,
+              id,
+              sessionId: options.sessionId,
+              turn: options.turn,
+              turnStartSeq: options.turnStartSeq,
+              config: this.config,
+              signal,
+            })).manifest
+            await this.publishGitManifest(captured, signal)
+            manifest = captured
+          }
           await this.store.deleteTurnCheckpointSkip(
             source.state.root,
             options.sessionId,
             options.turn,
             options.turnStartSeq,
           ).catch(() => undefined)
-          return summarize(duplicate)
-        }
 
-        throwIfAborted(signal)
-        let manifest: RestorePointManifest
-        if (this.config.turnCheckpointMode === 'legacy') {
-          manifest = await this.createLocked({
-            cwd: source.state.root,
-            kind: 'turn',
-            sessionId: options.sessionId,
-            label: `Before turn ${String(options.turn)} checkpoint`,
-            turn: options.turn,
-            turnStartSeq: options.turnStartSeq,
-            signal,
-            deferGarbageCollection: true,
-          })
-        } else {
-          const id = makeId('rp')
-          const captured = (await captureGitTurnCheckpoint({
-            cwd: source.state.root,
-            id,
-            sessionId: options.sessionId,
-            turn: options.turn,
-            turnStartSeq: options.turnStartSeq,
-            config: this.config,
-            signal,
-          })).manifest
-          await this.publishGitManifest(captured, signal)
-          manifest = captured
-        }
-        await this.store.deleteTurnCheckpointSkip(
-          source.state.root,
-          options.sessionId,
-          options.turn,
-          options.turnStartSeq,
-        ).catch(() => undefined)
-
-        if (!signal.aborted) {
-          const checkpoints = [...existing.filter(point => point.kind === 'turn' && point.sessionId === options.sessionId), manifest]
-            .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id))
-          for (const stale of checkpoints.slice(this.config.maxTurnCheckpointsPerSession)) {
-            if (signal.aborted) break
-            if (await this.store.isReferencedByRecovery(source.state.root, stale.id)) continue
-            await this.deleteManifestWithGit(stale, signal).catch(() => undefined)
+          if (!signal.aborted) {
+            const checkpoints = [...existing.filter(point => point.kind === 'turn' && point.sessionId === options.sessionId), manifest]
+              .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id))
+            for (const stale of checkpoints.slice(this.config.maxTurnCheckpointsPerSession)) {
+              if (signal.aborted) break
+              if (await this.store.isReferencedByRecovery(source.state.root, stale.id)) continue
+              await this.deleteManifestWithGit(stale, signal).catch(() => undefined)
+            }
           }
+          return summarize(manifest)
+        } finally {
+          await release()
         }
-        return summarize(manifest)
-      } finally {
-        await release()
+      } catch (error) {
+        throw checkpointDeadlineError(error, this.config.turnCheckpointTimeoutMs, deadline.signal, options.signal)
       }
-    } catch (error) {
-      throw checkpointDeadlineError(error, this.config.turnCheckpointTimeoutMs, deadline, options.signal)
+    } finally {
+      deadline.cancel()
     }
   }
 
