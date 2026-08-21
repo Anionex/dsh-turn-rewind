@@ -5,6 +5,7 @@ import type { ResolvedChangeLedgerConfig, SnapshotEntry, WorkspaceChange } from 
 export interface CapturedTree {
     readonly source: RepositorySnapshotSource;
     readonly entries: Readonly<Record<string, SnapshotEntry>>;
+    readonly gitEntries?: Readonly<Record<string, SnapshotEntry>>;
     readonly treeHash: string;
     readonly fileCount: number;
     readonly totalBytes: number;
@@ -14,6 +15,7 @@ export declare function captureTree(options: {
     readonly cwd: string;
     readonly config: ResolvedChangeLedgerConfig;
     readonly store?: LedgerStore;
+    readonly gitObjectFormat?: 'sha1' | 'sha256';
     readonly signal?: AbortSignal;
 }): Promise<CapturedTree>;
 /**
@@ -25,13 +27,14 @@ export declare function captureStableTree(options: {
     readonly cwd: string;
     readonly config: ResolvedChangeLedgerConfig;
     readonly store?: LedgerStore;
+    readonly gitObjectFormat?: 'sha1' | 'sha256';
     readonly signal?: AbortSignal;
 }): Promise<CapturedTree>;
 /** Compute stable path-level differences between two captured trees. */
-export declare function diffTrees(before: Readonly<Record<string, SnapshotEntry>>, after: Readonly<Record<string, SnapshotEntry>>): WorkspaceChange[];
+export declare function diffTrees(before: Readonly<Record<string, SnapshotEntry>>, after: Readonly<Record<string, SnapshotEntry>>, comparisonBefore?: Readonly<Record<string, SnapshotEntry>>, comparisonAfter?: Readonly<Record<string, SnapshotEntry>>): WorkspaceChange[];
 /** Return whether two snapshot entries are byte/type/mode equivalent. */
 export declare function entriesEqual(left: SnapshotEntry | undefined, right: SnapshotEntry | undefined): boolean;
 /** Hash a complete path map into a deterministic tree identity. */
 export declare function hashTree(entries: Readonly<Record<string, SnapshotEntry>>): string;
 /** Byte-verify one workspace-relative path without following a final symlink. */
-export declare function captureSnapshotEntry(root: string, path: string, maxFileBytes: number, signal?: AbortSignal): Promise<SnapshotEntry | undefined>;
+export declare function captureSnapshotEntry(root: string, path: string, maxFileBytes: number, signal?: AbortSignal, gitObjectFormat?: 'sha1' | 'sha256'): Promise<SnapshotEntry | undefined>;

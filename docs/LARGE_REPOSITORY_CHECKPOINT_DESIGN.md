@@ -4,7 +4,7 @@ Status: revised after prior-art audit and an independent adversarial review loop
 
 Implementation status (August 21, 2026): the first production-safe slice is implemented. Legacy automatic checkpoints remain the default but are capped by a 5-second pre-step deadline, so large repositories skip explicitly instead of blocking for minutes. Git-native v2 is available through `turnCheckpointMode: git-native` while the stronger cross-platform capability-filesystem helper remains a rollout gate. Skip outcomes are durable across process restarts.
 
-The repeatable issue-size fixture (`pnpm benchmark:git-checkpoint`) covers 15,500 files and 380,928,000 logical bytes. On the development machine, clean, cold 10-file overlay, and warm 10-file overlay checkpoints completed in 2.71s, 2.56s, and 2.37s respectively; clean/warm runs reread zero worktree bytes, the cold overlay read 245,760 bytes, and Git status, user refs, and the real index remained unchanged.
+The repeatable issue-size fixture (`pnpm benchmark:git-checkpoint`) covers 15,500 files and 380,928,000 logical bytes. On the development machine, clean, cold 10-file overlay, and warm 10-file overlay checkpoints completed in 2.00s, 2.03s, and 2.00s respectively; comparing the warm checkpoint with the unchanged worktree completed in 3.88s. Clean/warm capture reread zero worktree bytes, the cold overlay read 245,760 bytes, and Git status, user refs, and the real index remained unchanged.
 
 ## 1. Decision summary
 

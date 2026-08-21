@@ -48,6 +48,16 @@ try {
   })
   result.captures.push(await measure(engine, workspace, 'dirty-cold-cache', 2))
   result.captures.push(await measure(engine, workspace, 'dirty-warm-cache', 3))
+  const warmPoint = await engine.findTurnCheckpoint({ cwd: workspace, sessionId: 'benchmark-session', turn: 3 })
+  assert.notEqual(warmPoint, undefined)
+  const comparisonStarted = performance.now()
+  const inspection = await engine.inspect({ cwd: workspace, restorePointId: warmPoint.id })
+  assert.deepEqual(inspection.changes, [])
+  result.comparison = {
+    label: 'warm-checkpoint-vs-unchanged-worktree',
+    wallMs: Math.round((performance.now() - comparisonStarted) * 100) / 100,
+    changeCount: inspection.changes.length,
+  }
 
   result.status = 'passed'
 } catch (error) {

@@ -74,7 +74,7 @@ test('creates and lists a content-addressed restore point without Git side effec
 test('captures hidden turn checkpoints, finds them by session turn, and restores their code state', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)
-  await seedCommitted(f.workspace, { 'src/main.txt': 'turn one\n' })
+  await seedCommitted(f.workspace, { 'src/main.txt': 'turn one\n', 'src/unchanged.txt': 'stable\n' })
 
   const checkpoint = await f.engine.createTurnCheckpoint({
     cwd: f.workspace,
@@ -90,13 +90,53 @@ test('captures hidden turn checkpoints, finds them by session turn, and restores
   assert.equal((await f.engine.findTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-web', turn: 1 }))?.id, checkpoint.id)
 
   await writeFile(join(f.workspace, 'src/main.txt'), 'turn two\n')
+  const inspection = await f.engine.inspect({ cwd: f.workspace, restorePointId: checkpoint.id })
+  assert.deepEqual(inspection.changes.map(change => change.path), ['src/main.txt'])
+  assert.equal(inspection.changes[0]?.after?.kind, 'file')
+  assert.equal(inspection.changes[0]?.after?.provider, undefined)
   const plan = await f.engine.planRestore({
     cwd: f.workspace,
     restorePointId: checkpoint.id,
     sessionId: 'session-web',
   })
+  assert.deepEqual(plan.paths, ['src/main.txt'])
   await f.engine.applyRestore({ planId: plan.id, confirmation: plan.confirmation, sessionId: 'session-web' })
   assert.equal(await readFile(join(f.workspace, 'src/main.txt'), 'utf8'), 'turn one\n')
+})
+
+test('Git-native comparison hashes current files with the repository object format', async (t) => {
+  const outer = await mkdtemp(join(tmpdir(), 'dsh-change-ledger-sha256-test-'))
+  const workspace = join(outer, 'workspace')
+  const storageDir = join(outer, 'state')
+  t.after(async () => rm(outer, { recursive: true, force: true }))
+  await mkdir(workspace)
+  try {
+    await execFileAsync('git', ['-C', workspace, 'init', '--object-format=sha256', '-b', 'main'], { encoding: 'utf8' })
+  } catch (error) {
+    const detail = error instanceof Error && 'stderr' in error ? String(error.stderr) : String(error)
+    if (/object-format|sha-?256|hash algorithm/i.test(detail)) {
+      t.skip('installed Git does not support SHA-256 repositories')
+      return
+    }
+    throw error
+  }
+  await git(workspace, 'config', 'user.name', 'Change Ledger Test')
+  await git(workspace, 'config', 'user.email', 'change-ledger@example.invalid')
+  await seedCommitted(workspace, { 'changed.txt': 'before\n', 'unchanged.txt': 'stable\n' })
+  const engine = new ChangeLedgerEngine({ storageDir, staleLockMs: 1, turnCheckpointMode: 'git-native' })
+  await engine.initialize()
+  const checkpoint = await engine.createTurnCheckpoint({
+    cwd: workspace, sessionId: 'session-sha256', turn: 1, turnStartSeq: 1,
+  })
+
+  await writeFile(join(workspace, 'changed.txt'), 'after\n')
+  const inspection = await engine.inspect({ cwd: workspace, restorePointId: checkpoint.id })
+  assert.deepEqual(inspection.changes.map(change => change.path), ['changed.txt'])
+  assert.equal(inspection.changes[0]?.after?.provider, undefined)
+  const plan = await engine.planRestore({ cwd: workspace, restorePointId: checkpoint.id })
+  assert.deepEqual(plan.paths, ['changed.txt'])
+  await engine.applyRestore({ planId: plan.id, confirmation: plan.confirmation })
+  assert.equal(await readFile(join(workspace, 'changed.txt'), 'utf8'), 'before\n')
 })
 
 test('Git-native turn checkpoints preserve HEAD, index, and worktree trees without touching the real index', async (t) => {
@@ -685,6 +725,30 @@ test('linked worktrees have distinct durable identities that survive a move', as
   const plan = await f.engine.planRestore({ cwd: moved, restorePointId: point.id })
   await f.engine.applyRestore({ planId: plan.id, confirmation: plan.confirmation })
   assert.equal(await readFile(join(moved, 'state.txt'), 'utf8'), 'one\n')
+})
+
+test('a recreated linked worktree cannot inherit an identity left by the removed incarnation', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  await seedCommitted(f.workspace, { 'state.txt': 'one\n' })
+  const linked = join(f.outer, 'linked-recreated')
+  await git(f.workspace, 'worktree', 'add', '-b', 'linked-recreated-old', linked)
+  const oldIdentity = await ensureGitWorktreeIdentity(linked)
+  await git(f.workspace, 'worktree', 'remove', linked)
+  await git(f.workspace, 'worktree', 'add', '-b', 'linked-recreated-new', linked)
+
+  await assert.rejects(
+    ensureGitWorktreeIdentity(linked),
+    (error) => error instanceof ChangeLedgerError
+      && error.code === 'STATE_CORRUPT'
+      && error.message.includes('detached central copy'),
+  )
+  const centralPath = join(
+    oldIdentity.commonDir,
+    'dsh-turn-rewind-worktree-identities',
+    `${createHash('sha256').update(oldIdentity.gitDir).digest('hex')}.id`,
+  )
+  assert.equal((await readFile(centralPath, 'utf8')).trim(), oldIdentity.worktreeId)
 })
 
 test('a deleted primary worktree identity is recovered and its durable claim survives total identity loss', async (t) => {

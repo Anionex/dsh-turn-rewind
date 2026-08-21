@@ -109,8 +109,7 @@ export declare class ChangeLedgerEngine {
     private restorePaths;
     private assertPathFresh;
     private verifyPaths;
-    private entriesForComparison;
-    private entryForComparison;
+    private captureSelectedEntries;
     private assertStorageSeparated;
     private expirePlans;
 }

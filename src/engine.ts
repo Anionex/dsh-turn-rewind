@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { lstat, realpath } from 'node:fs/promises'
@@ -445,8 +445,14 @@ export class ChangeLedgerEngine {
     try {
       const manifest = await this.store.readManifest(source.state.root, options.restorePointId)
       if (manifest.version === 2) await verifyGitCheckpoint(manifest, options.signal)
-      const current = await captureStableTree({ cwd: source.state.root, config: this.config, ...(options.signal === undefined ? {} : { signal: options.signal }) })
-      const desiredEntries = await this.entriesForComparison(manifest.entries, source.state.root, options.signal)
+      const current = await captureStableTree({
+        cwd: source.state.root,
+        config: this.config,
+        ...(manifest.version === 2 ? { gitObjectFormat: manifest.git.objectFormat } : {}),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      })
+      const currentEntries = manifest.version === 2 ? current.gitEntries : current.entries
+      if (currentEntries === undefined) throw new ChangeLedgerError('STATE_CORRUPT', 'Git comparison entries are unavailable')
       return {
         restorePoint: summarize(manifest),
         currentTreeHash: current.treeHash,
@@ -456,7 +462,7 @@ export class ChangeLedgerEngine {
         ...(current.source.state.operation === undefined ? {} : { currentOperation: current.source.state.operation }),
         headChanged: repositoryHeadChanged(manifest.repository, current.source.state),
         operationChanged: manifest.repository.operation !== current.source.state.operation,
-        changes: diffTrees(desiredEntries, current.entries),
+        changes: diffTrees(manifest.entries, current.entries, manifest.entries, currentEntries),
       }
     } finally {
       await release()
@@ -482,8 +488,14 @@ export class ChangeLedgerEngine {
     try {
       const manifest = await this.store.readManifest(source.state.root, options.restorePointId)
       if (manifest.version === 2) await verifyGitCheckpoint(manifest, options.signal)
-      const current = await captureStableTree({ cwd: source.state.root, config: this.config, ...(options.signal === undefined ? {} : { signal: options.signal }) })
-      const desiredEntries = await this.entriesForComparison(manifest.entries, source.state.root, options.signal)
+      const current = await captureStableTree({
+        cwd: source.state.root,
+        config: this.config,
+        ...(manifest.version === 2 ? { gitObjectFormat: manifest.git.objectFormat } : {}),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      })
+      const currentEntries = manifest.version === 2 ? current.gitEntries : current.entries
+      if (currentEntries === undefined) throw new ChangeLedgerError('STATE_CORRUPT', 'Git comparison entries are unavailable')
       if (options.expectedCurrentTreeHash !== undefined && options.expectedCurrentTreeHash !== current.treeHash) {
         throw new ChangeLedgerError('PLAN_STALE', 'workspace changed after inspection; inspect and plan again')
       }
@@ -491,14 +503,14 @@ export class ChangeLedgerEngine {
         throw new ChangeLedgerError('PLAN_STALE_REPOSITORY', 'Git repository state changed after inspection; inspect and plan again')
       }
       assertRepositoryCompatible(manifest, current.source.state, options.allowHeadChange === true)
-      const changes = diffTrees(desiredEntries, current.entries)
+      const changes = diffTrees(manifest.entries, current.entries, manifest.entries, currentEntries)
       if (changes.length === 0) {
         throw new ChangeLedgerError('NO_CHANGES', `workspace already matches restore point ${manifest.id}`)
       }
       const selected = selectChanges(changes, options.paths)
       await assertNoUnmanagedRestoreConflicts(
         source.state.root,
-        desiredEntries,
+        manifest.entries,
         current.entries,
         selected.map((change) => change.path),
       )
@@ -554,12 +566,11 @@ export class ChangeLedgerEngine {
       try {
         const manifest = await this.store.readManifest(plan.workspace, plan.restorePointId)
         if (manifest.version === 2) await verifyGitCheckpoint(manifest, options.signal)
-        const desiredEntries = await this.entriesForComparison(manifest.entries, plan.workspace, options.signal)
         const current = await captureStableTree({ cwd: plan.workspace, config: this.config, ...(options.signal === undefined ? {} : { signal: options.signal }) })
         assertRepositoryCompatible(manifest, current.source.state, plan.allowHeadChange)
         assertPlanRepositoryFresh(plan.repository, current.source.state)
         assertPlanFresh(plan, current.entries)
-        await assertNoUnmanagedRestoreConflicts(plan.workspace, desiredEntries, current.entries, plan.paths)
+        await assertNoUnmanagedRestoreConflicts(plan.workspace, manifest.entries, current.entries, plan.paths)
 
         const rescue = await this.createLocked({
           cwd: plan.workspace,
@@ -571,7 +582,7 @@ export class ChangeLedgerEngine {
         })
         try {
           assertPlanFresh(plan, rescue.entries)
-          await assertNoUnmanagedRestoreConflicts(plan.workspace, desiredEntries, rescue.entries, plan.paths)
+          await assertNoUnmanagedRestoreConflicts(plan.workspace, manifest.entries, rescue.entries, plan.paths)
         } catch (error) {
           await this.store.deleteManifest(plan.workspace, rescue.id)
           await this.store.collectGarbage(plan.workspace)
@@ -592,7 +603,13 @@ export class ChangeLedgerEngine {
 
         try {
           await this.restorePaths(plan.workspace, manifest.entries, plan.paths, options.signal, plan.expected)
-          await this.verifyPaths(plan.workspace, manifest.entries, plan.paths, options.signal)
+          await this.verifyPaths(
+            plan.workspace,
+            manifest.entries,
+            plan.paths,
+            options.signal,
+            manifest.version === 2 ? manifest.git.objectFormat : undefined,
+          )
         } catch (error) {
           const primaryError = errorMessage(error)
           let journalWarning: string | undefined
@@ -879,36 +896,33 @@ export class ChangeLedgerEngine {
     desiredEntries: Readonly<Record<string, SnapshotEntry>>,
     paths: readonly string[],
     signal?: AbortSignal,
+    gitObjectFormat?: 'sha1' | 'sha256',
   ): Promise<void> {
-    const current = await captureStableTree({ cwd: workspace, config: this.config, ...(signal === undefined ? {} : { signal }) })
-    for (const path of paths) {
-      const desired = await this.entryForComparison(desiredEntries[path], workspace, signal)
-      if (!entriesEqual(desired, current.entries[path])) {
-        throw new ChangeLedgerError('RESTORE_VERIFY_FAILED', `restored path did not match its expected snapshot: ${JSON.stringify(path)}`)
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const first = await this.captureSelectedEntries(workspace, paths, signal, gitObjectFormat)
+      const second = await this.captureSelectedEntries(workspace, paths, signal, gitObjectFormat)
+      if (!paths.every(path => entriesEqual(first.get(path), second.get(path)))) continue
+      for (const path of paths) {
+        if (!entriesEqual(desiredEntries[path], second.get(path))) {
+          throw new ChangeLedgerError('RESTORE_VERIFY_FAILED', `restored path did not match its expected snapshot: ${JSON.stringify(path)}`)
+        }
       }
+      return
     }
+    throw new ChangeLedgerError('RESTORE_VERIFY_FAILED', 'restored paths did not remain stable during post-verification')
   }
 
-  private async entriesForComparison(
-    entries: Readonly<Record<string, SnapshotEntry>>,
+  private async captureSelectedEntries(
     workspace: string,
+    paths: readonly string[],
     signal?: AbortSignal,
-  ): Promise<Readonly<Record<string, SnapshotEntry>>> {
-    if (!Object.values(entries).some((entry) => entry.kind === 'file' && entry.provider === 'git')) return entries
-    const normalized: Record<string, SnapshotEntry> = Object.create(null) as Record<string, SnapshotEntry>
-    for (const [path, entry] of Object.entries(entries)) normalized[path] = await this.entryForComparison(entry, workspace, signal) as SnapshotEntry
-    return normalized
-  }
-
-  private async entryForComparison(
-    entry: SnapshotEntry | undefined,
-    workspace: string,
-    signal?: AbortSignal,
-  ): Promise<SnapshotEntry | undefined> {
-    if (entry?.kind !== 'file' || entry.provider !== 'git') return entry
-    const content = await readGitBlob(workspace, entry.blob, entry.size, signal)
-    if (content.length !== entry.size) throw new ChangeLedgerError('BLOB_CORRUPT', `Git blob ${entry.blob} has unexpected size`)
-    return { kind: 'file', blob: createHash('sha256').update(content).digest('hex'), size: entry.size, mode: entry.mode }
+    gitObjectFormat?: 'sha1' | 'sha256',
+  ): Promise<ReadonlyMap<string, SnapshotEntry | undefined>> {
+    const entries = new Map<string, SnapshotEntry | undefined>()
+    for (const path of paths) {
+      entries.set(path, await captureSnapshotEntry(workspace, path, this.config.maxFileBytes, signal, gitObjectFormat))
+    }
+    return entries
   }
 
   private async assertStorageSeparated(workspace: string): Promise<void> {
