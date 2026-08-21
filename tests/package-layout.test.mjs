@@ -25,6 +25,7 @@ test('package is a portable, prebuilt DSH Profile Bundle', async () => {
   assert.equal(pkg.types, 'lib/types/index.d.ts')
   assert.ok(pkg.files.includes('lib'))
   assert.ok(pkg.files.includes('src'))
+  assert.ok(pkg.files.includes('scripts'))
   assert.ok(pkg.files.includes('cordis.patch.yml'))
   assert.equal(typeof pkg.scripts?.build, 'string')
   assert.equal(typeof pkg.scripts?.prepack, 'string')

@@ -107,6 +107,15 @@ export async function pathExists(path: string): Promise<boolean> {
 
 /** Ensure every existing parent below `root` is a real directory, never a symlink. */
 export async function ensureSafeParents(root: string, target: string): Promise<void> {
+  await walkSafeParents(root, target, true)
+}
+
+/** Validate existing parents without creating missing directories. */
+export async function assertSafeParents(root: string, target: string): Promise<void> {
+  await walkSafeParents(root, target, false)
+}
+
+async function walkSafeParents(root: string, target: string, createMissing: boolean): Promise<void> {
   if (!isWithin(root, target) || target === root) {
     throw new ChangeLedgerError('UNSAFE_TARGET', `restore target is outside the workspace: ${JSON.stringify(target)}`)
   }
@@ -125,6 +134,7 @@ export async function ensureSafeParents(root: string, target: string): Promise<v
       }
     } catch (error) {
       if (!isNodeError(error, 'ENOENT')) throw error
+      if (!createMissing) return
       await mkdir(current, { mode: 0o755 })
     }
   }

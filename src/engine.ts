@@ -1,10 +1,25 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { lstat, realpath } from 'node:fs/promises'
 import { ChangeLedgerError, errorMessage } from './errors.js'
-import { discoverRepository, sameRepositoryFence } from './git.js'
 import {
+  discoverRepository,
+  discoverRepositoryRoot,
+  ensureGitWorktreeIdentity,
+  resolveGitWorktreeRoot,
+  sameRepositoryFence,
+} from './git.js'
+import {
+  captureGitTurnCheckpoint,
+  deleteGitCheckpoint,
+  deleteGitCheckpointRef,
+  publishGitCheckpoint,
+  readGitBlob,
+  verifyGitCheckpoint,
+} from './git-checkpoint.js'
+import {
+  assertSafeParents,
   ensureSafeParents,
   expandHome,
   isNodeError,
@@ -16,8 +31,8 @@ import {
   resolveWorkspacePath,
   validateRelativePath,
 } from './path-utils.js'
-import { captureStableTree, diffTrees, entriesEqual } from './snapshot.js'
-import { LedgerStore } from './store.js'
+import { captureSnapshotEntry, captureStableTree, diffTrees, entriesEqual } from './snapshot.js'
+import { LedgerStore, type GitCheckpointJournal } from './store.js'
 import {
   LEDGER_FORMAT_VERSION,
   type ChangeLedgerConfig,
@@ -28,6 +43,7 @@ import {
   type RestorePointInspection,
   type RestorePointKind,
   type RestorePointManifest,
+  type RestorePointManifestV2,
   type RestorePointSummary,
   type RestoreResult,
   type SnapshotEntry,
@@ -42,6 +58,10 @@ const DEFAULTS = {
   maxSnapshotBytes: 512 * 1024 * 1024,
   planTtlMs: 15 * 60 * 1_000,
   staleLockMs: 30_000,
+  turnCheckpointMode: 'legacy',
+  turnCheckpointTimeoutMs: 5_000,
+  turnCheckpointMaxNewBytes: 32 * 1024 * 1024,
+  turnCheckpointTrust: 'fast',
 } as const
 
 /** Persistent workspace change-set engine, independent of the DSH tool adapter. */
@@ -56,12 +76,123 @@ export class ChangeLedgerEngine {
   constructor(config: ChangeLedgerConfig = {}) {
     this.config = resolveConfig(config)
     this.store = new LedgerStore(this.config)
-    this.ready = this.store.initialize()
+    this.ready = this.initializeStore()
   }
 
   /** Wait for startup reconciliation and return the number of interrupted journals found. */
   async initialize(): Promise<number> {
     return this.ready
+  }
+
+  private async initializeStore(): Promise<number> {
+    const restoredOperations = await this.store.initialize()
+    return restoredOperations + await this.reconcileGitCheckpointJournals()
+  }
+
+  private async acquireWorkspace(workspace: string, signal?: AbortSignal): Promise<() => Promise<void>> {
+    const identity = await ensureGitWorktreeIdentity(workspace, signal)
+    if (identity.root !== workspace) {
+      throw new ChangeLedgerError('GIT_ROOT_INVALID', `workspace moved while acquiring its lock: ${JSON.stringify(workspace)}`)
+    }
+    return this.store.acquire(workspace, identity.lockPath, {
+      commonDir: identity.commonDir,
+      gitDir: identity.gitDir,
+      worktreeId: identity.worktreeId,
+    }, signal)
+  }
+
+  private async reconcileGitCheckpointJournals(): Promise<number> {
+    let reconciled = 0
+    for (const journal of await this.store.listGitCheckpointJournals()) {
+      const workspace = await resolveGitWorktreeRoot(journal.commonDir, journal.worktreeId, journal.workspace)
+      const activeJournal = workspace === journal.workspace ? journal : { ...journal, workspace }
+      const release = await this.acquireWorkspace(workspace)
+      try {
+        const manifest = await this.tryReadManifest(workspace, journal.restorePointId)
+        if (journal.action === 'publish') {
+          if (manifest === undefined) {
+            await deleteGitCheckpointRef(workspace, journal.ref, journal.commit, this.config.storageDir)
+          } else {
+            assertJournalMatchesManifest(activeJournal, manifest)
+            await verifyGitCheckpoint(manifest)
+          }
+        } else {
+          if (manifest !== undefined) {
+            assertJournalMatchesManifest(activeJournal, manifest)
+            await this.store.deleteManifest(workspace, journal.restorePointId)
+          }
+          await deleteGitCheckpointRef(workspace, journal.ref, journal.commit, this.config.storageDir)
+        }
+        await this.store.deleteGitCheckpointJournal(workspace, journal.restorePointId)
+        reconciled += 1
+      } finally {
+        await release()
+      }
+    }
+    return reconciled
+  }
+
+  private async publishGitManifest(manifest: RestorePointManifestV2, signal?: AbortSignal): Promise<void> {
+    let journalWritten = false
+    try {
+      await this.store.writeGitCheckpointJournal('publish', manifest)
+      journalWritten = true
+      await publishGitCheckpoint(manifest, this.config.storageDir, signal)
+      await verifyGitCheckpoint(manifest, signal)
+      await this.store.writeManifest(manifest)
+    } catch (error) {
+      if (!journalWritten) throw error
+      const persisted = await this.tryReadManifest(manifest.workspace, manifest.id)
+      if (persisted !== undefined) {
+        assertJournalMatchesManifest({
+          version: 1,
+          action: 'publish',
+          storeId: manifest.git.storeId,
+          workspace: manifest.workspace,
+          commonDir: manifest.repository.commonDir,
+          worktreeId: manifest.git.worktreeId,
+          restorePointId: manifest.id,
+          ref: manifest.git.ref,
+          commit: manifest.git.commit,
+          createdAt: manifest.createdAt,
+        }, persisted)
+        await verifyGitCheckpoint(persisted, signal)
+        await this.store.deleteGitCheckpointJournal(manifest.workspace, manifest.id).catch(() => undefined)
+        return
+      }
+      try {
+        await deleteGitCheckpoint(manifest, this.config.storageDir)
+        await this.store.deleteGitCheckpointJournal(manifest.workspace, manifest.id)
+      } catch (cleanupError) {
+        throw new ChangeLedgerError(
+          'SNAPSHOT_CLEANUP_FAILED',
+          `Git checkpoint publication failed (${errorMessage(error)}) and journaled ref cleanup also failed (${errorMessage(cleanupError)})`,
+          { cause: error },
+        )
+      }
+      throw error
+    }
+    await this.store.deleteGitCheckpointJournal(manifest.workspace, manifest.id).catch(() => undefined)
+  }
+
+  private async deleteManifestWithGit(manifest: RestorePointManifest, signal?: AbortSignal): Promise<void> {
+    if (manifest.version === LEDGER_FORMAT_VERSION) {
+      await this.store.deleteManifest(manifest.workspace, manifest.id)
+      return
+    }
+    await this.store.writeGitCheckpointJournal('delete', manifest)
+    await this.store.deleteManifest(manifest.workspace, manifest.id)
+    await deleteGitCheckpoint(manifest, this.config.storageDir, signal)
+    await this.store.deleteGitCheckpointJournal(manifest.workspace, manifest.id)
+  }
+
+  private async tryReadManifest(workspace: string, id: string): Promise<RestorePointManifest | undefined> {
+    try {
+      return await this.store.readManifest(workspace, id)
+    } catch (error) {
+      if (error instanceof ChangeLedgerError && error.code === 'RESTORE_POINT_NOT_FOUND') return undefined
+      throw error
+    }
   }
 
   /** Create a durable restore point for the current Git worktree. */
@@ -74,7 +205,7 @@ export class ChangeLedgerEngine {
     await this.ready
     const source = await discoverRepository(options.cwd, options.signal)
     await this.assertStorageSeparated(source.state.root)
-    const release = await this.store.acquire(source.state.root)
+    const release = await this.acquireWorkspace(source.state.root, options.signal)
     try {
       const label = normalizeLabel(options.label)
       const manifest = await this.createLocked({
@@ -98,41 +229,152 @@ export class ChangeLedgerEngine {
     readonly turnStartSeq: number
     readonly signal?: AbortSignal
   }): Promise<RestorePointSummary> {
-    await this.ready
+    const deadline = AbortSignal.timeout(this.config.turnCheckpointTimeoutMs)
+    const signal = options.signal === undefined ? deadline : AbortSignal.any([options.signal, deadline])
+    try {
+      await waitWithSignal(this.ready, signal)
+    } catch (error) {
+      throw checkpointDeadlineError(error, this.config.turnCheckpointTimeoutMs, deadline, options.signal)
+    }
+    if (this.config.turnCheckpointMode === 'off') {
+      throw new ChangeLedgerError('TURN_CHECKPOINT_DISABLED', 'automatic turn checkpoints are disabled')
+    }
     if (!Number.isSafeInteger(options.turn) || options.turn < 0) {
       throw new ChangeLedgerError('INVALID_ARGUMENTS', 'turn must be a non-negative safe integer')
     }
     if (!Number.isSafeInteger(options.turnStartSeq) || options.turnStartSeq < 0) {
       throw new ChangeLedgerError('INVALID_ARGUMENTS', 'turnStartSeq must be a non-negative safe integer')
     }
-    const source = await discoverRepository(options.cwd, options.signal)
-    await this.assertStorageSeparated(source.state.root)
-    const release = await this.store.acquire(source.state.root)
     try {
-      const existing = await this.store.listManifests(source.state.root)
-      const duplicate = existing.find(manifest => manifest.kind === 'turn'
+      const source = await discoverRepository(options.cwd, signal)
+      await this.assertStorageSeparated(source.state.root)
+      const release = await this.acquireWorkspace(source.state.root, signal)
+      try {
+        const existing = await waitWithSignal(this.store.listManifests(source.state.root, signal), signal)
+        const duplicate = existing.find(manifest => manifest.kind === 'turn'
+          && manifest.sessionId === options.sessionId
+          && manifest.turn === options.turn
+          && manifest.turnStartSeq === options.turnStartSeq)
+        if (duplicate !== undefined) {
+          if (duplicate.version === 2) await verifyGitCheckpoint(duplicate, signal)
+          await this.store.deleteTurnCheckpointSkip(
+            source.state.root,
+            options.sessionId,
+            options.turn,
+            options.turnStartSeq,
+          ).catch(() => undefined)
+          return summarize(duplicate)
+        }
+
+        throwIfAborted(signal)
+        let manifest: RestorePointManifest
+        if (this.config.turnCheckpointMode === 'legacy') {
+          manifest = await this.createLocked({
+            cwd: source.state.root,
+            kind: 'turn',
+            sessionId: options.sessionId,
+            label: `Before turn ${String(options.turn)} checkpoint`,
+            turn: options.turn,
+            turnStartSeq: options.turnStartSeq,
+            signal,
+            deferGarbageCollection: true,
+          })
+        } else {
+          const id = makeId('rp')
+          const captured = (await captureGitTurnCheckpoint({
+            cwd: source.state.root,
+            id,
+            sessionId: options.sessionId,
+            turn: options.turn,
+            turnStartSeq: options.turnStartSeq,
+            config: this.config,
+            signal,
+          })).manifest
+          await this.publishGitManifest(captured, signal)
+          manifest = captured
+        }
+        await this.store.deleteTurnCheckpointSkip(
+          source.state.root,
+          options.sessionId,
+          options.turn,
+          options.turnStartSeq,
+        ).catch(() => undefined)
+
+        if (!signal.aborted) {
+          const checkpoints = [...existing.filter(point => point.kind === 'turn' && point.sessionId === options.sessionId), manifest]
+            .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id))
+          for (const stale of checkpoints.slice(this.config.maxTurnCheckpointsPerSession)) {
+            if (signal.aborted) break
+            if (await this.store.isReferencedByRecovery(source.state.root, stale.id)) continue
+            await this.deleteManifestWithGit(stale, signal).catch(() => undefined)
+          }
+        }
+        return summarize(manifest)
+      } finally {
+        await release()
+      }
+    } catch (error) {
+      throw checkpointDeadlineError(error, this.config.turnCheckpointTimeoutMs, deadline, options.signal)
+    }
+  }
+
+  /** Persist one bounded automatic-checkpoint skip without blocking a later turn retry. */
+  async recordTurnCheckpointSkip(options: {
+    readonly cwd: string
+    readonly sessionId: string
+    readonly turn: number
+    readonly turnStartSeq: number
+    readonly reason: string
+    readonly signal?: AbortSignal
+  }): Promise<void> {
+    await waitWithSignal(this.ready, options.signal)
+    const workspace = await discoverRepositoryRoot(options.cwd, options.signal)
+    await this.assertStorageSeparated(workspace)
+    const release = await this.acquireWorkspace(workspace, options.signal)
+    try {
+      throwIfAborted(options.signal)
+      const existing = (await this.store.listManifests(workspace, options.signal)).some(manifest =>
+        manifest.kind === 'turn'
         && manifest.sessionId === options.sessionId
         && manifest.turn === options.turn
         && manifest.turnStartSeq === options.turnStartSeq)
-      if (duplicate !== undefined) return summarize(duplicate)
-
-      const manifest = await this.createLocked({
-        cwd: source.state.root,
-        kind: 'turn',
+      if (existing) {
+        await this.store.deleteTurnCheckpointSkip(workspace, options.sessionId, options.turn, options.turnStartSeq)
+        return
+      }
+      await this.store.writeTurnCheckpointSkip(workspace, {
+        version: 1,
         sessionId: options.sessionId,
-        label: `Before turn ${String(options.turn)} checkpoint`,
         turn: options.turn,
         turnStartSeq: options.turnStartSeq,
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        reason: options.reason.slice(0, 2_000),
+        createdAt: Date.now(),
       })
-      const checkpoints = [...existing.filter(point => point.kind === 'turn' && point.sessionId === options.sessionId), manifest]
-        .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id))
-      for (const stale of checkpoints.slice(this.config.maxTurnCheckpointsPerSession)) {
-        if (await this.store.isReferencedByRecovery(source.state.root, stale.id)) continue
-        await this.store.deleteManifest(source.state.root, stale.id)
-      }
-      await this.store.collectGarbage(source.state.root)
-      return summarize(manifest)
+    } finally {
+      await release()
+    }
+  }
+
+  /** Read a durable skip marker for one exact prompt boundary. */
+  async findTurnCheckpointSkip(options: {
+    readonly cwd: string
+    readonly sessionId: string
+    readonly turn: number
+    readonly turnStartSeq: number
+    readonly signal?: AbortSignal
+  }): Promise<{ readonly reason: string } | undefined> {
+    await this.ready
+    const workspace = await discoverRepositoryRoot(options.cwd, options.signal)
+    await this.assertStorageSeparated(workspace)
+    const release = await this.acquireWorkspace(workspace, options.signal)
+    try {
+      const skip = await this.store.readTurnCheckpointSkip(
+        workspace,
+        options.sessionId,
+        options.turn,
+        options.turnStartSeq,
+      )
+      return skip === undefined ? undefined : { reason: skip.reason }
     } finally {
       await release()
     }
@@ -148,12 +390,18 @@ export class ChangeLedgerEngine {
     await this.ready
     const source = await discoverRepository(options.cwd, options.signal)
     await this.assertStorageSeparated(source.state.root)
-    const manifest = (await this.store.listManifests(source.state.root)).find(point =>
-      point.kind === 'turn'
-      && point.sessionId === options.sessionId
-      && point.turn === options.turn
-      && point.turnStartSeq !== undefined)
-    return manifest === undefined ? undefined : summarize(manifest)
+    const release = await this.acquireWorkspace(source.state.root, options.signal)
+    try {
+      const manifest = (await this.store.listManifests(source.state.root)).find(point =>
+        point.kind === 'turn'
+        && point.sessionId === options.sessionId
+        && point.turn === options.turn
+        && point.turnStartSeq !== undefined)
+      if (manifest?.version === 2) await verifyGitCheckpoint(manifest, options.signal)
+      return manifest === undefined ? undefined : summarize(manifest)
+    } finally {
+      await release()
+    }
   }
 
   /** List restore points for the current worktree. */
@@ -166,12 +414,17 @@ export class ChangeLedgerEngine {
     await this.ready
     const source = await discoverRepository(options.cwd, options.signal)
     await this.assertStorageSeparated(source.state.root)
-    const manifests = await this.store.listManifests(source.state.root)
-    return manifests
-      .filter((manifest) => manifest.kind === 'user'
-        || (manifest.kind === 'rescue' && options.includeRescue === true)
-        || (manifest.kind === 'turn' && options.includeTurnCheckpoints === true))
-      .map(summarize)
+    const release = await this.acquireWorkspace(source.state.root, options.signal)
+    try {
+      const manifests = await this.store.listManifests(source.state.root)
+      return manifests
+        .filter((manifest) => manifest.kind === 'user'
+          || (manifest.kind === 'rescue' && options.includeRescue === true)
+          || (manifest.kind === 'turn' && options.includeTurnCheckpoints === true))
+        .map(summarize)
+    } finally {
+      await release()
+    }
   }
 
   /** Compare one restore point with the current worktree. */
@@ -183,18 +436,25 @@ export class ChangeLedgerEngine {
     await this.ready
     const source = await discoverRepository(options.cwd, options.signal)
     await this.assertStorageSeparated(source.state.root)
-    const manifest = await this.store.readManifest(source.state.root, options.restorePointId)
-    const current = await captureStableTree({ cwd: source.state.root, config: this.config, ...(options.signal === undefined ? {} : { signal: options.signal }) })
-    return {
-      restorePoint: summarize(manifest),
-      currentTreeHash: current.treeHash,
-      currentRepository: current.source.state,
-      ...(current.source.state.head === undefined ? {} : { currentHead: current.source.state.head }),
-      ...(current.source.state.branch === undefined ? {} : { currentBranch: current.source.state.branch }),
-      ...(current.source.state.operation === undefined ? {} : { currentOperation: current.source.state.operation }),
-      headChanged: repositoryHeadChanged(manifest.repository, current.source.state),
-      operationChanged: manifest.repository.operation !== current.source.state.operation,
-      changes: diffTrees(manifest.entries, current.entries),
+    const release = await this.acquireWorkspace(source.state.root, options.signal)
+    try {
+      const manifest = await this.store.readManifest(source.state.root, options.restorePointId)
+      if (manifest.version === 2) await verifyGitCheckpoint(manifest, options.signal)
+      const current = await captureStableTree({ cwd: source.state.root, config: this.config, ...(options.signal === undefined ? {} : { signal: options.signal }) })
+      const desiredEntries = await this.entriesForComparison(manifest.entries, source.state.root, options.signal)
+      return {
+        restorePoint: summarize(manifest),
+        currentTreeHash: current.treeHash,
+        currentRepository: current.source.state,
+        ...(current.source.state.head === undefined ? {} : { currentHead: current.source.state.head }),
+        ...(current.source.state.branch === undefined ? {} : { currentBranch: current.source.state.branch }),
+        ...(current.source.state.operation === undefined ? {} : { currentOperation: current.source.state.operation }),
+        headChanged: repositoryHeadChanged(manifest.repository, current.source.state),
+        operationChanged: manifest.repository.operation !== current.source.state.operation,
+        changes: diffTrees(desiredEntries, current.entries),
+      }
+    } finally {
+      await release()
     }
   }
 
@@ -213,45 +473,52 @@ export class ChangeLedgerEngine {
     this.expirePlans()
     const source = await discoverRepository(options.cwd, options.signal)
     await this.assertStorageSeparated(source.state.root)
-    const manifest = await this.store.readManifest(source.state.root, options.restorePointId)
-    const current = await captureStableTree({ cwd: source.state.root, config: this.config, ...(options.signal === undefined ? {} : { signal: options.signal }) })
-    if (options.expectedCurrentTreeHash !== undefined && options.expectedCurrentTreeHash !== current.treeHash) {
-      throw new ChangeLedgerError('PLAN_STALE', 'workspace changed after inspection; inspect and plan again')
+    const release = await this.acquireWorkspace(source.state.root, options.signal)
+    try {
+      const manifest = await this.store.readManifest(source.state.root, options.restorePointId)
+      if (manifest.version === 2) await verifyGitCheckpoint(manifest, options.signal)
+      const current = await captureStableTree({ cwd: source.state.root, config: this.config, ...(options.signal === undefined ? {} : { signal: options.signal }) })
+      const desiredEntries = await this.entriesForComparison(manifest.entries, source.state.root, options.signal)
+      if (options.expectedCurrentTreeHash !== undefined && options.expectedCurrentTreeHash !== current.treeHash) {
+        throw new ChangeLedgerError('PLAN_STALE', 'workspace changed after inspection; inspect and plan again')
+      }
+      if (options.expectedRepository !== undefined && !sameRepositoryFence(options.expectedRepository, current.source.state)) {
+        throw new ChangeLedgerError('PLAN_STALE_REPOSITORY', 'Git repository state changed after inspection; inspect and plan again')
+      }
+      assertRepositoryCompatible(manifest, current.source.state, options.allowHeadChange === true)
+      const changes = diffTrees(desiredEntries, current.entries)
+      if (changes.length === 0) {
+        throw new ChangeLedgerError('NO_CHANGES', `workspace already matches restore point ${manifest.id}`)
+      }
+      const selected = selectChanges(changes, options.paths)
+      await assertNoUnmanagedRestoreConflicts(
+        source.state.root,
+        desiredEntries,
+        current.entries,
+        selected.map((change) => change.path),
+      )
+      const expected: Record<string, SnapshotEntry | null> = Object.create(null) as Record<string, SnapshotEntry | null>
+      for (const change of selected) expected[change.path] = current.entries[change.path] ?? null
+      const now = Date.now()
+      const plan: RestorePlan = {
+        id: makeId('plan'),
+        restorePointId: manifest.id,
+        workspace: manifest.workspace,
+        repository: current.source.state,
+        ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
+        createdAt: now,
+        expiresAt: now + this.config.planTtlMs,
+        confirmation: `RESTORE-${randomBytes(4).toString('hex').toUpperCase()}`,
+        allowHeadChange: options.allowHeadChange === true,
+        paths: selected.map((change) => change.path),
+        changes: selected,
+        expected,
+      }
+      this.plans.set(plan.id, plan)
+      return clonePlan(plan)
+    } finally {
+      await release()
     }
-    if (options.expectedRepository !== undefined && !sameRepositoryFence(options.expectedRepository, current.source.state)) {
-      throw new ChangeLedgerError('PLAN_STALE_REPOSITORY', 'Git repository state changed after inspection; inspect and plan again')
-    }
-    assertRepositoryCompatible(manifest, current.source.state, options.allowHeadChange === true)
-    const changes = diffTrees(manifest.entries, current.entries)
-    if (changes.length === 0) {
-      throw new ChangeLedgerError('NO_CHANGES', `workspace already matches restore point ${manifest.id}`)
-    }
-    const selected = selectChanges(changes, options.paths)
-    await assertNoUnmanagedRestoreConflicts(
-      source.state.root,
-      manifest.entries,
-      current.entries,
-      selected.map((change) => change.path),
-    )
-    const expected: Record<string, SnapshotEntry | null> = Object.create(null) as Record<string, SnapshotEntry | null>
-    for (const change of selected) expected[change.path] = current.entries[change.path] ?? null
-    const now = Date.now()
-    const plan: RestorePlan = {
-      id: makeId('plan'),
-      restorePointId: manifest.id,
-      workspace: manifest.workspace,
-      repository: current.source.state,
-      ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
-      createdAt: now,
-      expiresAt: now + this.config.planTtlMs,
-      confirmation: `RESTORE-${randomBytes(4).toString('hex').toUpperCase()}`,
-      allowHeadChange: options.allowHeadChange === true,
-      paths: selected.map((change) => change.path),
-      changes: selected,
-      expected,
-    }
-    this.plans.set(plan.id, plan)
-    return clonePlan(plan)
   }
 
   /** Apply one approved restore plan, creating a durable rescue point first. */
@@ -278,14 +545,16 @@ export class ChangeLedgerEngine {
 
     try {
       await this.assertStorageSeparated(plan.workspace)
-      const release = await this.store.acquire(plan.workspace)
+      const release = await this.acquireWorkspace(plan.workspace, options.signal)
       try {
         const manifest = await this.store.readManifest(plan.workspace, plan.restorePointId)
+        if (manifest.version === 2) await verifyGitCheckpoint(manifest, options.signal)
+        const desiredEntries = await this.entriesForComparison(manifest.entries, plan.workspace, options.signal)
         const current = await captureStableTree({ cwd: plan.workspace, config: this.config, ...(options.signal === undefined ? {} : { signal: options.signal }) })
         assertRepositoryCompatible(manifest, current.source.state, plan.allowHeadChange)
         assertPlanRepositoryFresh(plan.repository, current.source.state)
         assertPlanFresh(plan, current.entries)
-        await assertNoUnmanagedRestoreConflicts(plan.workspace, manifest.entries, current.entries, plan.paths)
+        await assertNoUnmanagedRestoreConflicts(plan.workspace, desiredEntries, current.entries, plan.paths)
 
         const rescue = await this.createLocked({
           cwd: plan.workspace,
@@ -297,7 +566,7 @@ export class ChangeLedgerEngine {
         })
         try {
           assertPlanFresh(plan, rescue.entries)
-          await assertNoUnmanagedRestoreConflicts(plan.workspace, manifest.entries, rescue.entries, plan.paths)
+          await assertNoUnmanagedRestoreConflicts(plan.workspace, desiredEntries, rescue.entries, plan.paths)
         } catch (error) {
           await this.store.deleteManifest(plan.workspace, rescue.id)
           await this.store.collectGarbage(plan.workspace)
@@ -317,7 +586,7 @@ export class ChangeLedgerEngine {
         await this.store.writeOperation(operation)
 
         try {
-          await this.restorePaths(plan.workspace, manifest.entries, plan.paths, options.signal)
+          await this.restorePaths(plan.workspace, manifest.entries, plan.paths, options.signal, plan.expected)
           await this.verifyPaths(plan.workspace, manifest.entries, plan.paths, options.signal)
         } catch (error) {
           const primaryError = errorMessage(error)
@@ -413,13 +682,13 @@ export class ChangeLedgerEngine {
     }
     const source = await discoverRepository(options.cwd, options.signal)
     await this.assertStorageSeparated(source.state.root)
-    const release = await this.store.acquire(source.state.root)
+    const release = await this.acquireWorkspace(source.state.root, options.signal)
     try {
-      await this.store.readManifest(source.state.root, options.restorePointId)
+      const manifest = await this.store.readManifest(source.state.root, options.restorePointId)
       if (await this.store.isReferencedByRecovery(source.state.root, options.restorePointId)) {
         throw new ChangeLedgerError('RECOVERY_REFERENCE', 'restore point is required by an incomplete recovery journal')
       }
-      await this.store.deleteManifest(source.state.root, options.restorePointId)
+      await this.deleteManifestWithGit(manifest, options.signal)
       const gc = await this.store.collectGarbage(source.state.root)
       return { restorePointId: options.restorePointId, ...gc }
     } finally {
@@ -432,19 +701,24 @@ export class ChangeLedgerEngine {
     await this.ready
     const source = await discoverRepository(options.cwd, options.signal)
     await this.assertStorageSeparated(source.state.root)
-    return (await this.store.listOperations(source.state.root))
-      .filter((operation): operation is RestoreOperation & { state: 'interrupted' | 'recovery-required' } =>
-        operation.state === 'interrupted' || operation.state === 'recovery-required')
-      .map((operation) => ({
-        operationId: operation.id,
-        restorePointId: operation.restorePointId,
-        rescuePointId: operation.rescuePointId,
-        state: operation.state,
-        paths: operation.paths,
-        startedAt: operation.startedAt,
-        ...(operation.error === undefined ? {} : { error: operation.error }),
-        ...(operation.rollbackError === undefined ? {} : { rollbackError: operation.rollbackError }),
-      }))
+    const release = await this.acquireWorkspace(source.state.root, options.signal)
+    try {
+      return (await this.store.listOperations(source.state.root))
+        .filter((operation): operation is RestoreOperation & { state: 'interrupted' | 'recovery-required' } =>
+          operation.state === 'interrupted' || operation.state === 'recovery-required')
+        .map((operation) => ({
+          operationId: operation.id,
+          restorePointId: operation.restorePointId,
+          rescuePointId: operation.rescuePointId,
+          state: operation.state,
+          paths: operation.paths,
+          startedAt: operation.startedAt,
+          ...(operation.error === undefined ? {} : { error: operation.error }),
+          ...(operation.rollbackError === undefined ? {} : { rollbackError: operation.rollbackError }),
+        }))
+    } finally {
+      await release()
+    }
   }
 
   private async createLocked(options: {
@@ -457,6 +731,7 @@ export class ChangeLedgerEngine {
     readonly turnStartSeq?: number
     readonly turnEndSeq?: number
     readonly signal?: AbortSignal
+    readonly deferGarbageCollection?: boolean
   }): Promise<RestorePointManifest> {
     const existing = await this.store.listManifests(options.cwd)
     const durableUserPoints = existing.filter(point => point.kind !== 'turn')
@@ -465,6 +740,11 @@ export class ChangeLedgerEngine {
         'RESTORE_POINT_LIMIT',
         `workspace already has ${durableUserPoints.length} user/rescue restore points; configured maximum is ${this.config.maxRestorePoints}`,
       )
+    }
+    if (options.deferGarbageCollection === true) {
+      await this.store.reconcileSnapshotCleanup(options.cwd, options.signal)
+      throwIfAborted(options.signal)
+      await this.store.writeSnapshotCleanup(options.cwd)
     }
     try {
       const tree = await captureStableTree({
@@ -492,15 +772,21 @@ export class ChangeLedgerEngine {
         entries: tree.entries,
         restoreCount: 0,
       }
-      await this.store.collectGarbage(
-        options.cwd,
-        Object.values(manifest.entries)
-          .filter((entry): entry is SnapshotEntry & { readonly kind: 'file' } => entry.kind === 'file')
-          .map((entry) => entry.blob),
-      )
+      if (options.deferGarbageCollection !== true) {
+        await this.store.collectGarbage(
+          options.cwd,
+          Object.values(manifest.entries)
+            .filter((entry): entry is SnapshotEntry & { readonly kind: 'file' } => entry.kind === 'file' && entry.provider !== 'git')
+            .map((entry) => entry.blob),
+        )
+      }
       await this.store.writeManifest(manifest)
+      if (options.deferGarbageCollection === true) {
+        await this.store.deleteSnapshotCleanup(options.cwd).catch(() => undefined)
+      }
       return manifest
     } catch (error) {
+      if (options.deferGarbageCollection === true) throw error
       try {
         await this.store.collectGarbage(options.cwd)
       } catch (cleanupError) {
@@ -519,11 +805,14 @@ export class ChangeLedgerEngine {
     desiredEntries: Readonly<Record<string, SnapshotEntry>>,
     paths: readonly string[],
     signal?: AbortSignal,
+    expectedEntries?: Readonly<Record<string, SnapshotEntry | null>>,
   ): Promise<void> {
     const deletions = paths.filter((path) => desiredEntries[path] === undefined).sort(compareDeepestFirst)
     for (const path of deletions) {
       throwIfAborted(signal)
       const target = resolveWorkspacePath(workspace, path)
+      if (expectedEntries !== undefined) await this.assertPathFresh(workspace, path, expectedEntries[path], signal)
+      await assertSafeParents(workspace, target)
       await removeRestoreTarget(target)
       await pruneEmptyParents(workspace, target)
     }
@@ -534,6 +823,7 @@ export class ChangeLedgerEngine {
       const entry = desiredEntries[path]
       if (entry === undefined) continue
       const target = resolveWorkspacePath(workspace, path)
+      if (expectedEntries !== undefined) await this.assertPathFresh(workspace, path, expectedEntries[path], signal)
       await ensureSafeParents(workspace, target)
       try {
         const info = await lstat(target)
@@ -542,14 +832,40 @@ export class ChangeLedgerEngine {
         if (!isNodeError(error, 'ENOENT')) throw error
       }
       if (entry.kind === 'file') {
-        const content = await this.store.readBlob(workspace, entry.blob)
+        const content = entry.provider === 'git'
+          ? await readGitBlob(workspace, entry.blob, entry.size, signal)
+          : await this.store.readBlob(workspace, entry.blob)
         if (content.length !== entry.size) {
           throw new ChangeLedgerError('BLOB_CORRUPT', `blob ${entry.blob} has unexpected size for ${JSON.stringify(path)}`)
         }
+        if (expectedEntries !== undefined) await this.assertPathFresh(workspace, path, expectedEntries[path], signal)
+        else await assertSafeParents(workspace, target)
         await replaceRegularFile(target, content, entry.mode)
       } else {
         await replaceSymbolicLink(target, entry.target)
       }
+    }
+  }
+
+  private async assertPathFresh(
+    workspace: string,
+    path: string,
+    expected: SnapshotEntry | null | undefined,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const target = resolveWorkspacePath(workspace, path)
+    await assertSafeParents(workspace, target)
+    let current: SnapshotEntry | undefined
+    try {
+      current = await captureSnapshotEntry(workspace, path, this.config.maxFileBytes, signal)
+    } catch (error) {
+      if (error instanceof ChangeLedgerError && error.code === 'UNSUPPORTED_FILE_TYPE') {
+        throw new ChangeLedgerError('PLAN_STALE', `workspace path changed type after planning: ${JSON.stringify(path)}`, { cause: error })
+      }
+      throw error
+    }
+    if (!entriesEqual(expected === null ? undefined : expected, current)) {
+      throw new ChangeLedgerError('PLAN_STALE', `workspace changed immediately before restore at ${JSON.stringify(path)}; inspect and plan again`)
     }
   }
 
@@ -561,10 +877,33 @@ export class ChangeLedgerEngine {
   ): Promise<void> {
     const current = await captureStableTree({ cwd: workspace, config: this.config, ...(signal === undefined ? {} : { signal }) })
     for (const path of paths) {
-      if (!entriesEqual(desiredEntries[path], current.entries[path])) {
+      const desired = await this.entryForComparison(desiredEntries[path], workspace, signal)
+      if (!entriesEqual(desired, current.entries[path])) {
         throw new ChangeLedgerError('RESTORE_VERIFY_FAILED', `restored path did not match its expected snapshot: ${JSON.stringify(path)}`)
       }
     }
+  }
+
+  private async entriesForComparison(
+    entries: Readonly<Record<string, SnapshotEntry>>,
+    workspace: string,
+    signal?: AbortSignal,
+  ): Promise<Readonly<Record<string, SnapshotEntry>>> {
+    if (!Object.values(entries).some((entry) => entry.kind === 'file' && entry.provider === 'git')) return entries
+    const normalized: Record<string, SnapshotEntry> = Object.create(null) as Record<string, SnapshotEntry>
+    for (const [path, entry] of Object.entries(entries)) normalized[path] = await this.entryForComparison(entry, workspace, signal) as SnapshotEntry
+    return normalized
+  }
+
+  private async entryForComparison(
+    entry: SnapshotEntry | undefined,
+    workspace: string,
+    signal?: AbortSignal,
+  ): Promise<SnapshotEntry | undefined> {
+    if (entry?.kind !== 'file' || entry.provider !== 'git') return entry
+    const content = await readGitBlob(workspace, entry.blob, entry.size, signal)
+    if (content.length !== entry.size) throw new ChangeLedgerError('BLOB_CORRUPT', `Git blob ${entry.blob} has unexpected size`)
+    return { kind: 'file', blob: createHash('sha256').update(content).digest('hex'), size: entry.size, mode: entry.mode }
   }
 
   private async assertStorageSeparated(workspace: string): Promise<void> {
@@ -606,11 +945,22 @@ export function resolveConfig(config: ChangeLedgerConfig): ResolvedChangeLedgerC
     maxSnapshotBytes: positiveInteger(config.maxSnapshotBytes ?? DEFAULTS.maxSnapshotBytes, 'maxSnapshotBytes'),
     planTtlMs: positiveInteger(config.planTtlMs ?? DEFAULTS.planTtlMs, 'planTtlMs'),
     staleLockMs: positiveInteger(config.staleLockMs ?? DEFAULTS.staleLockMs, 'staleLockMs'),
+    turnCheckpointMode: checkpointMode(config.turnCheckpointMode ?? DEFAULTS.turnCheckpointMode),
+    turnCheckpointTimeoutMs: positiveInteger(
+      config.turnCheckpointTimeoutMs ?? DEFAULTS.turnCheckpointTimeoutMs,
+      'turnCheckpointTimeoutMs',
+    ),
+    turnCheckpointMaxNewBytes: positiveInteger(
+      config.turnCheckpointMaxNewBytes ?? DEFAULTS.turnCheckpointMaxNewBytes,
+      'turnCheckpointMaxNewBytes',
+    ),
+    turnCheckpointTrust: checkpointTrust(config.turnCheckpointTrust ?? DEFAULTS.turnCheckpointTrust),
   }
 }
 
 function summarize(manifest: RestorePointManifest): RestorePointSummary {
   return {
+    format: manifest.version,
     id: manifest.id,
     kind: manifest.kind,
     workspace: manifest.workspace,
@@ -630,6 +980,7 @@ function summarize(manifest: RestorePointManifest): RestorePointSummary {
     ...(manifest.repository.branch === undefined ? {} : { branch: manifest.repository.branch }),
     ...(manifest.repository.operation === undefined ? {} : { operation: manifest.repository.operation }),
     stagedPathCount: manifest.repository.stagedPaths.length,
+    ...(manifest.version === 2 ? { trust: manifest.git.trust } : {}),
   }
 }
 
@@ -672,6 +1023,19 @@ function assertPlanRepositoryFresh(
     || planned.branch !== current.branch
     || planned.operation !== current.operation) {
     throw new ChangeLedgerError('PLAN_STALE_REPOSITORY', 'Git repository state changed after restore planning; inspect and plan again')
+  }
+}
+
+function assertJournalMatchesManifest(journal: GitCheckpointJournal, manifest: RestorePointManifest): asserts manifest is RestorePointManifestV2 {
+  if (manifest.version !== 2
+    || manifest.workspace !== journal.workspace
+    || manifest.id !== journal.restorePointId
+    || manifest.repository.commonDir !== journal.commonDir
+    || manifest.git.storeId !== journal.storeId
+    || manifest.git.worktreeId !== journal.worktreeId
+    || manifest.git.ref !== journal.ref
+    || manifest.git.commit !== journal.commit) {
+    throw new ChangeLedgerError('STATE_CORRUPT', `Git checkpoint journal does not match restore point ${journal.restorePointId}`)
   }
 }
 
@@ -753,8 +1117,43 @@ function requireNonEmptyString(value: string, name: string): string {
   return value
 }
 
+function checkpointMode(value: ChangeLedgerConfig['turnCheckpointMode']): ResolvedChangeLedgerConfig['turnCheckpointMode'] {
+  if (value !== 'off' && value !== 'git-native' && value !== 'legacy') {
+    throw new ChangeLedgerError('INVALID_CONFIG', 'turnCheckpointMode must be off, git-native, or legacy')
+  }
+  return value
+}
+
+function checkpointTrust(value: ChangeLedgerConfig['turnCheckpointTrust']): ResolvedChangeLedgerConfig['turnCheckpointTrust'] {
+  if (value !== 'fast' && value !== 'strict') {
+    throw new ChangeLedgerError('INVALID_CONFIG', 'turnCheckpointTrust must be fast or strict')
+  }
+  return value
+}
+
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted === true) throw signal.reason
+}
+
+async function waitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal === undefined) return promise
+  signal.throwIfAborted()
+  let rejectAbort: ((reason?: unknown) => void) | undefined
+  const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject })
+  const onAbort = () => rejectAbort?.(signal.reason)
+  signal.addEventListener('abort', onAbort, { once: true })
+  try {
+    return await Promise.race([promise, aborted])
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+  }
+}
+
+function checkpointDeadlineError(error: unknown, timeoutMs: number, deadline: AbortSignal, callerSignal?: AbortSignal): unknown {
+  if (callerSignal?.aborted !== true && deadline.aborted) {
+    return new ChangeLedgerError('TURN_CHECKPOINT_TIMEOUT', `automatic checkpoint exceeded ${timeoutMs} ms`, { cause: error })
+  }
+  return error
 }
 
 function depth(path: string): number {

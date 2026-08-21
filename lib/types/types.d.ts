@@ -1,5 +1,7 @@
 /** Durable format version. Readers reject every other version. */
 export declare const LEDGER_FORMAT_VERSION: 1;
+/** Git-native checkpoint format used by bounded automatic turn capture. */
+export declare const GIT_CHECKPOINT_FORMAT_VERSION: 2;
 /** A persisted restore-point identifier. */
 export type RestorePointId = string;
 /** A persisted restore-operation identifier. */
@@ -12,6 +14,8 @@ export interface FileSnapshotEntry {
     readonly blob: string;
     readonly size: number;
     readonly mode: number;
+    /** Absent for v1 Ledger blobs; `git` means `blob` is a Git object ID. */
+    readonly provider?: 'git';
 }
 /** One symbolic-link snapshot. */
 export interface SymlinkSnapshotEntry {
@@ -33,7 +37,7 @@ export interface RepositoryState {
 /** Why a restore point exists. */
 export type RestorePointKind = 'user' | 'rescue' | 'turn';
 /** Durable workspace restore point. */
-export interface RestorePointManifest {
+export interface RestorePointManifestV1 {
     readonly version: typeof LEDGER_FORMAT_VERSION;
     readonly id: RestorePointId;
     readonly kind: RestorePointKind;
@@ -56,6 +60,31 @@ export interface RestorePointManifest {
     readonly restoreCount: number;
     readonly lastRestoredAt?: number;
 }
+/** Git-native metadata pinned by a private ref. */
+export interface GitCheckpointMetadata {
+    readonly objectFormat: 'sha1' | 'sha256';
+    readonly trust: 'metadata-fenced' | 'byte-verified';
+    /** Stable owner of refs created by one Change Ledger storage root. */
+    readonly storeId: string;
+    /** Durable identity stored inside this specific Git worktree metadata directory. */
+    readonly worktreeId: string;
+    readonly headTree: string;
+    readonly indexTree: string;
+    readonly worktreeTree: string;
+    readonly envelopeTree: string;
+    readonly commit: string;
+    readonly ref: string;
+    readonly newlyStoredBytes: number;
+}
+/** Automatic turn checkpoint whose content is stored in the repository object database. */
+export interface RestorePointManifestV2 extends Omit<RestorePointManifestV1, 'version' | 'treeHash'> {
+    readonly version: typeof GIT_CHECKPOINT_FORMAT_VERSION;
+    /** Deterministic sidecar identity; Git tree integrity is verified separately. */
+    readonly treeHash: string;
+    readonly git: GitCheckpointMetadata;
+}
+/** Durable workspace restore point in either supported format. */
+export type RestorePointManifest = RestorePointManifestV1 | RestorePointManifestV2;
 /** Observable difference between a restore point and the current workspace. */
 export interface WorkspaceChange {
     readonly path: string;
@@ -77,6 +106,7 @@ export interface RestorePointInspection {
 }
 /** Compact restore-point metadata for lists and tool results. */
 export interface RestorePointSummary {
+    readonly format: typeof LEDGER_FORMAT_VERSION | typeof GIT_CHECKPOINT_FORMAT_VERSION;
     readonly id: RestorePointId;
     readonly kind: RestorePointKind;
     readonly workspace: string;
@@ -96,6 +126,7 @@ export interface RestorePointSummary {
     readonly branch?: string;
     readonly operation?: string;
     readonly stagedPathCount: number;
+    readonly trust?: GitCheckpointMetadata['trust'];
 }
 /** An expiring restore plan whose confirmation must be echoed exactly. */
 export interface RestorePlan {
@@ -152,6 +183,14 @@ export interface ChangeLedgerConfig {
     readonly planTtlMs?: number;
     /** Age after which a lock whose owner is gone may be reclaimed. */
     readonly staleLockMs?: number;
+    /** Automatic turn-checkpoint implementation. Git-native is bounded and avoids rereading clean tracked content. */
+    readonly turnCheckpointMode?: 'off' | 'git-native' | 'legacy';
+    /** Maximum time one automatic checkpoint may block the first Agent step. */
+    readonly turnCheckpointTimeoutMs?: number;
+    /** Maximum uncached worktree bytes read by one automatic Git-native checkpoint. */
+    readonly turnCheckpointMaxNewBytes?: number;
+    /** Fast trusts fenced Git/stat metadata; strict rereads every eligible path. */
+    readonly turnCheckpointTrust?: 'fast' | 'strict';
 }
 /** Fully resolved plugin configuration. */
 export interface ResolvedChangeLedgerConfig {
@@ -163,6 +202,10 @@ export interface ResolvedChangeLedgerConfig {
     readonly maxSnapshotBytes: number;
     readonly planTtlMs: number;
     readonly staleLockMs: number;
+    readonly turnCheckpointMode: 'off' | 'git-native' | 'legacy';
+    readonly turnCheckpointTimeoutMs: number;
+    readonly turnCheckpointMaxNewBytes: number;
+    readonly turnCheckpointTrust: 'fast' | 'strict';
 }
 /** Current incomplete restore operation. */
 export interface RecoverySummary {

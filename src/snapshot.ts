@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import type { BigIntStats } from 'node:fs'
-import { lstat, readFile, readlink } from 'node:fs/promises'
+import { constants, type BigIntStats } from 'node:fs'
+import { lstat, open, readlink } from 'node:fs/promises'
 import { ChangeLedgerError } from './errors.js'
 import { discoverRepository, sameRepositoryFence, type RepositorySnapshotSource } from './git.js'
 import { isNodeError, resolveWorkspacePath } from './path-utils.js'
@@ -159,6 +159,16 @@ export function hashTree(entries: Readonly<Record<string, SnapshotEntry>>): stri
   return hash.digest('hex')
 }
 
+/** Byte-verify one workspace-relative path without following a final symlink. */
+export async function captureSnapshotEntry(
+  root: string,
+  path: string,
+  maxFileBytes: number,
+  signal?: AbortSignal,
+): Promise<SnapshotEntry | undefined> {
+  return (await captureEntry(root, path, maxFileBytes, signal))?.snapshot
+}
+
 async function captureEntry(
   root: string,
   path: string,
@@ -193,10 +203,24 @@ async function captureEntry(
         `${JSON.stringify(path)} is ${before.size.toString()} bytes; configured per-file maximum is ${maxFileBytes}`,
       )
     }
-    const content = await readFile(target)
-    throwIfAborted(signal)
-    const after = await lstat(target, { bigint: true })
-    if (!sameStat(before, after) || BigInt(content.length) !== after.size) continue
+    let handle
+    try {
+      handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW)
+    } catch (error) {
+      if (isNodeError(error, 'ELOOP')) continue
+      throw error
+    }
+    let content: Buffer
+    try {
+      const opened = await handle.stat({ bigint: true })
+      if (!opened.isFile() || !sameStat(before, opened)) continue
+      content = await handle.readFile()
+      throwIfAborted(signal)
+      const after = await handle.stat({ bigint: true })
+      if (!sameStat(opened, after) || BigInt(content.length) !== after.size) continue
+    } finally {
+      await handle.close()
+    }
     const blob = createHash('sha256').update(content).digest('hex')
     return {
       kind: 'file',

@@ -11,6 +11,12 @@ export declare class ChangeLedgerEngine {
     constructor(config?: ChangeLedgerConfig);
     /** Wait for startup reconciliation and return the number of interrupted journals found. */
     initialize(): Promise<number>;
+    private initializeStore;
+    private acquireWorkspace;
+    private reconcileGitCheckpointJournals;
+    private publishGitManifest;
+    private deleteManifestWithGit;
+    private tryReadManifest;
     /** Create a durable restore point for the current Git worktree. */
     create(options: {
         readonly cwd: string;
@@ -26,6 +32,25 @@ export declare class ChangeLedgerEngine {
         readonly turnStartSeq: number;
         readonly signal?: AbortSignal;
     }): Promise<RestorePointSummary>;
+    /** Persist one bounded automatic-checkpoint skip without blocking a later turn retry. */
+    recordTurnCheckpointSkip(options: {
+        readonly cwd: string;
+        readonly sessionId: string;
+        readonly turn: number;
+        readonly turnStartSeq: number;
+        readonly reason: string;
+        readonly signal?: AbortSignal;
+    }): Promise<void>;
+    /** Read a durable skip marker for one exact prompt boundary. */
+    findTurnCheckpointSkip(options: {
+        readonly cwd: string;
+        readonly sessionId: string;
+        readonly turn: number;
+        readonly turnStartSeq: number;
+        readonly signal?: AbortSignal;
+    }): Promise<{
+        readonly reason: string;
+    } | undefined>;
     /** Find the prompt-anchored checkpoint captured before one session turn. */
     findTurnCheckpoint(options: {
         readonly cwd: string;
@@ -82,7 +107,10 @@ export declare class ChangeLedgerEngine {
     }): Promise<RecoverySummary[]>;
     private createLocked;
     private restorePaths;
+    private assertPathFresh;
     private verifyPaths;
+    private entriesForComparison;
+    private entryForComparison;
     private assertStorageSeparated;
     private expirePlans;
 }

@@ -33,3 +33,5 @@ export declare function diffTrees(before: Readonly<Record<string, SnapshotEntry>
 export declare function entriesEqual(left: SnapshotEntry | undefined, right: SnapshotEntry | undefined): boolean;
 /** Hash a complete path map into a deterministic tree identity. */
 export declare function hashTree(entries: Readonly<Record<string, SnapshotEntry>>): string;
+/** Byte-verify one workspace-relative path without following a final symlink. */
+export declare function captureSnapshotEntry(root: string, path: string, maxFileBytes: number, signal?: AbortSignal): Promise<SnapshotEntry | undefined>;

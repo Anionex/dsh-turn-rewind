@@ -39,6 +39,7 @@
   "files": [
     "lib",
     "src",
+    "scripts",
     "docs",
     "cordis.patch.yml",
     "README.md",
@@ -59,6 +60,7 @@
     }
   },
   "scripts": {
+    "benchmark:git-checkpoint": "pnpm run build && node scripts/benchmark-git-checkpoint.mjs",
     "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.client.json && node scripts/wrap-client.mjs",
     "check": "tsc -p tsconfig.json && pnpm run build && node --test tests/*.test.mjs && pnpm pack --dry-run",
     "prepack": "pnpm run build",
