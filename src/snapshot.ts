@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import type { BigIntStats } from 'node:fs'
-import { lstat, readFile, readlink } from 'node:fs/promises'
+import { constants, type BigIntStats } from 'node:fs'
+import { lstat, open, readlink } from 'node:fs/promises'
 import { ChangeLedgerError } from './errors.js'
 import { discoverRepository, sameRepositoryFence, type RepositorySnapshotSource } from './git.js'
 import { isNodeError, resolveWorkspacePath } from './path-utils.js'
@@ -11,10 +11,13 @@ import type {
   WorkspaceChange,
 } from './types.js'
 
+const COMPARISON_READ_BUDGET_BYTES = 128 * 1024 * 1024
+
 /** One captured tree, optionally persisted into the blob store. */
 export interface CapturedTree {
   readonly source: RepositorySnapshotSource
   readonly entries: Readonly<Record<string, SnapshotEntry>>
+  readonly gitEntries?: Readonly<Record<string, SnapshotEntry>>
   readonly treeHash: string
   readonly fileCount: number
   readonly totalBytes: number
@@ -25,6 +28,7 @@ export async function captureTree(options: {
   readonly cwd: string
   readonly config: ResolvedChangeLedgerConfig
   readonly store?: LedgerStore
+  readonly gitObjectFormat?: 'sha1' | 'sha256'
   readonly signal?: AbortSignal
 }): Promise<CapturedTree> {
   throwIfAborted(options.signal)
@@ -37,11 +41,18 @@ export async function captureTree(options: {
   }
 
   const entries: Record<string, SnapshotEntry> = Object.create(null) as Record<string, SnapshotEntry>
+  const gitObjectFormat = options.gitObjectFormat
+  const gitCapture = gitObjectFormat === undefined
+    ? undefined
+    : {
+        objectFormat: gitObjectFormat,
+        entries: Object.create(null) as Record<string, SnapshotEntry>,
+      }
   let totalBytes = 0
-  for (const path of source.paths) {
+  const capturePath = async (path: string): Promise<void> => {
     throwIfAborted(options.signal)
     const entry = await captureEntry(source.state.root, path, options.config.maxFileBytes, options.signal)
-    if (entry === undefined) continue
+    if (entry === undefined) return
     if (entry.kind === 'file') {
       totalBytes += entry.content.length
       if (totalBytes > options.config.maxSnapshotBytes) {
@@ -54,14 +65,49 @@ export async function captureTree(options: {
         await options.store.putBlob(source.state.root, entry.snapshot.blob, entry.content)
       }
       entries[path] = entry.snapshot
-      continue
+      if (gitCapture !== undefined) {
+        gitCapture.entries[path] = gitFileSnapshot(entry.snapshot, entry.content, gitCapture.objectFormat)
+      }
+      return
     }
     entries[path] = entry.snapshot
+    if (gitCapture !== undefined) gitCapture.entries[path] = entry.snapshot
+  }
+  if (gitCapture === undefined) {
+    for (const path of source.paths) await capturePath(path)
+  } else {
+    let next = 0
+    let failed = false
+    let firstError: unknown = new ChangeLedgerError('WORKSPACE_CHANGED_DURING_CAPTURE', 'parallel comparison capture failed')
+    const concurrency = Math.min(
+      32,
+      source.paths.length,
+      Math.max(1, Math.floor(COMPARISON_READ_BUDGET_BYTES / options.config.maxFileBytes)),
+    )
+    const workers = Array.from({ length: concurrency }, async () => {
+      while (!failed && next < source.paths.length) {
+        const index = next
+        next += 1
+        const path = source.paths[index]
+        if (path === undefined) continue
+        try {
+          await capturePath(path)
+        } catch (error) {
+          if (!failed) {
+            failed = true
+            firstError = error
+          }
+        }
+      }
+    })
+    await Promise.all(workers)
+    if (failed) throw firstError
   }
 
   return {
     source,
     entries,
+    ...(gitCapture === undefined ? {} : { gitEntries: gitCapture.entries }),
     treeHash: hashTree(entries),
     fileCount: Object.keys(entries).length,
     totalBytes,
@@ -77,12 +123,14 @@ export async function captureStableTree(options: {
   readonly cwd: string
   readonly config: ResolvedChangeLedgerConfig
   readonly store?: LedgerStore
+  readonly gitObjectFormat?: 'sha1' | 'sha256'
   readonly signal?: AbortSignal
 }): Promise<CapturedTree> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const first = await captureTree({
       cwd: options.cwd,
       config: options.config,
+      ...(options.gitObjectFormat === undefined ? {} : { gitObjectFormat: options.gitObjectFormat }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     })
     const second = await captureTree(options)
@@ -100,12 +148,16 @@ export async function captureStableTree(options: {
 export function diffTrees(
   before: Readonly<Record<string, SnapshotEntry>>,
   after: Readonly<Record<string, SnapshotEntry>>,
+  comparisonBefore: Readonly<Record<string, SnapshotEntry>> = before,
+  comparisonAfter: Readonly<Record<string, SnapshotEntry>> = after,
 ): WorkspaceChange[] {
   const paths = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort(comparePaths)
   const changes: WorkspaceChange[] = []
   for (const path of paths) {
     const left = before[path]
     const right = after[path]
+    const comparisonLeft = comparisonBefore[path]
+    const comparisonRight = comparisonAfter[path]
     if (left === undefined && right !== undefined) {
       changes.push({ path, kind: 'added', after: right })
       continue
@@ -114,16 +166,26 @@ export function diffTrees(
       changes.push({ path, kind: 'deleted', before: left })
       continue
     }
-    if (left === undefined || right === undefined || entriesEqual(left, right)) continue
+    if (left === undefined || right === undefined || entriesEqual(comparisonLeft, comparisonRight)) continue
     if (left.kind !== right.kind) {
       changes.push({ path, kind: 'type-changed', before: left, after: right })
       continue
     }
-    if (left.kind === 'file' && right.kind === 'file' && left.blob === right.blob && left.mode !== right.mode) {
+    if (left.kind === 'file'
+      && right.kind === 'file'
+      && comparisonLeft?.kind === 'file'
+      && comparisonRight?.kind === 'file'
+      && comparisonLeft.blob === comparisonRight.blob
+      && left.mode !== right.mode) {
       changes.push({ path, kind: 'mode-changed', before: left, after: right })
       continue
     }
-    if (left.kind === 'symlink' && right.kind === 'symlink' && left.target === right.target && left.mode !== right.mode) {
+    if (left.kind === 'symlink'
+      && right.kind === 'symlink'
+      && comparisonLeft?.kind === 'symlink'
+      && comparisonRight?.kind === 'symlink'
+      && comparisonLeft.target === comparisonRight.target
+      && left.mode !== right.mode) {
       changes.push({ path, kind: 'mode-changed', before: left, after: right })
       continue
     }
@@ -157,6 +219,29 @@ export function hashTree(entries: Readonly<Record<string, SnapshotEntry>>): stri
     }
   }
   return hash.digest('hex')
+}
+
+/** Byte-verify one workspace-relative path without following a final symlink. */
+export async function captureSnapshotEntry(
+  root: string,
+  path: string,
+  maxFileBytes: number,
+  signal?: AbortSignal,
+  gitObjectFormat?: 'sha1' | 'sha256',
+): Promise<SnapshotEntry | undefined> {
+  const entry = await captureEntry(root, path, maxFileBytes, signal)
+  if (entry === undefined || entry.kind === 'symlink' || gitObjectFormat === undefined) return entry?.snapshot
+  return gitFileSnapshot(entry.snapshot, entry.content, gitObjectFormat)
+}
+
+function gitFileSnapshot(
+  snapshot: SnapshotEntry & { readonly kind: 'file' },
+  content: Buffer,
+  objectFormat: 'sha1' | 'sha256',
+): SnapshotEntry {
+  const header = Buffer.from(`blob ${String(content.length)}\0`)
+  const blob = createHash(objectFormat).update(header).update(content).digest('hex')
+  return { ...snapshot, blob, provider: 'git' }
 }
 
 async function captureEntry(
@@ -193,10 +278,24 @@ async function captureEntry(
         `${JSON.stringify(path)} is ${before.size.toString()} bytes; configured per-file maximum is ${maxFileBytes}`,
       )
     }
-    const content = await readFile(target)
-    throwIfAborted(signal)
-    const after = await lstat(target, { bigint: true })
-    if (!sameStat(before, after) || BigInt(content.length) !== after.size) continue
+    let handle
+    try {
+      handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW)
+    } catch (error) {
+      if (isNodeError(error, 'ELOOP')) continue
+      throw error
+    }
+    let content: Buffer
+    try {
+      const opened = await handle.stat({ bigint: true })
+      if (!opened.isFile() || !sameStat(before, opened)) continue
+      content = await readBoundedFile(handle, Number(opened.size))
+      throwIfAborted(signal)
+      const after = await handle.stat({ bigint: true })
+      if (!sameStat(opened, after) || BigInt(content.length) !== after.size) continue
+    } finally {
+      await handle.close()
+    }
     const blob = createHash('sha256').update(content).digest('hex')
     return {
       kind: 'file',
@@ -205,6 +304,17 @@ async function captureEntry(
     }
   }
   throw new ChangeLedgerError('WORKSPACE_CHANGED_DURING_CAPTURE', `path changed repeatedly while being captured: ${JSON.stringify(path)}`)
+}
+
+async function readBoundedFile(handle: Awaited<ReturnType<typeof open>>, expectedSize: number): Promise<Buffer> {
+  const buffer = Buffer.allocUnsafe(expectedSize + 1)
+  let offset = 0
+  while (offset < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset)
+    if (bytesRead === 0) break
+    offset += bytesRead
+  }
+  return buffer.subarray(0, offset)
 }
 
 function sameStat(left: BigIntStats, right: BigIntStats): boolean {
