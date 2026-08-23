@@ -16,6 +16,8 @@ export declare function readJson(path: string): Promise<unknown>;
 export declare function pathExists(path: string): Promise<boolean>;
 /** Ensure every existing parent below `root` is a real directory, never a symlink. */
 export declare function ensureSafeParents(root: string, target: string): Promise<void>;
+/** Validate existing parents without creating missing directories. */
+export declare function assertSafeParents(root: string, target: string): Promise<void>;
 /** Replace a path with a regular file using a sibling temporary file. */
 export declare function replaceRegularFile(path: string, content: Buffer, mode: number): Promise<void>;
 /** Replace a path with a symbolic link using a sibling temporary name. */

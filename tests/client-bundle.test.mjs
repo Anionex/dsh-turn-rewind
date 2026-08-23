@@ -314,6 +314,14 @@ test('rewind dialog restores files in two modes and allows reviewed Git history 
   assert.ok(findNode(noFilesTree, node => node.type === 'p' && String(node.props.children).includes('分支新对话')))
 
   stateIndex = 0
+  values = [true, false, { status: 'skipped', reason: '[TURN_CHECKPOINT_TIMEOUT] automatic checkpoint exceeded 5000 ms' }, 'both', false, false, false, null, null]
+  const skippedTree = plugin.RewindMessageAction({
+    matched: { messageSeq: 2, promptText: '修复这个问题' }, sessionId: 'session-source', async openRestoredSession() {},
+  })
+  assert.ok(findNode(skippedTree, node => node.type === 'p'
+    && String(node.props.children).includes('为避免阻塞消息发送，本轮没有自动保存文件')))
+
+  stateIndex = 0
   values = [true, false, { status: 'failed', error: 'transient' }, 'both', false, false, false, null, null]
   let retryUrl
   context.fetch = async (url) => {

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
+import { createDeadline } from './deadline.js'
 import { ChangeLedgerError, errorMessage } from './errors.js'
 import type { ChangeLedgerEngine } from './engine.js'
 import { discoverRepositoryRoot } from './git.js'
@@ -114,6 +115,7 @@ export class TurnCheckpointCoordinator {
   private readonly captures = new Map<string, Promise<void>>()
   private readonly pending = new Set<string>()
   private readonly failures = new Map<string, string>()
+  private readonly skips = new Map<string, string>()
   private readonly workspaceTails = new Map<string, Promise<void>>()
 
   constructor(private readonly engine: ChangeLedgerEngine) {}
@@ -127,9 +129,11 @@ export class TurnCheckpointCoordinator {
   }
 
   /** Current capture state for a session turn when no durable checkpoint exists yet. */
-  state(sessionId: string, turn: number): { readonly status: 'pending' | 'failed' | 'missing'; readonly error?: string } {
+  state(sessionId: string, turn: number): { readonly status: 'pending' | 'failed' | 'skipped' | 'missing'; readonly error?: string; readonly reason?: string } {
     const key = checkpointKey(sessionId, turn)
     if (this.pending.has(key)) return { status: 'pending' }
+    const reason = this.skips.get(key)
+    if (reason !== undefined) return { status: 'skipped', reason }
     const error = this.failures.get(key)
     return error === undefined ? { status: 'missing' } : { status: 'failed', error }
   }
@@ -141,48 +145,88 @@ export class TurnCheckpointCoordinator {
     signal: AbortSignal,
   ): Promise<void> {
     const key = checkpointKey(agent.id, turn)
-    const existing = this.captures.get(key)
-    if (existing !== undefined) {
-      await existing
-      return
-    }
     const cwd = agent.session.header.cwd
     if (cwd === undefined) return
     const start = agent.session.events.findLast(event => event.type === 'turn/start' && event.data.turn === turn)
     if (start === undefined) {
-      this.recordFailure(ctx, agent.id, turn, new Error('turn/start is unavailable before the first step'))
+      await this.recordFailure(ctx, agent.id, turn, new Error('turn/start is unavailable before the first step'))
       return
     }
-    this.pending.add(key)
-    this.failures.delete(key)
-    const capture = (async () => {
-      try {
-        const workspace = await discoverRepositoryRoot(cwd, signal)
-        await this.serializeWorkspace(workspace, signal, async () => {
-          await this.engine.createTurnCheckpoint({
-            cwd: workspace,
-            sessionId: agent.id,
-            turn,
-            turnStartSeq: start.seq,
-            signal,
-          })
-        })
-      } catch (error) {
-        this.recordFailure(ctx, agent.id, turn, error)
-      } finally {
-        this.pending.delete(key)
+    const timeoutMs = this.engine.config.turnCheckpointTimeoutMs
+    const outcomeDeadline = createDeadline(timeoutMs)
+    const outcomeSignal = AbortSignal.any([signal, outcomeDeadline.signal])
+    const reserveMs = Math.min(250, Math.max(10, Math.ceil(timeoutMs / 5)))
+    const captureDeadline = createDeadline(Math.max(1, timeoutMs - reserveMs))
+    const captureSignal = AbortSignal.any([signal, captureDeadline.signal])
+    try {
+      const existing = this.captures.get(key)
+      if (existing !== undefined) {
+        await waitWithSignal(existing, captureSignal).catch(() => undefined)
+        return
       }
-    })()
-    this.captures.set(key, capture)
-    await capture
+      this.pending.add(key)
+      this.failures.delete(key)
+      this.skips.delete(key)
+      const capture = (async () => {
+        try {
+          const workspace = await discoverRepositoryRoot(cwd, captureSignal)
+          await this.serializeWorkspace(workspace, captureSignal, async () => {
+            try {
+              await this.engine.createTurnCheckpoint({
+                cwd: workspace,
+                sessionId: agent.id,
+                turn,
+                turnStartSeq: start.seq,
+                signal: captureSignal,
+              })
+            } catch (error) {
+              await this.recordFailure(
+                ctx,
+                agent.id,
+                turn,
+                checkpointTimeoutError(error, timeoutMs, captureDeadline.signal, signal),
+                { cwd: workspace, turnStartSeq: start.seq },
+              )
+            }
+          })
+        } catch (error) {
+          await this.recordFailure(
+            ctx,
+            agent.id,
+            turn,
+            checkpointTimeoutError(error, timeoutMs, captureDeadline.signal, signal),
+            { cwd, turnStartSeq: start.seq },
+          )
+        } finally {
+          this.pending.delete(key)
+        }
+      })()
+      this.captures.set(key, capture)
+      try {
+        await waitWithSignal(capture, outcomeSignal)
+      } catch (error) {
+        const bounded = checkpointTimeoutError(error, timeoutMs, outcomeDeadline.signal, signal)
+        const message = errorMessage(bounded)
+        this.pending.delete(key)
+        if (bounded instanceof ChangeLedgerError && isCheckpointSkip(bounded.code)) {
+          this.skips.set(key, message)
+        } else {
+          this.failures.set(key, message)
+        }
+      }
+    } finally {
+      captureDeadline.cancel()
+      outcomeDeadline.cancel()
+    }
   }
 
   private async serializeWorkspace(workspace: string, signal: AbortSignal, task: () => Promise<void>): Promise<void> {
     const previous = this.workspaceTails.get(workspace) ?? Promise.resolve()
-    const current = previous.catch(() => undefined).then(async () => {
+    const current = (async () => {
+      await waitWithSignal(previous.catch(() => undefined), signal)
       signal.throwIfAborted()
       await task()
-    })
+    })()
     this.workspaceTails.set(workspace, current)
     try {
       await current
@@ -191,16 +235,68 @@ export class TurnCheckpointCoordinator {
     }
   }
 
-  private recordFailure(
+  private async recordFailure(
     ctx: Pick<Context, 'logger'>,
     sessionId: string,
     turn: number,
     error: unknown,
-  ): void {
+    skipContext?: { readonly cwd: string; readonly turnStartSeq: number },
+  ): Promise<void> {
     const message = errorMessage(error)
+    if (error instanceof ChangeLedgerError && isCheckpointSkip(error.code)) {
+      this.skips.set(checkpointKey(sessionId, turn), message)
+      if (skipContext !== undefined) {
+        try {
+          await this.engine.recordTurnCheckpointSkip({
+            cwd: skipContext.cwd,
+            sessionId,
+            turn,
+            turnStartSeq: skipContext.turnStartSeq,
+            reason: message,
+          })
+        } catch (persistError) {
+          ctx.logger.warn(`[turn-rewind] could not persist checkpoint skip for ${sessionId} turn ${String(turn)}: ${errorMessage(persistError)}`)
+        }
+      }
+      ctx.logger.warn(`[turn-rewind] checkpoint skipped for ${sessionId} turn ${String(turn)}: ${message}`)
+      return
+    }
     this.failures.set(checkpointKey(sessionId, turn), message)
     ctx.logger.warn(`[turn-rewind] checkpoint failed for ${sessionId} turn ${String(turn)}: ${message}`)
   }
+}
+
+function isCheckpointSkip(code: string): boolean {
+  return code === 'TURN_CHECKPOINT_DISABLED'
+    || code === 'TURN_CHECKPOINT_TIMEOUT'
+    || code === 'TURN_CHECKPOINT_NEW_CONTENT_LIMIT'
+    || code === 'GIT_OBJECT_STORE_UNSUPPORTED'
+    || code === 'GIT_INDEX_UNSUPPORTED'
+}
+
+async function waitWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted()
+  let rejectAbort: ((reason?: unknown) => void) | undefined
+  const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject })
+  const onAbort = () => rejectAbort?.(signal.reason)
+  signal.addEventListener('abort', onAbort, { once: true })
+  try {
+    return await Promise.race([promise, aborted])
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+  }
+}
+
+function checkpointTimeoutError(
+  error: unknown,
+  timeoutMs: number,
+  deadline: AbortSignal,
+  callerSignal: AbortSignal,
+): unknown {
+  if (!callerSignal.aborted && deadline.aborted) {
+    return new ChangeLedgerError('TURN_CHECKPOINT_TIMEOUT', `automatic checkpoint exceeded ${timeoutMs} ms`, { cause: error })
+  }
+  return error
 }
 
 /** Register the same-origin preview/apply endpoint consumed by the browser half. */
@@ -233,7 +329,15 @@ export function createRewindHttpHandler(
         const limit = pageSize(url.searchParams.get('limit'), detailsOnly ? MAX_CHANGE_PAGE_SIZE : INITIAL_CHANGE_PREVIEW_LIMIT)
         const { target, checkpoint } = await resolveMessageCheckpoint(ctx, engine, sessionId, messageSeq)
         if (checkpoint === undefined) {
-          json(response, 200, coordinator.state(sessionId, target.turn))
+          const durableSkip = await engine.findTurnCheckpointSkip({
+            cwd: target.cwd,
+            sessionId,
+            turn: target.turn,
+            turnStartSeq: target.turnStartSeq,
+          })
+          json(response, 200, durableSkip === undefined
+            ? coordinator.state(sessionId, target.turn)
+            : { status: 'skipped', reason: durableSkip.reason })
           return
         }
         const inspection = await engine.inspect({ cwd: checkpoint.cwd, restorePointId: checkpoint.id })

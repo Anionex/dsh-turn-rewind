@@ -115,14 +115,16 @@ export declare class TurnCheckpointCoordinator {
     private readonly captures;
     private readonly pending;
     private readonly failures;
+    private readonly skips;
     private readonly workspaceTails;
     constructor(engine: ChangeLedgerEngine);
     /** Install the first-step gate; checkpoint failures are recorded but never reject the user turn. */
     install(ctx: Context): void;
     /** Current capture state for a session turn when no durable checkpoint exists yet. */
     state(sessionId: string, turn: number): {
-        readonly status: 'pending' | 'failed' | 'missing';
+        readonly status: 'pending' | 'failed' | 'skipped' | 'missing';
         readonly error?: string;
+        readonly reason?: string;
     };
     private capture;
     private serializeWorkspace;

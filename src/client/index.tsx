@@ -111,6 +111,7 @@ interface ReadyPreview {
 type Preview = ReadyPreview
   | { readonly status: 'pending' }
   | { readonly status: 'missing' }
+  | { readonly status: 'skipped'; readonly reason: string }
   | { readonly status: 'failed'; readonly error: string }
 
 const PATH = '/turn-rewind'
@@ -407,6 +408,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
           {loading && <p className="dcl-rewind-status">正在检查可以恢复的项目文件…</p>}
           {preview?.status === 'pending' && <p className="dcl-rewind-status">这条消息发送前的文件还在保存，请稍后再试。</p>}
           {preview?.status === 'missing' && <p className="dcl-rewind-error">没有保存这条消息发送前的文件。可能是当时还没启用回退功能，或记录已超过保留期限。</p>}
+          {preview?.status === 'skipped' && <p className="dcl-rewind-status">为避免阻塞消息发送，本轮没有自动保存文件：{preview.reason}</p>}
           {preview?.status === 'failed' && <p className="dcl-rewind-error">没能保存这条消息发送前的文件：{preview.error}</p>}
           {ready !== null && (
             <>
@@ -460,6 +462,7 @@ function decodePreview(value: unknown): Preview {
   const record = recordOf(value)
   const status = requiredString(record.status, 'status')
   if (status === 'pending' || status === 'missing') return { status }
+  if (status === 'skipped') return { status, reason: requiredString(record.reason, 'reason') }
   if (status === 'failed') return { status, error: requiredString(record.error, 'error') }
   if (status !== 'ready') throw new Error(`未知回退状态：${status}`)
   const changesValue = record.changes

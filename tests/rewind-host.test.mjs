@@ -8,6 +8,7 @@ import { promisify } from 'node:util'
 import test from 'node:test'
 import {
   ChangeLedgerEngine,
+  ChangeLedgerError,
   ChangeLedgerService,
   TurnCheckpointCoordinator,
   createRewindHttpHandler,
@@ -125,6 +126,131 @@ test('checkpoint capture serializes one worktree and failure never blocks the tu
   assert.equal(coordinator.state('session-failed', 3).status, 'failed')
   assert.match(coordinator.state('session-failed', 3).error, /capture failed/)
   assert.equal(warnings.length, 1)
+})
+
+test('bounded automatic checkpoint skips are visible and never block the turn', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  f.engine.createTurnCheckpoint = async () => {
+    throw new ChangeLedgerError('TURN_CHECKPOINT_TIMEOUT', 'automatic checkpoint exceeded 5 ms')
+  }
+  const warnings = []
+  const { coordinator, listener } = installedCoordinator(f.engine, warnings)
+  const agent = preStepAgent('session-skipped', f.workspace, 4, 20)
+  let continued = false
+  await listener(
+    { agent, turn: 4, step: 1, signal: new AbortController().signal },
+    async () => { continued = true; return { kind: 'enter' } },
+  )
+  assert.equal(continued, true)
+  assert.equal(coordinator.state(agent.id, 4).status, 'skipped')
+  assert.match(coordinator.state(agent.id, 4).reason, /TURN_CHECKPOINT_TIMEOUT/)
+  assert.equal(warnings.length, 1)
+})
+
+test('the first-step gate waits for a skipped outcome to become durable', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  f.engine.createTurnCheckpoint = async () => {
+    throw new ChangeLedgerError('TURN_CHECKPOINT_TIMEOUT', 'automatic checkpoint exceeded 5 ms')
+  }
+  let releasePersistence
+  const persistence = new Promise((resolve) => { releasePersistence = resolve })
+  let persistenceStarted = false
+  let persisted = false
+  f.engine.recordTurnCheckpointSkip = async () => {
+    persistenceStarted = true
+    await persistence
+    persisted = true
+  }
+  const { listener } = installedCoordinator(f.engine)
+  const agent = preStepAgent('session-skip-durable-gate', f.workspace, 4, 20)
+  let continued = false
+  const invocation = listener(
+    { agent, turn: 4, step: 1, signal: new AbortController().signal },
+    async () => { continued = true; return { kind: 'enter' } },
+  )
+  while (!persistenceStarted) await new Promise((resolve) => setTimeout(resolve, 1))
+  assert.equal(continued, false)
+  releasePersistence()
+  await invocation
+  assert.equal(persisted, true)
+  assert.equal(continued, true)
+})
+
+test('the checkpoint deadline covers coordinator discovery and engine metadata reads', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const bounded = new ChangeLedgerEngine({
+    storageDir: join(f.outer, 'coordinator-deadline-state'),
+    turnCheckpointMode: 'legacy',
+    turnCheckpointTimeoutMs: 300,
+  })
+  await bounded.initialize()
+  bounded.store.listManifests = async () => new Promise(() => {})
+  bounded.recordTurnCheckpointSkip = async () => {}
+  const { coordinator, listener } = installedCoordinator(bounded)
+  const agent = preStepAgent('session-coordinator-deadline', f.workspace, 4, 20)
+  let continued = false
+  const startedAt = Date.now()
+  await listener(
+    { agent, turn: 4, step: 1, signal: new AbortController().signal },
+    async () => { continued = true; return { kind: 'enter' } },
+  )
+  assert.equal(continued, true)
+  assert.equal(coordinator.state(agent.id, 4).status, 'skipped')
+  assert.ok(Date.now() - startedAt < 600)
+  await Promise.all(coordinator.captures.values())
+})
+
+test('slow durable skip persistence cannot extend the pre-step deadline', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const bounded = new ChangeLedgerEngine({
+    storageDir: join(f.outer, 'slow-outcome-state'),
+    turnCheckpointMode: 'legacy',
+    turnCheckpointTimeoutMs: 100,
+  })
+  await bounded.initialize()
+  bounded.createTurnCheckpoint = async () => {
+    throw new ChangeLedgerError('TURN_CHECKPOINT_TIMEOUT', 'automatic checkpoint exceeded 100 ms')
+  }
+  let persistenceFinished = false
+  bounded.recordTurnCheckpointSkip = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 450))
+    persistenceFinished = true
+  }
+  const { coordinator, listener } = installedCoordinator(bounded)
+  const agent = preStepAgent('session-slow-outcome', f.workspace, 4, 20)
+  let continued = false
+  const startedAt = Date.now()
+  await listener(
+    { agent, turn: 4, step: 1, signal: new AbortController().signal },
+    async () => { continued = true; return { kind: 'enter' } },
+  )
+  assert.equal(continued, true)
+  assert.equal(coordinator.state(agent.id, 4).status, 'skipped')
+  assert.ok(Date.now() - startedAt < 250)
+  while (!persistenceFinished) await new Promise((resolve) => setTimeout(resolve, 10))
+})
+
+test('durable checkpoint skips remain visible after the coordinator restarts', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  await f.engine.recordTurnCheckpointSkip({
+    cwd: f.workspace,
+    sessionId: 'session-skipped-persisted',
+    turn: 1,
+    turnStartSeq: 1,
+    reason: '[TURN_CHECKPOINT_DISABLED] automatic turn checkpoints are disabled',
+  })
+  const handler = handlerFor(f, new Map([
+    ['session-skipped-persisted', liveSession('session-skipped-persisted', f.workspace, oneTurnEvents())],
+  ]))
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-skipped-persisted&messageSeq=2')
+  assert.equal(preview.status, 200)
+  assert.equal(preview.body.status, 'skipped')
+  assert.match(preview.body.reason, /TURN_CHECKPOINT_DISABLED/)
 })
 
 test('HTTP preview mints a message-bound plan and code-only restore applies it', async (t) => {
