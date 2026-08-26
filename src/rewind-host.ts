@@ -29,6 +29,12 @@ interface AgentLike {
   readonly session: SessionLike
 }
 
+interface ToolExecutionLike {
+  readonly agent?: AgentLike
+  readonly parent?: symbol
+  readonly signal: AbortSignal
+}
+
 interface AgentsLike {
   list(): AgentLike[]
 }
@@ -102,6 +108,10 @@ declare module '@deepseek-ai/cordis' {
       },
       next: () => Promise<unknown>,
     ): Promise<unknown>
+    'tools/execute'(
+      exec: ToolExecutionLike,
+      next: () => Promise<unknown>,
+    ): Promise<unknown>
   }
 }
 
@@ -110,7 +120,7 @@ const BODY_LIMIT = 64 * 1024
 const INITIAL_CHANGE_PREVIEW_LIMIT = 8
 const MAX_CHANGE_PAGE_SIZE = 200
 
-/** Capture each turn before its opening user message can trigger model or tool work. */
+/** Capture each turn beside model work and before its first root tool side effect. */
 export class TurnCheckpointCoordinator {
   private readonly captures = new Map<string, Promise<void>>()
   private readonly pending = new Set<string>()
@@ -120,10 +130,17 @@ export class TurnCheckpointCoordinator {
 
   constructor(private readonly engine: ChangeLedgerEngine) {}
 
-  /** Install the first-step gate; checkpoint failures are recorded but never reject the user turn. */
+  /** Keep sidecar checkpoint work out of the Agent response waterfall. */
   install(ctx: Context): void {
     ctx.on('agent/pre-step', async ({ agent, turn, step, signal }, next) => {
-      if (step === 1) await this.capture(ctx, agent, turn, signal)
+      if (step === 1) this.startCapture(ctx, agent, turn, signal)
+      return next()
+    }, { prepend: true })
+
+    ctx.on('tools/execute', async (exec, next) => {
+      if (exec.agent !== undefined && exec.parent === undefined) {
+        await this.waitForOpenTurn(exec.agent, exec.signal)
+      }
       return next()
     }, { prepend: true })
   }
@@ -136,6 +153,20 @@ export class TurnCheckpointCoordinator {
     if (reason !== undefined) return { status: 'skipped', reason }
     const error = this.failures.get(key)
     return error === undefined ? { status: 'missing' } : { status: 'failed', error }
+  }
+
+  private startCapture(
+    ctx: Pick<Context, 'logger'>,
+    agent: AgentLike,
+    turn: number,
+    signal: AbortSignal,
+  ): void {
+    const key = checkpointKey(agent.id, turn)
+    if (this.captures.has(key)) return
+    const capture = this.capture(ctx, agent, turn, signal).catch(async (error: unknown) => {
+      await this.recordFailure(ctx, agent.id, turn, error)
+    })
+    this.captures.set(key, capture)
   }
 
   private async capture(
@@ -159,11 +190,6 @@ export class TurnCheckpointCoordinator {
     const captureDeadline = createDeadline(Math.max(1, timeoutMs - reserveMs))
     const captureSignal = AbortSignal.any([signal, captureDeadline.signal])
     try {
-      const existing = this.captures.get(key)
-      if (existing !== undefined) {
-        await waitWithSignal(existing, captureSignal).catch(() => undefined)
-        return
-      }
       this.pending.add(key)
       this.failures.delete(key)
       this.skips.delete(key)
@@ -201,7 +227,6 @@ export class TurnCheckpointCoordinator {
           this.pending.delete(key)
         }
       })()
-      this.captures.set(key, capture)
       try {
         await waitWithSignal(capture, outcomeSignal)
       } catch (error) {
@@ -218,6 +243,18 @@ export class TurnCheckpointCoordinator {
       captureDeadline.cancel()
       outcomeDeadline.cancel()
     }
+  }
+
+  /** Wait only for the bounded checkpoint outcome of the Agent's open turn. */
+  private async waitForOpenTurn(agent: AgentLike, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted()
+    const boundary = agent.session.events.findLast(event => event.type === 'turn/start' || event.type === 'turn/end')
+    if (boundary?.type !== 'turn/start') return
+    const turn = boundary.data.turn
+    if (!Number.isSafeInteger(turn) || (turn as number) < 0) return
+    const capture = this.captures.get(checkpointKey(agent.id, turn as number))
+    if (capture !== undefined) await waitWithSignal(capture, signal)
+    signal.throwIfAborted()
   }
 
   private async serializeWorkspace(workspace: string, signal: AbortSignal, task: () => Promise<void>): Promise<void> {
