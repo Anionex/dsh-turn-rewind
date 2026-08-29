@@ -4,12 +4,14 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { ChangeLedgerEngine } from './engine.js'
-import { installRewindHttp, TurnCheckpointCoordinator } from './rewind-host.js'
+import { installManageHttp, installRewindHttp, TurnCheckpointCoordinator } from './rewind-host.js'
+import { installTurnRewindSettings } from './settings.js'
 import type { ChangeLedgerConfig } from './types.js'
 
 export * from './engine.js'
 export * from './errors.js'
 export * from './rewind-host.js'
+export * from './settings.js'
 export * from './types.js'
 
 declare module '@deepseek-ai/cordis' {
@@ -30,7 +32,9 @@ export class ChangeLedgerService {
     ctx.inject(['agents'], (scope: Context) => { checkpoints.install(scope) })
     ctx.inject(['webServer', 'sessions', 'sessionQuery', 'apiProxy', 'agents'], (scope: Context) => {
       installRewindHttp(scope, this.engine, checkpoints)
+      installManageHttp(scope, this.engine)
     })
+    installTurnRewindSettings(ctx, config, this.engine)
     void this.engine.initialize().then((reconciled) => {
       if (reconciled > 0) {
         ctx.logger.warn(`[change-ledger] reconciled ${reconciled} interrupted durable operation(s)`)
@@ -94,6 +98,21 @@ export class ChangeLedgerService {
   /** List interrupted restore operations and their rescue points. */
   listRecovery(options: Parameters<ChangeLedgerEngine['listRecovery']>[0]): ReturnType<ChangeLedgerEngine['listRecovery']> {
     return this.engine.listRecovery(options)
+  }
+
+  /** Inventory every workspace this storage root has persisted state for. */
+  listWorkspaces(options?: Parameters<ChangeLedgerEngine['listWorkspaces']>[0]): ReturnType<ChangeLedgerEngine['listWorkspaces']> {
+    return this.engine.listWorkspaces(options)
+  }
+
+  /** Delete unprotected restore points recorded for one workspace. */
+  purgeWorkspace(options: Parameters<ChangeLedgerEngine['purgeWorkspace']>[0]): ReturnType<ChangeLedgerEngine['purgeWorkspace']> {
+    return this.engine.purgeWorkspace(options)
+  }
+
+  /** Swap runtime-tunable configuration; the storage root must stay fixed. */
+  updateConfig(config: ChangeLedgerConfig): void {
+    this.engine.updateConfig(config)
   }
 }
 

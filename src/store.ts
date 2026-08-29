@@ -203,6 +203,16 @@ export class LedgerStore {
     }
   }
 
+  /** Acquire only the durable directory lock when the recorded worktree is no longer available. */
+  async acquireWorkspaceDir(
+    workspaceDir: string,
+    workspace: string,
+    signal?: AbortSignal,
+  ): Promise<() => Promise<void>> {
+    const lease = await this.acquireOne(join(workspaceDir, 'lock.json'), workspace, false, true, signal)
+    return () => lease.release()
+  }
+
   private async acquireOne(
     initialLockPath: string,
     workspace: string,
@@ -335,17 +345,25 @@ export class LedgerStore {
 
   /** List all validated restore points for one workspace, newest first. */
   async listManifests(workspace: string, signal?: AbortSignal): Promise<RestorePointManifest[]> {
+    const manifests = await this.listManifestsInDir(this.workspaceDir(workspace), signal)
+    for (const manifest of manifests) {
+      if (manifest.workspace !== workspace) {
+        throw new ChangeLedgerError('STATE_CORRUPT', `manifest ${manifest.id} belongs to a different workspace`)
+      }
+    }
+    return manifests
+  }
+
+  /** List validated manifests directly from one storage directory, newest first. */
+  async listManifestsInDir(workspaceDir: string, signal?: AbortSignal): Promise<RestorePointManifest[]> {
     const manifests: RestorePointManifest[] = []
-    for (const filename of await safeJsonNames(join(this.workspaceDir(workspace), 'manifests'))) {
+    for (const filename of await safeJsonNames(join(workspaceDir, 'manifests'))) {
       throwIfAborted(signal)
-      const manifest = parseManifest(await readJson(join(this.workspaceDir(workspace), 'manifests', filename)))
+      const manifest = parseManifest(await readJson(join(workspaceDir, 'manifests', filename)))
       this.assertManifestOwned(manifest)
-      await this.assertManifestWorkspaceIdentity(manifest, this.workspaceDir(workspace))
+      await this.assertManifestWorkspaceIdentity(manifest, workspaceDir)
       if (filename !== `${manifest.id}.json`) {
         throw new ChangeLedgerError('STATE_CORRUPT', `manifest ${filename} does not match its persisted id ${manifest.id}`)
-      }
-      if (manifest.workspace !== workspace) {
-        throw new ChangeLedgerError('STATE_CORRUPT', `manifest ${filename} belongs to a different workspace`)
       }
       manifests.push(manifest)
     }
@@ -354,10 +372,15 @@ export class LedgerStore {
 
   /** Delete one restore-point manifest. Blobs remain until garbage collection succeeds. */
   async deleteManifest(workspace: string, id: string): Promise<void> {
+    await this.deleteManifestInDir(this.workspaceDir(workspace), id)
+  }
+
+  /** Delete one restore-point manifest directly from its storage directory. */
+  async deleteManifestInDir(workspaceDir: string, id: string): Promise<void> {
     validateRestorePointId(id)
-    const directory = join(this.workspaceDir(workspace), 'manifests')
+    const directory = join(workspaceDir, 'manifests')
     try {
-      await unlink(this.manifestPath(workspace, id))
+      await unlink(join(directory, `${id}.json`))
     } catch (error) {
       if (isNodeError(error, 'ENOENT')) {
         throw new ChangeLedgerError('RESTORE_POINT_NOT_FOUND', `restore point ${id} does not exist`)
@@ -387,25 +410,46 @@ export class LedgerStore {
     await writeJsonAtomic(this.gitCheckpointJournalPath(manifest.workspace, manifest.id), journal)
   }
 
+  /** List every persisted workspace directory under this storage root. */
+  async listWorkspaceDirs(signal?: AbortSignal): Promise<string[]> {
+    const root = join(this.config.storageDir, 'workspaces')
+    const dirs: string[] = []
+    for (const key of await safeDirectoryNames(root)) {
+      throwIfAborted(signal)
+      dirs.push(join(root, key))
+    }
+    return dirs
+  }
+
   /** List every pending Git checkpoint transition across this storage root. */
   async listGitCheckpointJournals(): Promise<GitCheckpointJournal[]> {
     const journals: GitCheckpointJournal[] = []
     for (const workspaceKey of await safeDirectoryNames(join(this.config.storageDir, 'workspaces'))) {
       const workspaceDir = join(this.config.storageDir, 'workspaces', workspaceKey)
-      for (const filename of await safeJsonNames(join(workspaceDir, 'git-journals'))) {
-        const journal = parseGitCheckpointJournal(await readJson(join(workspaceDir, 'git-journals', filename)))
-        this.assertGitCheckpointJournalOwned(journal)
-        await this.assertGitCheckpointJournalWorkspaceIdentity(journal, workspaceDir)
-        if (filename !== `${journal.restorePointId}.json`) {
-          throw new ChangeLedgerError('STATE_CORRUPT', `Git checkpoint journal ${filename} does not match its restore-point id`)
-        }
+      for (const journal of await this.listGitCheckpointJournalsInDir(workspaceDir)) {
         if (this.workspaceDir(journal.workspace) !== workspaceDir) {
-          throw new ChangeLedgerError('STATE_CORRUPT', `Git checkpoint journal ${filename} is stored under the wrong workspace key`)
+          throw new ChangeLedgerError('STATE_CORRUPT', `Git checkpoint journal ${journal.restorePointId}.json is stored under the wrong workspace key`)
         }
         journals.push(journal)
       }
     }
     return journals.sort((left, right) => left.createdAt - right.createdAt || left.restorePointId.localeCompare(right.restorePointId))
+  }
+
+  /** List pending Git checkpoint transitions directly from one storage directory. */
+  async listGitCheckpointJournalsInDir(workspaceDir: string, signal?: AbortSignal): Promise<GitCheckpointJournal[]> {
+    const journals: GitCheckpointJournal[] = []
+    for (const filename of await safeJsonNames(join(workspaceDir, 'git-journals'))) {
+      throwIfAborted(signal)
+      const journal = parseGitCheckpointJournal(await readJson(join(workspaceDir, 'git-journals', filename)))
+      this.assertGitCheckpointJournalOwned(journal)
+      await this.assertGitCheckpointJournalWorkspaceIdentity(journal, workspaceDir)
+      if (filename !== `${journal.restorePointId}.json`) {
+        throw new ChangeLedgerError('STATE_CORRUPT', `Git checkpoint journal ${filename} does not match its restore-point id`)
+      }
+      journals.push(journal)
+    }
+    return journals
   }
 
   /** Remove one completed Git checkpoint transition journal. */
@@ -484,14 +528,23 @@ export class LedgerStore {
 
   /** List validated restore operations for one workspace. */
   async listOperations(workspace: string): Promise<RestoreOperation[]> {
+    const operations = await this.listOperationsInDir(this.workspaceDir(workspace))
+    for (const operation of operations) {
+      if (operation.workspace !== workspace) {
+        throw new ChangeLedgerError('STATE_CORRUPT', `operation ${operation.id} belongs to a different workspace`)
+      }
+    }
+    return operations
+  }
+
+  /** List validated restore operations directly from one storage directory. */
+  async listOperationsInDir(workspaceDir: string, signal?: AbortSignal): Promise<RestoreOperation[]> {
     const operations: RestoreOperation[] = []
-    for (const filename of await safeJsonNames(join(this.workspaceDir(workspace), 'operations'))) {
-      const operation = parseOperation(await readJson(join(this.workspaceDir(workspace), 'operations', filename)))
+    for (const filename of await safeJsonNames(join(workspaceDir, 'operations'))) {
+      throwIfAborted(signal)
+      const operation = parseOperation(await readJson(join(workspaceDir, 'operations', filename)))
       if (filename !== `${operation.id}.json`) {
         throw new ChangeLedgerError('STATE_CORRUPT', `operation ${filename} does not match its persisted id ${operation.id}`)
-      }
-      if (operation.workspace !== workspace) {
-        throw new ChangeLedgerError('STATE_CORRUPT', `operation ${filename} belongs to a different workspace`)
       }
       operations.push(operation)
     }
@@ -513,15 +566,48 @@ export class LedgerStore {
   ): Promise<{ deletedBlobs: number; retainedBlobs: number }> {
     const referenced = new Set<string>(additionalReferenced)
     for (const hash of referenced) validateBlobHash(hash)
-    for (const manifest of await this.listManifests(workspace, signal)) {
+    for (const manifest of await this.listManifestsInDir(this.workspaceDir(workspace), signal)) {
       throwIfAborted(signal)
       for (const entry of Object.values(manifest.entries)) {
         if (entry.kind === 'file' && entry.provider !== 'git') referenced.add(entry.blob)
       }
     }
+    return this.sweepBlobs(this.workspaceDir(workspace), referenced, signal)
+  }
+
+  /** Delete blobs under one storage directory that no manifest in it references. */
+  async collectGarbageInDir(
+    workspaceDir: string,
+    signal?: AbortSignal,
+  ): Promise<{ deletedBlobs: number; retainedBlobs: number }> {
+    const referenced = new Set<string>()
+    for (const manifest of await this.listManifestsInDir(workspaceDir, signal)) {
+      throwIfAborted(signal)
+      for (const entry of Object.values(manifest.entries)) {
+        if (entry.kind === 'file' && entry.provider !== 'git') referenced.add(entry.blob)
+      }
+    }
+    return this.sweepBlobs(workspaceDir, referenced, signal)
+  }
+
+  /** Remove every persisted automatic-checkpoint skip marker under one storage directory. */
+  async clearTurnOutcomesInDir(workspaceDir: string): Promise<number> {
+    let removed = 0
+    for (const filename of await safeJsonNames(join(workspaceDir, 'turn-outcomes'))) {
+      await unlink(join(workspaceDir, 'turn-outcomes', filename))
+      removed += 1
+    }
+    return removed
+  }
+
+  private async sweepBlobs(
+    workspaceDir: string,
+    referenced: ReadonlySet<string>,
+    signal?: AbortSignal,
+  ): Promise<{ deletedBlobs: number; retainedBlobs: number }> {
     let deletedBlobs = 0
     let retainedBlobs = 0
-    const blobsRoot = join(this.workspaceDir(workspace), 'blobs')
+    const blobsRoot = join(workspaceDir, 'blobs')
     for (const prefix of await safeDirectoryNames(blobsRoot)) {
       throwIfAborted(signal)
       const prefixPath = join(blobsRoot, prefix)

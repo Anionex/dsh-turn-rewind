@@ -240,3 +240,24 @@ export interface RecoverySummary {
   readonly error?: string
   readonly rollbackError?: string
 }
+
+/** Aggregated checkpoint inventory for one workspace, addressed by its recorded path. */
+export interface WorkspaceOverview {
+  /** Canonical workspace path recorded in the persisted manifests. */
+  readonly workspace: string
+  /** Every restore point stored for the workspace, newest first. */
+  readonly restorePoints: readonly RestorePointSummary[]
+  /** Sum of every restore point's logical bytes. */
+  readonly totalBytes: number
+  /** Incomplete restore operations that still reference this workspace's points. */
+  readonly recoveryCount: number
+}
+
+/** Aggregate cleanup report for one workspace purge. */
+export interface WorkspacePurgeReport {
+  readonly workspace: string
+  readonly deletedRestorePoints: number
+  readonly retainedRestorePoints: number
+  readonly deletedBlobs: number
+  readonly retainedBlobs: number
+}

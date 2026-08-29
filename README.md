@@ -32,7 +32,7 @@ Rewind appears as an icon-only third action under each user message, after its t
 
 ![Turn Rewind action under a user message](docs/assets/turn-rewind-action.png)
 
-Opening it shows the affected files and offers two choices: restore the files and restart from before that message, or restore only the files:
+Opening it shows the affected files and offers three choices: restore the files and restart from before that message, restore only the files, or rewind only the messages and leave the files untouched:
 
 ![Turn Rewind review dialog](docs/assets/turn-rewind-dialog.png)
 
@@ -107,22 +107,25 @@ When the profile also provides the DSH Agent service, the plugin captures a hidd
 
 ## User flow
 
-In the Web profile, each direct user message gains a compact, icon-only **Rewind** action after its timestamp and native Copy control. The tooltip reads “Return to before sending this message.” Opening Rewind checks the saved file state, shows a concise preview with a “view all files” action, and offers two modes:
+In the Web profile, each direct user message gains a compact, icon-only **Rewind** action after its timestamp and native Copy control. The tooltip reads “Return to before sending this message.” Opening Rewind checks the saved file state, shows a concise preview with a “view all files” action, and offers three modes:
 
 | Mode | Code | Conversation |
 | --- | --- | --- |
-| **Restore files and restart** (default) | Restores the project files after automatically backing up their current state. | Creates and opens a Session ending before the selected message, then puts that message's text back in the composer. |
+| **Restore files and restart** (default when files changed) | Restores the project files after automatically backing up their current state. | Creates and opens a Session ending before the selected message, then puts that message's text back in the composer. |
 | **Restore files only** | Restores the project files after automatically backing up their current state. | Leaves the current Session open and unchanged. |
+| **Rewind messages only** (default when no checkpoint or no file changes) | Leaves the project files exactly as they are. | Creates and opens a Session ending before the selected message, then puts that message's text back in the composer. |
 
-The dialog itself is the confirmation: there is no duplicate checkbox. It describes each file as restoring an earlier version, finding a deleted file, removing a later-added file, or restoring permissions/type. If the project files already match the state before the selected message, Turn Rewind performs no action and directs the user to the native **Branch** button for conversation-only branching.
+The dialog itself is the confirmation: there is no duplicate checkbox. It describes each file as restoring an earlier version, finding a deleted file, removing a later-added file, or restoring permissions/type. **Rewind messages only** is always available — including when the checkpoint for that message is missing, was skipped (for example after disabling automatic checkpoints), or the project files already match the saved state — because it never touches the worktree. It is not blocked by other running Agents in the same worktree.
 
 Before mutation, Turn Rewind rechecks the selected files and repository state, then creates an automatic backup. Changes made after preview invalidate the operation. Any running Agent using the same worktree, including the source Session, blocks restoration; idle Sessions do not block. A reviewed HEAD or branch difference does not block restoration: commits, refs, branch, and index remain unchanged, so restored content may appear as ordinary uncommitted changes against the current HEAD. An in-progress Git operation still blocks. If child creation fails after “restore and restart,” Change Ledger automatically restores the pre-operation files from the backup.
 
-DSH Session logs are append-only, so “restart” creates a new Session instead of truncating the original. For the first message, the Host creates a blank Session in the same working directory; for later messages, it forks at the previous completed `turn/end`. A child may reuse an ancestor's prompt checkpoint only while both the selected `user/message` and its exact `turn/start` remain inside every durable `seedLength` fence. Direct child checkpoints take priority and sibling checkpoints never mix. **Branch** creates only a conversation branch and keeps project files unchanged; **Turn Rewind** always restores project files, optionally followed by a new conversation with the selected prompt restored to the composer. The original Session is always retained.
+DSH Session logs are append-only, so “restart” creates a new Session instead of truncating the original. For the first message, the Host creates a blank Session in the same working directory; for later messages, it forks at the previous completed `turn/end`. A child may reuse an ancestor's prompt checkpoint only while both the selected `user/message` and its exact `turn/start` remain inside every durable `seedLength` fence. Direct child checkpoints take priority and sibling checkpoints never mix. **Turn Rewind** always treats the two dimensions independently: the two restore modes change project files (optionally followed by a new conversation), while **Rewind messages only** reuses the same fork lifecycle without touching files. The original Session is always retained.
 
 ## Configuration
 
-Override configuration in the profile patch layer:
+Runtime-tunable options are editable in the DSH web settings page under **Plugins → Turn Rewind** (`turn-rewind` settings namespace). Changes apply live to the next capture, restore, or deletion; they persist in the host's `settings.yaml` and override the profile patch values below. `storageDir` is deliberately not editable there: the storage root must not move while the engine holds locks and journals, so it stays a patch-layer field.
+
+Override the composition base (and `storageDir`) in the profile patch layer:
 
 ```yaml
 - id: turn-rewind
@@ -135,9 +138,19 @@ Override configuration in the profile patch layer:
     maxSnapshotBytes: 536870912
     planTtlMs: 900000
     staleLockMs: 30000
+    turnCheckpointMode: legacy   # off | git-native | legacy; "off" stops creating file checkpoints
+    turnCheckpointTimeoutMs: 5000
+    turnCheckpointMaxNewBytes: 33554432
+    turnCheckpointTrust: fast    # fast | strict
 ```
 
+Setting `turnCheckpointMode: off` (in the patch or in the settings card) stops automatic file checkpoints; every turn records a durable skip instead, and the rewind dialog still offers **Rewind messages only** for those messages.
+
 All size and user-point retention limits fail loudly. Automatic turn checkpoints have a separate per-session retention window and prune only their own oldest checkpoints; user and rescue restore points are never silently pruned. When omitted, `storageDir` resolves to `$DSH_HOME/change-ledger/v1` and falls back to `~/.dsh/change-ledger/v1`; it must not overlap the managed worktree.
+
+## Checkpoint management
+
+The same settings card includes a storage manager backed by the same-origin `/turn-rewind/manage` endpoint. It lists every workspace this storage root has ever tracked — including projects whose directory no longer exists — grouped with checkpoint counts, approximate sizes, and pending-recovery badges. Per checkpoint, per workspace, or globally (**Clear all**), it deletes unprotected restore points and garbage-collects unreferenced blobs. Restore points still referenced by an incomplete recovery journal, a running restore, or an unfinished Git-native publish are retained and reported. Git-native (v2) checkpoints live in the repository's Git object database, so their disk space is reclaimed by normal Git garbage collection; the displayed sizes are logical values.
 
 ## Recovery
 

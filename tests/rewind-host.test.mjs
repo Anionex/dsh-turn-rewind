@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -10,8 +10,11 @@ import {
   ChangeLedgerEngine,
   ChangeLedgerError,
   ChangeLedgerService,
-  TurnCheckpointCoordinator,
+  createManageHttpHandler,
   createRewindHttpHandler,
+  TurnCheckpointCoordinator,
+  TurnRewindSettingsSchema,
+  resolveConfig,
 } from '../lib/index.js'
 
 const execFileAsync = promisify(execFile)
@@ -31,6 +34,7 @@ test('bundle registers its service and waits for the released Web host service',
   assert.deepEqual(injections, [
     ['agents'],
     ['webServer', 'sessions', 'sessionQuery', 'apiProxy', 'agents'],
+    ['settings'],
   ])
   await service.initialize()
 })
@@ -608,7 +612,200 @@ test('persisted multi-level lineage validates every inherited message boundary a
     events: events.map(event => event.type === 'turn/start' ? { ...event, seq: 9 } : event),
   })
   const stale = await request(handler, 'GET', '/turn-rewind?sessionId=leaf&messageSeq=2')
-  assert.equal(stale.body.code, 'PLAN_STALE')
+  assert.equal(stale.status, 200)
+  assert.equal(stale.body.status, 'failed')
+  assert.match(stale.body.error, /PLAN_STALE/)
+})
+
+test('message-only rewind forks without restoring files or requiring a checkpoint', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const checkpoint = await f.engine.createTurnCheckpoint({
+    cwd: f.workspace, sessionId: 'session-web', turn: 2, turnStartSeq: 5,
+  })
+  await writeFile(join(f.workspace, 'code.txt'), 'changed in turn two\n')
+  let forkPayload
+  const handler = handlerFor(f, new Map([
+    ['session-web', liveSession('session-web', f.workspace, twoTurnEvents())],
+  ]), {
+    apiProxy: { sessions: {
+      async create() { throw new Error('later messages must fork') },
+      async fork(requestValue) { forkPayload = requestValue.payload; return okSession('session-child') },
+    } },
+  })
+
+  const applied = await request(handler, 'POST', '/turn-rewind', {
+    mode: 'messages', sessionId: 'session-web', messageSeq: 6,
+  })
+  assert.equal(applied.status, 200)
+  assert.equal(applied.body.status, 'completed')
+  assert.equal(applied.body.sessionId, 'session-child')
+  assert.deepEqual(forkPayload, { sessionId: 'session-web', atSeq: 4 })
+  assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'changed in turn two\n')
+
+  const noCheckpoint = await fixture()
+  t.after(noCheckpoint.cleanup)
+  let blankCreate
+  const blankHandler = handlerFor(noCheckpoint, new Map([
+    ['session-fresh', liveSession('session-fresh', noCheckpoint.workspace, oneTurnEvents())],
+  ]), {
+    apiProxy: { sessions: {
+      async create(requestValue) { blankCreate = requestValue.payload; return okSession('session-blank') },
+      async fork() { throw new Error('first message must not fork a completed turn') },
+    } },
+  })
+  const blank = await request(blankHandler, 'POST', '/turn-rewind', {
+    mode: 'messages', sessionId: 'session-fresh', messageSeq: 2,
+  })
+  assert.equal(blank.status, 200)
+  assert.equal(blank.body.sessionId, 'session-blank')
+  assert.deepEqual(blankCreate, { cwd: noCheckpoint.workspace })
+})
+
+test('message-only rewind is not blocked by other agents sharing the workspace', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  await f.engine.createTurnCheckpoint({
+    cwd: f.workspace, sessionId: 'session-source', turn: 1, turnStartSeq: 1,
+  })
+  await writeFile(join(f.workspace, 'code.txt'), 'changed\n')
+  const sessions = new Map([
+    ['session-source', liveSession('session-source', f.workspace, oneTurnEvents())],
+  ])
+  const sourceAgent = { id: 'session-source', status: 'running', session: sessions.get('session-source') }
+  const handler = handlerFor(f, sessions, {
+    agents: { list: () => [sourceAgent] },
+    apiProxy: { sessions: {
+      async create() { return okSession('session-new') },
+      async fork() { throw new Error('unexpected fork') },
+    } },
+  })
+
+  const applied = await request(handler, 'POST', '/turn-rewind', {
+    mode: 'messages', sessionId: 'session-source', messageSeq: 2,
+  })
+  assert.equal(applied.status, 200)
+  assert.equal(applied.body.sessionId, 'session-new')
+  assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'changed\n')
+
+  const invalid = await request(handler, 'POST', '/turn-rewind', {
+    mode: 'bogus', sessionId: 'session-source', messageSeq: 2,
+  })
+  assert.equal(invalid.body.code, 'INVALID_ARGUMENTS')
+  assert.match(invalid.body.error, /"messages"/)
+})
+
+test('message-only rewind remains available when file-checkpoint discovery cannot open the workspace', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  await rm(f.workspace, { recursive: true, force: true })
+  let forkPayload
+  const handler = handlerFor(f, new Map([
+    ['session-source', liveSession('session-source', f.workspace, twoTurnEvents())],
+  ]), {
+    apiProxy: { sessions: {
+      async create() { throw new Error('later messages must fork') },
+      async fork(requestValue) { forkPayload = requestValue.payload; return okSession('session-child') },
+    } },
+  })
+
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-source&messageSeq=6')
+  assert.equal(preview.status, 200)
+  assert.equal(preview.body.status, 'failed')
+  assert.match(preview.body.error, /WORKSPACE_NOT_FOUND/)
+
+  const applied = await request(handler, 'POST', '/turn-rewind', {
+    mode: 'messages', sessionId: 'session-source', messageSeq: 6,
+  })
+  assert.equal(applied.status, 200)
+  assert.equal(applied.body.sessionId, 'session-child')
+  assert.deepEqual(forkPayload, { sessionId: 'session-source', atSeq: 4 })
+})
+
+test('manage route lists, deletes, and purges workspace storage', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const first = await f.engine.create({ cwd: f.workspace, label: 'keep' })
+  const second = await f.engine.createTurnCheckpoint({
+    cwd: f.workspace, sessionId: 'session-web', turn: 1, turnStartSeq: 1,
+  })
+  await writeFile(join(f.workspace, 'code.txt'), 'changed\n')
+  const handler = createManageHttpHandler(f.engine)
+
+  const overview = await request(handler, 'GET', '/turn-rewind/manage')
+  assert.equal(overview.status, 200)
+  const canonicalWorkspace = await realpath(f.workspace)
+  assert.equal(overview.body.storageDir, (await import('node:path')).join(f.outer, 'state'))
+  assert.equal(overview.body.workspaces.length, 1)
+  assert.equal(overview.body.workspaces[0].workspace, canonicalWorkspace)
+  assert.equal(overview.body.workspaces[0].restorePoints.length, 2)
+  assert.deepEqual(
+    overview.body.workspaces[0].restorePoints.map((point) => point.id).sort(),
+    [first.id, second.id].sort(),
+  )
+  assert.ok(overview.body.totalBytes > 0)
+
+  const deleted = await request(handler, 'POST', '/turn-rewind/manage', {
+    action: 'delete', workspace: canonicalWorkspace, restorePointId: first.id,
+  })
+  assert.equal(deleted.status, 200)
+  assert.equal(deleted.body.deletedRestorePoints, 1)
+  const missing = await request(handler, 'POST', '/turn-rewind/manage', {
+    action: 'delete', workspace: canonicalWorkspace, restorePointId: first.id,
+  })
+  assert.equal(missing.status, 404)
+  assert.equal(missing.body.code, 'RESTORE_POINT_NOT_FOUND')
+
+  const cleared = await request(handler, 'POST', '/turn-rewind/manage', {
+    action: 'clear-workspace', workspace: canonicalWorkspace,
+  })
+  assert.equal(cleared.status, 200)
+  assert.equal(cleared.body.deletedRestorePoints, 1)
+  const emptied = await request(handler, 'GET', '/turn-rewind/manage')
+  assert.equal(emptied.body.workspaces.length, 0)
+
+  const unknown = await request(handler, 'POST', '/turn-rewind/manage', {
+    action: 'bogus',
+  })
+  assert.equal(unknown.body.code, 'INVALID_ARGUMENTS')
+})
+
+test('clear-all purges every workspace and reports partial failures', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  await f.engine.create({ cwd: f.workspace, label: 'first' })
+  const secondWorkspace = join(f.outer, 'second-workspace')
+  await mkdir(secondWorkspace)
+  await git(secondWorkspace, 'init', '-b', 'main')
+  await git(secondWorkspace, 'config', 'user.name', 'Turn Rewind Test')
+  await git(secondWorkspace, 'config', 'user.email', 'turn-rewind@example.invalid')
+  await writeFile(join(secondWorkspace, 'readme.txt'), 'second\n')
+  await git(secondWorkspace, 'add', '--all')
+  await git(secondWorkspace, 'commit', '-m', 'seed')
+  await f.engine.create({ cwd: secondWorkspace, label: 'second' })
+
+  const handler = createManageHttpHandler(f.engine)
+  const overview = await request(handler, 'GET', '/turn-rewind/manage')
+  assert.equal(overview.body.workspaces.length, 2)
+
+  const cleared = await request(handler, 'POST', '/turn-rewind/manage', { action: 'clear-all' })
+  assert.equal(cleared.status, 200)
+  assert.equal(cleared.body.status, 'completed')
+  assert.equal(cleared.body.reports.length, 2)
+  assert.equal(cleared.body.reports.reduce((total, report) => total + report.deletedRestorePoints, 0), 2)
+  const emptied = await request(handler, 'GET', '/turn-rewind/manage')
+  assert.equal(emptied.body.workspaces.length, 0)
+})
+
+test('settings schema mirrors the engine defaults and rejects invalid values', async () => {
+  const defaults = TurnRewindSettingsSchema({})
+  const engineDefaults = resolveConfig({})
+  for (const key of Object.keys(defaults)) {
+    assert.equal(defaults[key], engineDefaults[key], key)
+  }
+  assert.equal(TurnRewindSettingsSchema({ turnCheckpointMode: 'off' }).turnCheckpointMode, 'off')
+  assert.throws(() => TurnRewindSettingsSchema({ turnCheckpointMode: 'bogus' }))
+  assert.throws(() => TurnRewindSettingsSchema({ maxRestorePoints: 0 }))
 })
 
 async function request(handler, method, url, body) {
