@@ -132,6 +132,11 @@ export declare class TurnCheckpointCoordinator {
 }
 /** Register the same-origin preview/apply endpoint consumed by the browser half. */
 export declare function installRewindHttp(ctx: Context, engine: ChangeLedgerEngine, coordinator: TurnCheckpointCoordinator): void;
+export declare const MANAGE_HTTP_PATH = "/turn-rewind/manage";
+/** Register the same-origin storage-management endpoint consumed by the settings card. */
+export declare function installManageHttp(ctx: Context, engine: ChangeLedgerEngine): void;
+/** Build the storage-management route as a testable unit. */
+export declare function createManageHttpHandler(engine: ChangeLedgerEngine): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void>;
 /** Build the exact-route handler as a testable unit. */
 export declare function createRewindHttpHandler(ctx: Pick<Context, 'sessions' | 'sessionQuery' | 'apiProxy'> & {
     readonly agents?: AgentsLike;

@@ -8,6 +8,7 @@ import type { ChangeLedgerConfig } from './types.js';
 export * from './engine.js';
 export * from './errors.js';
 export * from './rewind-host.js';
+export * from './settings.js';
 export * from './types.js';
 declare module '@deepseek-ai/cordis' {
     interface Context {
@@ -39,5 +40,11 @@ export declare class ChangeLedgerService {
     delete(options: Parameters<ChangeLedgerEngine['delete']>[0]): ReturnType<ChangeLedgerEngine['delete']>;
     /** List interrupted restore operations and their rescue points. */
     listRecovery(options: Parameters<ChangeLedgerEngine['listRecovery']>[0]): ReturnType<ChangeLedgerEngine['listRecovery']>;
+    /** Inventory every workspace this storage root has persisted state for. */
+    listWorkspaces(options?: Parameters<ChangeLedgerEngine['listWorkspaces']>[0]): ReturnType<ChangeLedgerEngine['listWorkspaces']>;
+    /** Delete unprotected restore points recorded for one workspace. */
+    purgeWorkspace(options: Parameters<ChangeLedgerEngine['purgeWorkspace']>[0]): ReturnType<ChangeLedgerEngine['purgeWorkspace']>;
+    /** Swap runtime-tunable configuration; the storage root must stay fixed. */
+    updateConfig(config: ChangeLedgerConfig): void;
 }
 export default ChangeLedgerService;

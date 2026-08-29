@@ -18,6 +18,7 @@ test('package is a portable, prebuilt DSH Profile Bundle', async () => {
     inject: [
       '@deepseek-ai/dsh-client-runtime',
       '@deepseek-ai/dsh-client-ui-conversation',
+      '@deepseek-ai/dsh-client-ui-settings-plugins',
     ],
   })
   assert.deepEqual(pkg.dsh?.compatibility, {
@@ -39,6 +40,8 @@ test('package is a portable, prebuilt DSH Profile Bundle', async () => {
   assert.equal(typeof pkg.scripts?.build, 'string')
   assert.equal(typeof pkg.scripts?.prepack, 'string')
   assert.equal(pkg.peerDependencies?.['@deepseek-ai/cordis'], '^4.0.1')
+  assert.equal(pkg.peerDependencies?.['@deepseek-ai/dsh-settings'], '>=0.1.0-rc.8 <0.2.0')
+  assert.equal(pkg.peerDependencies?.['@deepseek-ai/schemastery'], '^3.18.1')
   assert.equal(pkg.peerDependencies?.cordis, undefined)
   assert.match(workspace, /^packages:\n  - \.\n/mu)
   assert.match(workspace, /^nodeLinker: hoisted$/mu)
