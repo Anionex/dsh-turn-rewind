@@ -20,6 +20,11 @@ interface AgentLike {
     readonly status: 'idle' | 'running';
     readonly session: SessionLike;
 }
+interface ToolExecutionLike {
+    readonly agent?: AgentLike;
+    readonly parent?: symbol;
+    readonly signal: AbortSignal;
+}
 interface AgentsLike {
     list(): AgentLike[];
 }
@@ -106,10 +111,11 @@ declare module '@deepseek-ai/cordis' {
             readonly step: number;
             readonly signal: AbortSignal;
         }, next: () => Promise<unknown>): Promise<unknown>;
+        'tools/execute'(exec: ToolExecutionLike, next: () => Promise<unknown>): Promise<unknown>;
     }
 }
 export declare const REWIND_HTTP_PATH = "/turn-rewind";
-/** Capture each turn before its opening user message can trigger model or tool work. */
+/** Capture each turn beside model work and before its first root tool side effect. */
 export declare class TurnCheckpointCoordinator {
     private readonly engine;
     private readonly captures;
@@ -118,7 +124,7 @@ export declare class TurnCheckpointCoordinator {
     private readonly skips;
     private readonly workspaceTails;
     constructor(engine: ChangeLedgerEngine);
-    /** Install the first-step gate; checkpoint failures are recorded but never reject the user turn. */
+    /** Keep sidecar checkpoint work out of the Agent response waterfall. */
     install(ctx: Context): void;
     /** Current capture state for a session turn when no durable checkpoint exists yet. */
     state(sessionId: string, turn: number): {
@@ -126,7 +132,10 @@ export declare class TurnCheckpointCoordinator {
         readonly error?: string;
         readonly reason?: string;
     };
+    private startCapture;
     private capture;
+    /** Wait only for the bounded checkpoint outcome of the Agent's open turn. */
+    private waitForOpenTurn;
     private serializeWorkspace;
     private recordFailure;
 }

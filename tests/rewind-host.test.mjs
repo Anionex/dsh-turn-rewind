@@ -56,25 +56,49 @@ async function git(cwd, ...args) {
   })
 }
 
-test('first-step checkpoint finishes before the user turn continues', async (t) => {
+test('first-step checkpoint stays off the response path but gates the first root tool', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)
   const agent = preStepAgent('session-web', f.workspace, 2, 8)
-  const { coordinator, listener } = installedCoordinator(f.engine)
-  let visibleBeforeNext = false
+  const original = f.engine.createTurnCheckpoint.bind(f.engine)
+  const captureStarted = Promise.withResolvers()
+  const captureRelease = Promise.withResolvers()
+  f.engine.createTurnCheckpoint = async (options) => {
+    captureStarted.resolve()
+    await captureRelease.promise
+    return original(options)
+  }
+  const { coordinator, listener, toolListener } = installedCoordinator(f.engine)
+  let turnContinued = false
 
   const decision = await listener(
     { agent, turn: 2, step: 1, signal: new AbortController().signal },
     async () => {
-      visibleBeforeNext = (await f.engine.findTurnCheckpoint({
-        cwd: f.workspace, sessionId: agent.id, turn: 2,
-      })) !== undefined
-      return { kind: 'enter' }
+      turnContinued = true
+      return { kind: 'enter', messages: [{ role: 'user', content: 'unchanged' }] }
     },
   )
+  await captureStarted.promise
 
-  assert.deepEqual(decision, { kind: 'enter' })
-  assert.equal(visibleBeforeNext, true)
+  assert.deepEqual(decision, { kind: 'enter', messages: [{ role: 'user', content: 'unchanged' }] })
+  assert.equal(turnContinued, true)
+  assert.equal(coordinator.state(agent.id, 2).status, 'pending')
+
+  assert.deepEqual(await toolListener(
+    { agent, parent: Symbol('nested-call'), signal: new AbortController().signal },
+    async () => ({ nested: true }),
+  ), { nested: true })
+
+  let toolContinued = false
+  const tool = toolListener(
+    { agent, signal: new AbortController().signal },
+    async () => { toolContinued = true; return { isError: false } },
+  )
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(toolContinued, false)
+  captureRelease.resolve()
+  assert.deepEqual(await tool, { isError: false })
+  assert.equal(toolContinued, true)
   assert.equal((await f.engine.findTurnCheckpoint({
     cwd: f.workspace, sessionId: agent.id, turn: 2,
   }))?.turnStartSeq, 8)
@@ -105,7 +129,7 @@ test('checkpoint capture serializes one worktree and failure never blocks the tu
     }
   }
   const warnings = []
-  const { coordinator, listener } = installedCoordinator(f.engine, warnings)
+  const { coordinator, listener, toolListener } = installedCoordinator(f.engine, warnings)
   const first = preStepAgent('session-one', f.workspace, 1, 1)
   const second = preStepAgent('session-two', nested, 2, 8)
   const failed = preStepAgent('session-failed', f.workspace, 3, 12)
@@ -119,6 +143,10 @@ test('checkpoint capture serializes one worktree and failure never blocks the tu
     { agent: failed, turn: 3, step: 1, signal: new AbortController().signal },
     async () => { continued += 1; return { kind: 'enter' } },
   )
+  await Promise.all([first, second, failed].map(agent => toolListener(
+    { agent, signal: new AbortController().signal },
+    async () => ({ isError: false }),
+  )))
 
   assert.equal(maxActive, 1)
   assert.equal(failedAttempts, 1)
@@ -135,7 +163,7 @@ test('bounded automatic checkpoint skips are visible and never block the turn', 
     throw new ChangeLedgerError('TURN_CHECKPOINT_TIMEOUT', 'automatic checkpoint exceeded 5 ms')
   }
   const warnings = []
-  const { coordinator, listener } = installedCoordinator(f.engine, warnings)
+  const { coordinator, listener, toolListener } = installedCoordinator(f.engine, warnings)
   const agent = preStepAgent('session-skipped', f.workspace, 4, 20)
   let continued = false
   await listener(
@@ -143,12 +171,16 @@ test('bounded automatic checkpoint skips are visible and never block the turn', 
     async () => { continued = true; return { kind: 'enter' } },
   )
   assert.equal(continued, true)
+  await toolListener(
+    { agent, signal: new AbortController().signal },
+    async () => ({ isError: false }),
+  )
   assert.equal(coordinator.state(agent.id, 4).status, 'skipped')
   assert.match(coordinator.state(agent.id, 4).reason, /TURN_CHECKPOINT_TIMEOUT/)
   assert.equal(warnings.length, 1)
 })
 
-test('the first-step gate waits for a skipped outcome to become durable', async (t) => {
+test('the response continues while the first root tool waits for durable skip recording', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)
   f.engine.createTurnCheckpoint = async () => {
@@ -163,19 +195,26 @@ test('the first-step gate waits for a skipped outcome to become durable', async 
     await persistence
     persisted = true
   }
-  const { listener } = installedCoordinator(f.engine)
+  const { listener, toolListener } = installedCoordinator(f.engine)
   const agent = preStepAgent('session-skip-durable-gate', f.workspace, 4, 20)
   let continued = false
-  const invocation = listener(
+  await listener(
     { agent, turn: 4, step: 1, signal: new AbortController().signal },
     async () => { continued = true; return { kind: 'enter' } },
   )
   while (!persistenceStarted) await new Promise((resolve) => setTimeout(resolve, 1))
-  assert.equal(continued, false)
+  assert.equal(continued, true)
+  let toolContinued = false
+  const invocation = toolListener(
+    { agent, signal: new AbortController().signal },
+    async () => { toolContinued = true; return { isError: false } },
+  )
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(toolContinued, false)
   releasePersistence()
   await invocation
   assert.equal(persisted, true)
-  assert.equal(continued, true)
+  assert.equal(toolContinued, true)
 })
 
 test('the checkpoint deadline covers coordinator discovery and engine metadata reads', async (t) => {
@@ -189,15 +228,19 @@ test('the checkpoint deadline covers coordinator discovery and engine metadata r
   await bounded.initialize()
   bounded.store.listManifests = async () => new Promise(() => {})
   bounded.recordTurnCheckpointSkip = async () => {}
-  const { coordinator, listener } = installedCoordinator(bounded)
+  const { coordinator, listener, toolListener } = installedCoordinator(bounded)
   const agent = preStepAgent('session-coordinator-deadline', f.workspace, 4, 20)
   let continued = false
-  const startedAt = Date.now()
   await listener(
     { agent, turn: 4, step: 1, signal: new AbortController().signal },
     async () => { continued = true; return { kind: 'enter' } },
   )
   assert.equal(continued, true)
+  const startedAt = Date.now()
+  await toolListener(
+    { agent, signal: new AbortController().signal },
+    async () => ({ isError: false }),
+  )
   assert.equal(coordinator.state(agent.id, 4).status, 'skipped')
   assert.ok(Date.now() - startedAt < 600)
   await Promise.all(coordinator.captures.values())
@@ -220,15 +263,19 @@ test('slow durable skip persistence cannot extend the pre-step deadline', async 
     await new Promise((resolve) => setTimeout(resolve, 450))
     persistenceFinished = true
   }
-  const { coordinator, listener } = installedCoordinator(bounded)
+  const { coordinator, listener, toolListener } = installedCoordinator(bounded)
   const agent = preStepAgent('session-slow-outcome', f.workspace, 4, 20)
   let continued = false
-  const startedAt = Date.now()
   await listener(
     { agent, turn: 4, step: 1, signal: new AbortController().signal },
     async () => { continued = true; return { kind: 'enter' } },
   )
   assert.equal(continued, true)
+  const startedAt = Date.now()
+  await toolListener(
+    { agent, signal: new AbortController().signal },
+    async () => ({ isError: false }),
+  )
   assert.equal(coordinator.state(agent.id, 4).status, 'skipped')
   assert.ok(Date.now() - startedAt < 250)
   while (!persistenceFinished) await new Promise((resolve) => setTimeout(resolve, 10))
@@ -693,11 +740,17 @@ function preStepAgent(id, cwd, turn, startSeq) {
 
 function installedCoordinator(engine, warnings = []) {
   let listener
+  let toolListener
   const coordinator = new TurnCheckpointCoordinator(engine)
   coordinator.install({
     logger: { warn(value) { warnings.push(value) } },
-    on(name, value) { if (name === 'agent/pre-step') listener = value; return () => {} },
+    on(name, value) {
+      if (name === 'agent/pre-step') listener = value
+      if (name === 'tools/execute') toolListener = value
+      return () => {}
+    },
   })
   assert.equal(typeof listener, 'function')
-  return { coordinator, listener }
+  assert.equal(typeof toolListener, 'function')
+  return { coordinator, listener, toolListener }
 }
