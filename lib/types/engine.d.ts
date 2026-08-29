@@ -1,14 +1,21 @@
 import { LedgerStore } from './store.js';
-import { type ChangeLedgerConfig, type RecoverySummary, type ResolvedChangeLedgerConfig, type RestorePlan, type RestorePointInspection, type RestorePointManifest, type RestorePointSummary, type RestoreResult } from './types.js';
+import { type ChangeLedgerConfig, type RecoverySummary, type ResolvedChangeLedgerConfig, type RestorePlan, type RestorePointInspection, type RestorePointManifest, type RestorePointSummary, type RestoreResult, type WorkspaceOverview, type WorkspacePurgeReport } from './types.js';
 /** Persistent workspace change-set engine, independent of the DSH tool adapter. */
 export declare class ChangeLedgerEngine {
-    readonly config: ResolvedChangeLedgerConfig;
+    private readonly currentConfig;
     readonly store: LedgerStore;
     private readonly plans;
     private readonly activePlans;
     private readonly ready;
     /** Build an engine and start crash-journal reconciliation. */
     constructor(config?: ChangeLedgerConfig);
+    /** Currently resolved configuration; runtime-tunable fields update in place. */
+    get config(): ResolvedChangeLedgerConfig;
+    /**
+     * Swap runtime-tunable configuration (limits, modes, timeouts, trust) in place.
+     * The storage root must never move once the engine owns locks and journals.
+     */
+    updateConfig(config: ChangeLedgerConfig): void;
     /** Wait for startup reconciliation and return the number of interrupted journals found. */
     initialize(): Promise<number>;
     private initializeStore;
@@ -105,6 +112,18 @@ export declare class ChangeLedgerEngine {
         readonly cwd: string;
         readonly signal?: AbortSignal;
     }): Promise<RecoverySummary[]>;
+    /** Inventory every workspace this storage root has ever persisted state for. */
+    listWorkspaces(options?: {
+        readonly signal?: AbortSignal;
+    }): Promise<WorkspaceOverview[]>;
+    /** Delete unprotected restore points recorded for one workspace and collect unused blobs. */
+    purgeWorkspace(options: {
+        readonly workspace: string;
+        /** Restrict the purge to these restore points; protection rules still apply. */
+        readonly restorePointIds?: readonly string[];
+        readonly signal?: AbortSignal;
+    }): Promise<WorkspacePurgeReport>;
+    private purgeWorkspaceDir;
     private createLocked;
     private restorePaths;
     private assertPathFresh;

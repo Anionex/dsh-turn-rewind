@@ -1901,3 +1901,120 @@ test('default storage follows DSH_HOME', async (t) => {
     else process.env.DSH_HOME = previous
   }
 })
+
+test('updateConfig swaps runtime-tunable values in place and freezes the storage root', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  assert.equal(f.engine.config.turnCheckpointTimeoutMs, 5_000)
+  f.engine.updateConfig({ storageDir: f.storageDir, turnCheckpointTimeoutMs: 250, turnCheckpointMode: 'off' })
+  assert.equal(f.engine.config.turnCheckpointTimeoutMs, 250)
+  assert.equal(f.engine.config.turnCheckpointMode, 'off')
+  assert.equal(f.engine.store.config.turnCheckpointTimeoutMs, 250)
+  assert.throws(
+    () => f.engine.updateConfig({ storageDir: f.storageDir, turnCheckpointTimeoutMs: 0 }),
+    (error) => error instanceof ChangeLedgerError && error.code === 'INVALID_CONFIG',
+  )
+  assert.throws(
+    () => f.engine.updateConfig({ storageDir: join(f.outer, 'elsewhere') }),
+    (error) => error instanceof ChangeLedgerError && error.code === 'INVALID_CONFIG',
+  )
+  assert.equal(f.engine.config.storageDir, f.storageDir)
+  assert.equal(f.engine.config.turnCheckpointTimeoutMs, 250)
+})
+
+test('listWorkspaces groups checkpoints and recovery counts across workspaces', async (t) => {
+  const outer = await mkdtemp(join(tmpdir(), 'dsh-change-ledger-manage-'))
+  t.after(async () => rm(outer, { recursive: true, force: true }))
+  const first = join(outer, 'first')
+  const second = join(outer, 'second')
+  for (const workspace of [first, second]) {
+    await mkdir(workspace)
+    await git(workspace, 'init', '-b', 'main')
+    await git(workspace, 'config', 'user.name', 'Change Ledger Test')
+    await git(workspace, 'config', 'user.email', 'change-ledger@example.invalid')
+    await writeFile(join(workspace, 'file.txt'), `${workspace}\n`)
+    await git(workspace, 'add', '--all')
+    await git(workspace, 'commit', '-m', 'seed')
+  }
+  const engine = new ChangeLedgerEngine({ storageDir: join(outer, 'state') })
+  await engine.initialize()
+  const firstPoint = await engine.create({ cwd: first, label: 'one' })
+  const secondPoint = await engine.create({ cwd: second, label: 'two' })
+  const secondRescue = await engine.create({ cwd: second })
+  await engine.store.writeOperation({
+    version: LEDGER_FORMAT_VERSION,
+    id: `op_${Date.now().toString(36)}_0000aaaa1111`,
+    workspace: secondPoint.workspace,
+    restorePointId: secondPoint.id,
+    rescuePointId: secondRescue.id,
+    paths: ['file.txt'],
+    startedAt: Date.now(),
+    state: 'interrupted',
+  })
+
+  const workspaces = await engine.listWorkspaces()
+  assert.equal(workspaces.length, 2)
+  assert.equal(workspaces[0].workspace, firstPoint.workspace)
+  assert.equal(workspaces[1].workspace, secondPoint.workspace)
+  assert.deepEqual(workspaces[0].restorePoints.map((point) => point.id), [firstPoint.id])
+  assert.deepEqual(workspaces[1].restorePoints.map((point) => point.id), [secondRescue.id, secondPoint.id])
+  assert.equal(workspaces[0].recoveryCount, 0)
+  assert.equal(workspaces[1].recoveryCount, 1)
+  assert.ok(workspaces[0].totalBytes > 0)
+  assert.equal(workspaces[1].totalBytes, secondPoint.totalBytes + secondRescue.totalBytes)
+})
+
+test('purgeWorkspace deletes unprotected points, keeps recovery references, and collects blobs', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const workspace = await realpath(f.workspace)
+  const protectedRestore = await f.engine.create({ cwd: workspace, label: 'protected' })
+  const protectedRescue = await f.engine.create({ cwd: workspace, label: 'rescued' })
+  await writeFile(join(workspace, 'doomed-only.txt'), 'unique content for the doomed point\n')
+  const doomed = await f.engine.create({ cwd: workspace, label: 'doomed' })
+  await f.engine.store.writeOperation({
+    version: LEDGER_FORMAT_VERSION,
+    id: `op_${Date.now().toString(36)}_0000bbbb2222`,
+    workspace,
+    restorePointId: protectedRestore.id,
+    rescuePointId: protectedRescue.id,
+    paths: ['code.txt'],
+    startedAt: Date.now(),
+    state: 'interrupted',
+  })
+
+  const report = await f.engine.purgeWorkspace({ workspace })
+  assert.equal(report.deletedRestorePoints, 1)
+  assert.equal(report.retainedRestorePoints, 2)
+  assert.ok(report.deletedBlobs > 0)
+  const remaining = await f.engine.list({ cwd: workspace })
+  assert.deepEqual(remaining.map((point) => point.id).sort(), [protectedRestore.id, protectedRescue.id].sort())
+
+  const targeted = await f.engine.purgeWorkspace({ workspace, restorePointIds: [protectedRescue.id] })
+  assert.equal(targeted.deletedRestorePoints, 0)
+  assert.equal(targeted.retainedRestorePoints, 1)
+})
+
+test('purgeWorkspace cleans storage for a workspace whose directory no longer exists', async (t) => {
+  const outer = await mkdtemp(join(tmpdir(), 'dsh-change-ledger-orphans-'))
+  t.after(async () => rm(outer, { recursive: true, force: true }))
+  const workspace = join(outer, 'gone')
+  await mkdir(workspace)
+  await git(workspace, 'init', '-b', 'main')
+  await git(workspace, 'config', 'user.name', 'Change Ledger Test')
+  await git(workspace, 'config', 'user.email', 'change-ledger@example.invalid')
+  await writeFile(join(workspace, 'file.txt'), 'content\n')
+  await git(workspace, 'add', '--all')
+  await git(workspace, 'commit', '-m', 'seed')
+  const engine = new ChangeLedgerEngine({ storageDir: join(outer, 'state') })
+  await engine.initialize()
+  const point = await engine.create({ cwd: workspace, label: 'orphaned' })
+  await rm(workspace, { recursive: true, force: true })
+
+  const beforeRestart = await engine.listWorkspaces()
+  assert.equal(beforeRestart.length, 1)
+  const report = await engine.purgeWorkspace({ workspace: point.workspace })
+  assert.equal(report.deletedRestorePoints, 1)
+  assert.ok(report.deletedBlobs > 0)
+  assert.equal((await engine.listWorkspaces()).length, 0)
+})

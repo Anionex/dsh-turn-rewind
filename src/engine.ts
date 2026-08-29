@@ -49,6 +49,8 @@ import {
   type RestoreResult,
   type SnapshotEntry,
   type WorkspaceChange,
+  type WorkspaceOverview,
+  type WorkspacePurgeReport,
 } from './types.js'
 
 const DEFAULTS = {
@@ -67,7 +69,7 @@ const DEFAULTS = {
 
 /** Persistent workspace change-set engine, independent of the DSH tool adapter. */
 export class ChangeLedgerEngine {
-  readonly config: ResolvedChangeLedgerConfig
+  private readonly currentConfig: ResolvedChangeLedgerConfig
   readonly store: LedgerStore
   private readonly plans = new Map<string, RestorePlan>()
   private readonly activePlans = new Set<string>()
@@ -75,9 +77,26 @@ export class ChangeLedgerEngine {
 
   /** Build an engine and start crash-journal reconciliation. */
   constructor(config: ChangeLedgerConfig = {}) {
-    this.config = resolveConfig(config)
-    this.store = new LedgerStore(this.config)
+    this.currentConfig = resolveConfig(config)
+    this.store = new LedgerStore(this.currentConfig)
     this.ready = this.initializeStore()
+  }
+
+  /** Currently resolved configuration; runtime-tunable fields update in place. */
+  get config(): ResolvedChangeLedgerConfig {
+    return this.currentConfig
+  }
+
+  /**
+   * Swap runtime-tunable configuration (limits, modes, timeouts, trust) in place.
+   * The storage root must never move once the engine owns locks and journals.
+   */
+  updateConfig(config: ChangeLedgerConfig): void {
+    const resolved = resolveConfig(config)
+    if (resolved.storageDir !== this.currentConfig.storageDir) {
+      throw new ChangeLedgerError('INVALID_CONFIG', 'storageDir cannot change while the engine is running')
+    }
+    Object.assign(this.currentConfig as WritableResolvedConfig, resolved)
   }
 
   /** Wait for startup reconciliation and return the number of interrupted journals found. */
@@ -743,6 +762,130 @@ export class ChangeLedgerEngine {
     }
   }
 
+  /** Inventory every workspace this storage root has ever persisted state for. */
+  async listWorkspaces(options: { readonly signal?: AbortSignal } = {}): Promise<WorkspaceOverview[]> {
+    await this.ready
+    const groups = new Map<string, { restorePoints: RestorePointSummary[]; recoveryCount: number }>()
+    const groupOf = (workspace: string): { restorePoints: RestorePointSummary[]; recoveryCount: number } => {
+      const existing = groups.get(workspace)
+      if (existing !== undefined) return existing
+      const created = { restorePoints: [], recoveryCount: 0 }
+      groups.set(workspace, created)
+      return created
+    }
+    for (const workspaceDir of await this.store.listWorkspaceDirs(options.signal)) {
+      for (const manifest of await this.store.listManifestsInDir(workspaceDir, options.signal)) {
+        groupOf(manifest.workspace).restorePoints.push(summarize(manifest))
+      }
+      for (const operation of await this.store.listOperationsInDir(workspaceDir, options.signal)) {
+        if (operation.state === 'interrupted' || operation.state === 'recovery-required') {
+          groupOf(operation.workspace).recoveryCount += 1
+        }
+      }
+    }
+    return [...groups.entries()]
+      .map(([workspace, group]) => ({
+        workspace,
+        restorePoints: [...group.restorePoints].sort(
+          (left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id),
+        ),
+        totalBytes: group.restorePoints.reduce((total, point) => total + point.totalBytes, 0),
+        recoveryCount: group.recoveryCount,
+      }))
+      .sort((left, right) => left.workspace.localeCompare(right.workspace))
+  }
+
+  /** Delete unprotected restore points recorded for one workspace and collect unused blobs. */
+  async purgeWorkspace(options: {
+    readonly workspace: string
+    /** Restrict the purge to these restore points; protection rules still apply. */
+    readonly restorePointIds?: readonly string[]
+    readonly signal?: AbortSignal
+  }): Promise<WorkspacePurgeReport> {
+    await this.ready
+    const restorePointIds = options.restorePointIds === undefined ? undefined : new Set(options.restorePointIds)
+    const targetDirs = new Set<string>()
+    for (const workspaceDir of await this.store.listWorkspaceDirs(options.signal)) {
+      for (const manifest of await this.store.listManifestsInDir(workspaceDir, options.signal)) {
+        if (manifest.workspace === options.workspace
+          && (restorePointIds === undefined || restorePointIds.has(manifest.id))) {
+          targetDirs.add(workspaceDir)
+        }
+      }
+      for (const operation of await this.store.listOperationsInDir(workspaceDir, options.signal)) {
+        if (operation.workspace === options.workspace) targetDirs.add(workspaceDir)
+      }
+    }
+    let deletedRestorePoints = 0
+    let retainedRestorePoints = 0
+    let deletedBlobs = 0
+    let retainedBlobs = 0
+    for (const workspaceDir of targetDirs) {
+      const result = await this.purgeWorkspaceDir(workspaceDir, options.workspace, restorePointIds, options.signal)
+      deletedRestorePoints += result.deletedRestorePoints
+      retainedRestorePoints += result.retainedRestorePoints
+      deletedBlobs += result.deletedBlobs
+      retainedBlobs += result.retainedBlobs
+    }
+    return { workspace: options.workspace, deletedRestorePoints, retainedRestorePoints, deletedBlobs, retainedBlobs }
+  }
+
+  private async purgeWorkspaceDir(
+    workspaceDir: string,
+    workspace: string,
+    restorePointIds: ReadonlySet<string> | undefined,
+    signal?: AbortSignal,
+  ): Promise<{ deletedRestorePoints: number; retainedRestorePoints: number; deletedBlobs: number; retainedBlobs: number }> {
+    const manifests = (await this.store.listManifestsInDir(workspaceDir, signal))
+      .filter((manifest) => manifest.workspace === workspace
+        && (restorePointIds === undefined || restorePointIds.has(manifest.id)))
+    const protectedIds = new Set<string>()
+    for (const operation of await this.store.listOperationsInDir(workspaceDir, signal)) {
+      if (operation.state === 'running' || operation.state === 'rollback-running'
+        || operation.state === 'interrupted' || operation.state === 'recovery-required') {
+        protectedIds.add(operation.restorePointId)
+        protectedIds.add(operation.rescuePointId)
+      }
+    }
+    for (const journal of await this.store.listGitCheckpointJournalsInDir(workspaceDir, signal)) {
+      protectedIds.add(journal.restorePointId)
+    }
+    // Full cleanup needs the recorded workspace to still host its repository, so a
+    // live one keeps Git-native refs and journals consistent; a missing or replaced
+    // workspace falls back to storage-level cleanup because its Git objects are gone.
+    let release: (() => Promise<void>) | undefined
+    try {
+      const root = await discoverRepositoryRoot(workspace, signal)
+      if (root === workspace) {
+        await this.assertStorageSeparated(root)
+        release = await this.acquireWorkspace(root, signal)
+      }
+    } catch {
+      release = undefined
+    }
+    let deletedRestorePoints = 0
+    let retainedRestorePoints = 0
+    try {
+      for (const manifest of manifests) {
+        if (protectedIds.has(manifest.id)) {
+          retainedRestorePoints += 1
+          continue
+        }
+        if (release !== undefined) {
+          await this.deleteManifestWithGit(manifest, signal)
+        } else {
+          await this.store.deleteManifestInDir(workspaceDir, manifest.id)
+        }
+        deletedRestorePoints += 1
+      }
+      await this.store.clearTurnOutcomesInDir(workspaceDir)
+      const gc = await this.store.collectGarbageInDir(workspaceDir, signal)
+      return { deletedRestorePoints, retainedRestorePoints, ...gc }
+    } finally {
+      if (release !== undefined) await release()
+    }
+  }
+
   private async createLocked(options: {
     readonly cwd: string
     readonly kind: RestorePointKind
@@ -942,6 +1085,9 @@ export class ChangeLedgerEngine {
     }
   }
 }
+
+/** Mutable view used only by `updateConfig` to swap fields on the shared resolved object. */
+type WritableResolvedConfig = { -readonly [K in keyof ResolvedChangeLedgerConfig]: ResolvedChangeLedgerConfig[K] }
 
 /** Resolve and validate every deployment-varying configuration value. */
 export function resolveConfig(config: ChangeLedgerConfig): ResolvedChangeLedgerConfig {

@@ -46,12 +46,20 @@ export declare class LedgerStore {
     readManifest(workspace: string, id: string): Promise<RestorePointManifest>;
     /** List all validated restore points for one workspace, newest first. */
     listManifests(workspace: string, signal?: AbortSignal): Promise<RestorePointManifest[]>;
+    /** List validated manifests directly from one storage directory, newest first. */
+    listManifestsInDir(workspaceDir: string, signal?: AbortSignal): Promise<RestorePointManifest[]>;
     /** Delete one restore-point manifest. Blobs remain until garbage collection succeeds. */
     deleteManifest(workspace: string, id: string): Promise<void>;
+    /** Delete one restore-point manifest directly from its storage directory. */
+    deleteManifestInDir(workspaceDir: string, id: string): Promise<void>;
     /** Persist the intent needed to finish or roll back a Git ref/manifest transition after a crash. */
     writeGitCheckpointJournal(action: GitCheckpointJournal['action'], manifest: RestorePointManifestV2): Promise<void>;
+    /** List every persisted workspace directory under this storage root. */
+    listWorkspaceDirs(signal?: AbortSignal): Promise<string[]>;
     /** List every pending Git checkpoint transition across this storage root. */
     listGitCheckpointJournals(): Promise<GitCheckpointJournal[]>;
+    /** List pending Git checkpoint transitions directly from one storage directory. */
+    listGitCheckpointJournalsInDir(workspaceDir: string, signal?: AbortSignal): Promise<GitCheckpointJournal[]>;
     /** Remove one completed Git checkpoint transition journal. */
     deleteGitCheckpointJournal(workspace: string, id: string): Promise<void>;
     /** Persist one explicit automatic-checkpoint skip so the UI survives restarts. */
@@ -68,6 +76,8 @@ export declare class LedgerStore {
     writeOperation(operation: RestoreOperation): Promise<void>;
     /** List validated restore operations for one workspace. */
     listOperations(workspace: string): Promise<RestoreOperation[]>;
+    /** List validated restore operations directly from one storage directory. */
+    listOperationsInDir(workspaceDir: string, signal?: AbortSignal): Promise<RestoreOperation[]>;
     /** Return whether an incomplete operation still references a restore point. */
     isReferencedByRecovery(workspace: string, restorePointId: string): Promise<boolean>;
     /** Delete blobs not referenced by any remaining manifest. */
@@ -75,6 +85,14 @@ export declare class LedgerStore {
         deletedBlobs: number;
         retainedBlobs: number;
     }>;
+    /** Delete blobs under one storage directory that no manifest in it references. */
+    collectGarbageInDir(workspaceDir: string, signal?: AbortSignal): Promise<{
+        deletedBlobs: number;
+        retainedBlobs: number;
+    }>;
+    /** Remove every persisted automatic-checkpoint skip marker under one storage directory. */
+    clearTurnOutcomesInDir(workspaceDir: string): Promise<number>;
+    private sweepBlobs;
     /** Finish a prior bounded legacy capture's orphan cleanup, if one is pending. */
     reconcileSnapshotCleanup(workspace: string, signal?: AbortSignal): Promise<boolean>;
     private workspaceDir;
