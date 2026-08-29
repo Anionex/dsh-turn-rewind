@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Button,
@@ -53,16 +53,16 @@ interface RewindPortalTarget {
 
 interface SlotsLike {
   inject(name: string, install: () => unknown): void
-  register(
+  register<I, P>(
     entry: {
       readonly name: string
-      readonly id: string
-      readonly order: number
-      readonly inject: () => {
-        readonly openRestoredSession: (sessionId: string, promptText: string) => Promise<void>
-      }
+      readonly id?: string
+      readonly key?: string
+      readonly order?: number
+      readonly locale?: string
+      readonly inject?: () => I
     },
-    component: (props: RewindPortalBridgeProps) => ReactNode,
+    component: (props: P) => ReactNode,
   ): () => void
 }
 
@@ -77,10 +77,13 @@ interface ClientContextLike {
       for(scope: unknown): { setDraft(text: string): void }
     }
   }
+  readonly settingsScope?: {
+    bind<T>(spec: { readonly namespace: string }): SettingsScopeLike<T>
+  }
   effect(setup: () => (() => void), label?: string): unknown
 }
 
-type RewindMode = 'both' | 'code'
+type RewindMode = 'both' | 'code' | 'messages'
 type ChangeKind = 'added' | 'deleted' | 'modified' | 'mode-changed' | 'type-changed'
 
 interface ReadyPreview {
@@ -114,7 +117,69 @@ type Preview = ReadyPreview
   | { readonly status: 'skipped'; readonly reason: string }
   | { readonly status: 'failed'; readonly error: string }
 
+/** Runtime-tunable Turn Rewind settings mirrored from the `turn-rewind` namespace. */
+export interface TurnRewindSettingsValue {
+  readonly maxRestorePoints: number
+  readonly maxTurnCheckpointsPerSession: number
+  readonly maxFiles: number
+  readonly maxFileBytes: number
+  readonly maxSnapshotBytes: number
+  readonly planTtlMs: number
+  readonly staleLockMs: number
+  readonly turnCheckpointMode: 'off' | 'git-native' | 'legacy'
+  readonly turnCheckpointTimeoutMs: number
+  readonly turnCheckpointMaxNewBytes: number
+  readonly turnCheckpointTrust: 'fast' | 'strict'
+}
+
+/** Browser mirror of one settings namespace, as bound by `ctx.settingsScope`. */
+export interface SettingsScopeLike<T> {
+  getSnapshot(): SettingsScopeSnapshotLike<T>
+  subscribe(listener: () => void): () => void
+  set(field: string, value: unknown): Promise<void>
+  unset(field: string): Promise<void>
+}
+
+/** Sync snapshot shape shared by every settings scope. */
+export interface SettingsScopeSnapshotLike<T> {
+  readonly status: 'loading' | 'ready' | 'unavailable'
+  readonly value: T | undefined
+  readonly base: unknown
+  readonly user: unknown
+  readonly revision: number | undefined
+  readonly writable: boolean
+  readonly mode: 'host' | 'memory'
+}
+
+/** One checkpoint row in the storage-management overview. */
+export interface ManageRestorePoint {
+  readonly id: string
+  readonly kind: string
+  readonly format: number
+  readonly createdAt: number
+  readonly totalBytes: number
+  readonly fileCount: number
+  readonly sessionId?: string
+  readonly label?: string
+}
+
+/** One workspace group in the storage-management overview. */
+export interface ManageWorkspace {
+  readonly workspace: string
+  readonly totalBytes: number
+  readonly recoveryCount: number
+  readonly restorePoints: readonly ManageRestorePoint[]
+}
+
+/** Storage-management overview served by `/turn-rewind/manage`. */
+export interface ManageOverview {
+  readonly storageDir: string
+  readonly totalBytes: number
+  readonly workspaces: readonly ManageWorkspace[]
+}
+
 const PATH = '/turn-rewind'
+const MANAGE_PATH = '/turn-rewind/manage'
 const STYLE_ID = '@anionex/dsh-turn-rewind'
 const styles = `
 .dcl-rewind-tail{display:inline-flex;align-items:center;align-self:center;order:0;height:24px;margin-left:2px}
@@ -143,6 +208,34 @@ const styles = `
 .dcl-rewind-error{border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 30%,transparent);color:var(--dsw-alias-state-error-primary)}
 .dcl-rewind-backup{box-sizing:border-box;margin:0;padding:10px 12px;border-radius:10px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 .dcl-rewind-retry{align-self:flex-start}
+.dcl-trs-card{display:flex;flex-direction:column;gap:16px;width:100%;min-width:0}
+.dcl-trs-section{display:flex;flex-direction:column;gap:10px;min-width:0}
+.dcl-trs-section-title{display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0}
+.dcl-trs-section-title strong{color:var(--dsw-alias-label-primary);font-size:14px}
+.dcl-trs-section-title-actions{display:inline-flex;align-items:center;gap:8px}
+.dcl-trs-field{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:8px 0;border-bottom:1px solid var(--dsw-alias-border-l1);font-size:13px}
+.dcl-trs-field:last-child{border-bottom:0}
+.dcl-trs-field-label{flex:1 1 200px;min-width:0}
+.dcl-trs-field-label strong{display:block;color:var(--dsw-alias-label-primary);font-size:13px;font-weight:600}
+.dcl-trs-field-desc{display:block;margin-top:2px;color:var(--dsw-alias-label-tertiary);font-size:12px}
+.dcl-trs-field-control{display:inline-flex;align-items:center;gap:8px;flex:none}
+.dcl-trs-field-control input,.dcl-trs-field-control select{box-sizing:border-box;min-width:140px;padding:4px 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-size:13px}
+.dcl-trs-field-control input:disabled,.dcl-trs-field-control select:disabled{opacity:.52;cursor:not-allowed}
+.dcl-trs-override{flex:none;padding:1px 8px;border-radius:999px;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-bg-layer-0);font-size:11px;line-height:18px}
+.dcl-trs-manage-total{margin:0;color:var(--dsw-alias-label-secondary);font-size:12px;overflow-wrap:anywhere}
+.dcl-trs-workspace{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-1)}
+.dcl-trs-workspace-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;min-width:0}
+.dcl-trs-workspace-path{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary);font-size:12px}
+.dcl-trs-workspace-meta{flex:none;color:var(--dsw-alias-label-tertiary);font-size:12px}
+.dcl-trs-badge{flex:none;padding:1px 8px;border-radius:999px;background:var(--dsw-alias-state-warn-tertiary);color:var(--dsw-alias-state-warn-primary);font-size:11px;line-height:18px}
+.dcl-trs-points{display:flex;flex-direction:column;gap:4px;min-width:0;margin:0;padding:0;list-style:none}
+.dcl-trs-point{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;padding:6px 8px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;font-size:12px}
+.dcl-trs-point time{flex:1 1 140px;min-width:0;color:var(--dsw-alias-label-secondary)}
+.dcl-trs-point-kind,.dcl-trs-point-size,.dcl-trs-point-files{flex:none;color:var(--dsw-alias-label-tertiary)}
+.dcl-trs-point code{flex:1 1 140px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary)}
+.dcl-trs-status{margin:0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px}
+.dcl-trs-error{box-sizing:border-box;max-width:100%;margin:0;padding:10px 12px;overflow-wrap:anywhere;word-break:break-word;border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 30%,transparent);border-radius:10px;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px}
+.dcl-trs-storage{margin:0;padding:8px 10px;border-radius:8px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-tertiary);font-size:12px;overflow-wrap:anywhere}
 `
 
 /** Return the rewind anchor and editable text owned by one direct user message. */
@@ -177,6 +270,13 @@ export function apply(ctx: ClientContextLike): void {
       },
     }),
   }, RewindMessagePortals))
+  ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
+    name: 'settings.plugin.item',
+    key: 'turn-rewind',
+    inject: () => ({
+      scope: ctx.settingsScope?.bind<TurnRewindSettingsValue>({ namespace: 'turn-rewind' }),
+    }),
+  }, TurnRewindSettingsCard))
 }
 
 /** Session-scoped bridge that portals rewind controls into direct user-message action rows. */
@@ -229,6 +329,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
   const [completed, setCompleted] = useState<string | null>(null)
   const loadAbort = useRef<AbortController | null>(null)
   const applyPending = useRef(false)
+  const modeTouched = useRef(false)
 
   useEffect(() => () => {
     loadAbort.current?.abort()
@@ -247,8 +348,13 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
       const response = await fetch(`${PATH}?sessionId=${encodeURIComponent(sessionId)}&messageSeq=${String(matched.messageSeq)}`, {
         method: 'GET', headers: { accept: 'application/json' }, cache: 'no-store', signal: controller.signal,
       })
-      const value = await responseJson(response)
-      if (loadAbort.current === controller) setPreview(decodePreview(value))
+      const decoded = decodePreview(await responseJson(response))
+      if (loadAbort.current === controller) {
+        setPreview(decoded)
+        if (!modeTouched.current) {
+          setMode(decoded.status === 'ready' && decoded.totalChanges > 0 ? 'both' : 'messages')
+        }
+      }
     } catch (caught) {
       if (!controller.signal.aborted) setError(messageOf(caught))
     } finally {
@@ -263,6 +369,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
     setOpen(true)
     setPreview(null)
     setMode('both')
+    modeTouched.current = false
     setStale(false)
     void load()
   }
@@ -275,6 +382,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
   }
   const chooseMode = (next: RewindMode): void => {
     if (applying) return
+    modeTouched.current = true
     setMode(next)
     setError(null)
     setCompleted(null)
@@ -285,16 +393,14 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
   const sharedBlocked = (ready?.activeSessionIds.length ?? 0) > 0
   const planMissing = hasFileChanges && ready !== null && !sharedBlocked && !driftBlocked
     && (ready.planId === undefined || ready.confirmation === undefined)
-  const canApply = ready !== null
+  const canApply = preview !== null
     && !loading
     && !applying
     && !loadingDetails
     && completed === null
-    && hasFileChanges
-    && !driftBlocked
-    && !sharedBlocked
-    && !planMissing
-    && !stale
+    && (mode === 'messages'
+      ? true
+      : ready !== null && hasFileChanges && !driftBlocked && !sharedBlocked && !planMissing && !stale)
 
   const loadAllChanges = async (): Promise<void> => {
     if (ready === null || loadingDetails || !ready.truncated) return
@@ -329,16 +435,18 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
   }
 
   const applyRestore = async (): Promise<void> => {
-    if (ready === null || !canApply || applyPending.current) return
+    if (preview === null || !canApply || applyPending.current) return
     const body: Record<string, unknown> = {
       mode,
       sessionId,
-      messageSeq: ready.messageSeq,
-      checkpointId: ready.checkpointId,
+      messageSeq: matched.messageSeq,
     }
-    if (ready.planId === undefined || ready.confirmation === undefined) return
-    body.planId = ready.planId
-    body.confirmation = ready.confirmation
+    if (mode !== 'messages') {
+      if (ready === null || ready.planId === undefined || ready.confirmation === undefined) return
+      body.checkpointId = ready.checkpointId
+      body.planId = ready.planId
+      body.confirmation = ready.confirmation
+    }
     applyPending.current = true
     setApplying(true)
     setError(null)
@@ -351,6 +459,17 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
       const result = recordOf(await responseJson(response))
       const resultMode = requiredString(result.mode, 'mode')
       if (resultMode !== mode) throw new Error(`服务器返回了不匹配的回退模式：${resultMode}`)
+      if (mode === 'messages') {
+        const childSessionId = requiredString(result.sessionId, 'sessionId')
+        setCompleted('已创建从这里开始的新对话；项目文件保持不变。')
+        try {
+          await openRestoredSession(childSessionId, matched.promptText)
+          setOpen(false)
+        } catch (navigationError) {
+          setError(`新对话已创建，但没能自动打开：${messageOf(navigationError)}`)
+        }
+        return
+      }
       if (mode === 'code') {
         requiredString(result.rescuePointId, 'rescuePointId')
         setCompleted('项目文件已恢复；当前对话保持不变。恢复前的文件已自动备份。')
@@ -376,7 +495,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
     }
   }
 
-  const actionLabel = mode === 'both' ? '恢复并从这里继续' : '恢复文件'
+  const actionLabel = mode === 'both' ? '恢复并从这里继续' : mode === 'code' ? '恢复文件' : '只回溯消息'
   const radioName = `dcl-rewind-${sessionId}-${String(matched.messageSeq)}`
   const branchChanged = ready !== null && ready.checkpointBranch !== ready.currentBranch
 
@@ -407,24 +526,32 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
         <div className="dcl-rewind-body">
           {loading && <p className="dcl-rewind-status">正在检查可以恢复的项目文件…</p>}
           {preview?.status === 'pending' && <p className="dcl-rewind-status">这条消息发送前的文件还在保存，请稍后再试。</p>}
-          {preview?.status === 'missing' && <p className="dcl-rewind-error">没有保存这条消息发送前的文件。可能是当时还没启用回退功能，或记录已超过保留期限。</p>}
-          {preview?.status === 'skipped' && <p className="dcl-rewind-status">为避免阻塞消息发送，本轮没有自动保存文件：{preview.reason}</p>}
-          {preview?.status === 'failed' && <p className="dcl-rewind-error">没能保存这条消息发送前的文件：{preview.error}</p>}
+          {preview?.status === 'missing' && <p className="dcl-rewind-error">没有保存这条消息发送前的文件。可能是当时还没启用回退功能、记录已超过保留期限，或已关闭自动检查点。仍可只回溯消息。</p>}
+          {preview?.status === 'skipped' && <p className="dcl-rewind-status">为避免阻塞消息发送，本轮没有自动保存文件：{preview.reason}仍可只回溯消息。</p>}
+          {preview?.status === 'failed' && <p className="dcl-rewind-error">没能保存这条消息发送前的文件：{preview.error}仍可只回溯消息。</p>}
+          {preview !== null && (
+            <div className="dcl-rewind-options">
+              <label className="dcl-rewind-option" data-selected={mode === 'both'} data-disabled={applying || !hasFileChanges}>
+                <input type="radio" name={radioName} checked={mode === 'both'} disabled={applying || !hasFileChanges} onChange={() => { chooseMode('both') }} />
+                <span className="dcl-rewind-option-content"><strong>恢复文件并从这里继续</strong><span className="dcl-rewind-option-description">创建一个从这里开始的新会话（当前对话会保留）</span></span>
+              </label>
+              <label className="dcl-rewind-option" data-selected={mode === 'code'} data-disabled={applying || !hasFileChanges}>
+                <input type="radio" name={radioName} checked={mode === 'code'} disabled={applying || !hasFileChanges} onChange={() => { chooseMode('code') }} />
+                <span className="dcl-rewind-option-content"><strong>只恢复文件</strong><span className="dcl-rewind-option-description">恢复这条消息发送前的文件，当前对话保持不变。</span></span>
+              </label>
+              <label className="dcl-rewind-option" data-selected={mode === 'messages'} data-disabled={applying}>
+                <input type="radio" name={radioName} checked={mode === 'messages'} disabled={applying} onChange={() => { chooseMode('messages') }} />
+                <span className="dcl-rewind-option-content"><strong>只回溯消息（不动文件）</strong><span className="dcl-rewind-option-description">创建一个从这里开始的新会话，项目文件保持当前状态。</span></span>
+              </label>
+            </div>
+          )}
           {ready !== null && (
             <>
-              <div className="dcl-rewind-options">
-                <label className="dcl-rewind-option" data-selected={mode === 'both'} data-disabled={applying}>
-                  <input type="radio" name={radioName} checked={mode === 'both'} disabled={applying} onChange={() => { chooseMode('both') }} />
-                  <span className="dcl-rewind-option-content"><strong>恢复文件并从这里继续</strong><span className="dcl-rewind-option-description">创建一个从这里开始的新会话（当前对话会保留）</span></span>
-                </label>
-                <label className="dcl-rewind-option" data-selected={mode === 'code'} data-disabled={applying}>
-                  <input type="radio" name={radioName} checked={mode === 'code'} disabled={applying} onChange={() => { chooseMode('code') }} />
-                  <span className="dcl-rewind-option-content"><strong>只恢复文件</strong><span className="dcl-rewind-option-description">恢复这条消息发送前的文件，当前对话保持不变。</span></span>
-                </label>
-              </div>
               <div className="dcl-rewind-summary">
-                <strong>将恢复 {String(ready.totalChanges)} 个文件</strong>
-                <span>{mode === 'both' ? '恢复后在新对话里继续' : '当前对话保持不变'}</span>
+                {mode === 'messages'
+                  ? <strong>项目文件保持不变</strong>
+                  : <strong>将恢复 {String(ready.totalChanges)} 个文件</strong>}
+                <span>{mode === 'both' ? '恢复后在新对话里继续' : mode === 'code' ? '当前对话保持不变' : '仅创建从这里继续的新对话'}</span>
               </div>
               {sharedBlocked && (
                 <p className="dcl-rewind-error">这个项目目录还有别的对话正在运行。恢复文件会影响到它们，因此本次操作已被阻止。请等那些对话结束或停止后，再重新检查。</p>
@@ -437,7 +564,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
               {driftBlocked && <p className="dcl-rewind-warning">Git 正在进行合并、变基或类似操作。请先完成或取消这次 Git 操作，再重新检查。</p>}
               {planMissing && <p className="dcl-rewind-error">恢复信息已经失效，请重新检查。</p>}
               {stale && <p className="dcl-rewind-error">项目文件在检查后又发生了变化。为避免覆盖新修改，这次恢复已失效，请重新检查。</p>}
-              {ready.totalChanges === 0 && <p className="dcl-rewind-status">项目文件已经是这条消息发送前的状态，无需恢复。想重新开始时，可以使用“分支新对话”。</p>}
+              {ready.totalChanges === 0 && <p className="dcl-rewind-status">项目文件已经是这条消息发送前的状态，无需恢复文件。可选择「只回溯消息」重新开始这段对话。</p>}
               {ready.changes.length > 0 && (
                 <div className="dcl-rewind-files">
                   {ready.changes.map(change => <div className="dcl-rewind-file" key={change.path}><code>{change.path}</code><span className="dcl-rewind-kind">{fileRecoveryLabel(change.kind)}</span></div>)}
@@ -456,6 +583,330 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
       </Modal>
     </div>
   )
+}
+
+interface TurnRewindSettingsCardProps {
+  readonly scope: SettingsScopeLike<TurnRewindSettingsValue> | undefined
+}
+
+const EMPTY_SETTINGS_SNAPSHOT: SettingsScopeSnapshotLike<TurnRewindSettingsValue> = {
+  status: 'unavailable', value: undefined, base: undefined, user: undefined, revision: undefined, writable: false, mode: 'host',
+}
+
+type NumberSettingsField = keyof Pick<TurnRewindSettingsValue,
+  'maxRestorePoints' | 'maxTurnCheckpointsPerSession' | 'maxFiles' | 'maxFileBytes' | 'maxSnapshotBytes'
+  | 'planTtlMs' | 'staleLockMs' | 'turnCheckpointTimeoutMs' | 'turnCheckpointMaxNewBytes'>
+
+const NUMBER_FIELDS: readonly { readonly key: NumberSettingsField; readonly label: string; readonly description: string }[] = [
+  { key: 'maxRestorePoints', label: '用户/救援恢复点上限', description: '每个工作区保留的最大手动与救援恢复点数量' },
+  { key: 'maxTurnCheckpointsPerSession', label: '轮次检查点上限', description: '每个会话保留的最大自动轮次检查点数量（最旧的先清理）' },
+  { key: 'maxFiles', label: '单恢复点文件数上限', description: '一个恢复点最多纳入的文件数量' },
+  { key: 'maxFileBytes', label: '单文件大小上限', description: '读取单个普通文件的最大字节数' },
+  { key: 'maxSnapshotBytes', label: '快照总量上限', description: '单个恢复点读取的最大字节总量' },
+  { key: 'planTtlMs', label: '恢复计划有效期（毫秒）', description: '回溯计划从创建到失效的时间' },
+  { key: 'staleLockMs', label: '锁回收时长（毫秒）', description: '锁属主消失多久后允许回收该锁' },
+  { key: 'turnCheckpointTimeoutMs', label: '检查点超时（毫秒）', description: '单次自动检查点最多阻塞消息发送的时间，超时记录跳过' },
+  { key: 'turnCheckpointMaxNewBytes', label: '检查点读取上限', description: '单次 Git 原生检查点最多读取的未缓存字节数' },
+]
+
+const CHECKPOINT_MODE_LABELS: Readonly<Record<TurnRewindSettingsValue['turnCheckpointMode'], string>> = {
+  off: '关闭（不创建文件检查点）',
+  'git-native': 'Git 原生（推荐大仓库）',
+  legacy: '完整快照（兼容模式）',
+}
+
+const TRUST_LABELS: Readonly<Record<TurnRewindSettingsValue['turnCheckpointTrust'], string>> = {
+  fast: '快速',
+  strict: '严格',
+}
+
+const POINT_KIND_LABELS: Readonly<Record<string, string>> = {
+  user: '手动',
+  rescue: '救援',
+  turn: '轮次',
+}
+
+/** Settings card for the `turn-rewind` namespace: runtime options plus checkpoint management. */
+export function TurnRewindSettingsCard({ scope }: TurnRewindSettingsCardProps): ReactNode {
+  const snapshot = useSyncExternalStore(
+    useCallback((notify: () => void) => scope?.subscribe(notify) ?? (() => {}), [scope]),
+    useCallback(() => scope?.getSnapshot() ?? EMPTY_SETTINGS_SNAPSHOT, [scope]),
+  )
+  const [manage, setManage] = useState<ManageOverview | null>(null)
+  const [manageLoading, setManageLoading] = useState(false)
+  const [manageError, setManageError] = useState<string | null>(null)
+  const [formError, setFormError] = useState<string | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [drafts, setDrafts] = useState<Partial<Record<NumberSettingsField, string>>>({})
+  const [confirmClearAll, setConfirmClearAll] = useState(false)
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set())
+
+  const refreshManage = useCallback(async (): Promise<void> => {
+    setManageLoading(true)
+    setManageError(null)
+    try {
+      const response = await fetch(MANAGE_PATH, { method: 'GET', headers: { accept: 'application/json' }, cache: 'no-store' })
+      setManage(decodeManageOverview(await responseJson(response)))
+    } catch (caught) {
+      setManageError(messageOf(caught))
+    } finally {
+      setManageLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { void refreshManage() }, [refreshManage])
+
+  const userLayer = snapshot.user !== null && typeof snapshot.user === 'object' ? snapshot.user as Record<string, unknown> : {}
+  const value = snapshot.value
+  const writable = snapshot.writable && snapshot.status === 'ready'
+
+  const commitEnum = (field: string, next: string): void => {
+    if (scope === undefined || !writable) return
+    setFormError(null)
+    void scope.set(field, next).catch((caught: unknown) => { setFormError(messageOf(caught)) })
+  }
+
+  const commitNumber = (field: NumberSettingsField): void => {
+    if (scope === undefined || !writable) return
+    const draft = drafts[field]
+    if (draft === undefined) return
+    setDrafts((current) => { const next = { ...current }; delete next[field]; return next })
+    if (draft.trim() === '') {
+      void scope.unset(field).catch((caught: unknown) => { setFormError(messageOf(caught)) })
+      return
+    }
+    const parsed = Number.parseInt(draft, 10)
+    if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+      setFormError(`${field} 必须是正整数。`)
+      return
+    }
+    if (parsed === value?.[field]) return
+    setFormError(null)
+    void scope.set(field, parsed).catch((caught: unknown) => { setFormError(messageOf(caught)) })
+  }
+
+  const runManageAction = async (body: Record<string, unknown>, key: string): Promise<void> => {
+    if (busy !== null) return
+    setBusy(key)
+    setManageError(null)
+    setConfirmClearAll(false)
+    try {
+      await responseJson(await fetch(MANAGE_PATH, {
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }))
+      await refreshManage()
+    } catch (caught) {
+      setManageError(messageOf(caught))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const toggleWorkspace = (workspace: string): void => {
+    setCollapsed((current) => {
+      const next = new Set(current)
+      if (next.has(workspace)) next.delete(workspace)
+      else next.add(workspace)
+      return next
+    })
+  }
+
+  return (
+    <div className="dcl-trs-card">
+      <section className="dcl-trs-section">
+        <div className="dcl-trs-section-title">
+          <strong>Turn Rewind 回退设置</strong>
+        </div>
+        {snapshot.status === 'loading' && <p className="dcl-trs-status">正在加载设置…</p>}
+        {snapshot.status === 'unavailable' && <p className="dcl-trs-status">当前部署未提供设置服务，以下选项不可用。</p>}
+        {snapshot.status === 'ready' && !snapshot.writable && <p className="dcl-trs-status">设置为只读（当前浏览器进程内保存），修改不可用。</p>}
+        {value !== undefined && (
+          <>
+            <div className="dcl-trs-field">
+              <span className="dcl-trs-field-label"><strong>自动文件检查点</strong>
+                <span className="dcl-trs-field-desc">关闭后不再为每条消息保存文件检查点；回退弹窗仍可只回溯消息</span></span>
+              <span className="dcl-trs-field-control">
+                <select
+                  value={value.turnCheckpointMode}
+                  disabled={!writable || busy !== null}
+                  onChange={(event) => { commitEnum('turnCheckpointMode', event.target.value) }}
+                >
+                  {(Object.keys(CHECKPOINT_MODE_LABELS) as TurnRewindSettingsValue['turnCheckpointMode'][]).map((option) => (
+                    <option key={option} value={option}>{CHECKPOINT_MODE_LABELS[option]}</option>
+                  ))}
+                </select>
+                {userLayer.turnCheckpointMode !== undefined && <span className="dcl-trs-override">已覆盖</span>}
+                {userLayer.turnCheckpointMode !== undefined && (
+                  <Button variant="ghost" size="sm" disabled={!writable || busy !== null}
+                    onClick={() => { setFormError(null); void scope?.unset('turnCheckpointMode').catch((caught: unknown) => { setFormError(messageOf(caught)) }) }}>恢复默认</Button>
+                )}
+              </span>
+            </div>
+            <div className="dcl-trs-field">
+              <span className="dcl-trs-field-label"><strong>检查点信任策略</strong>
+                <span className="dcl-trs-field-desc">快速信任 Git/stat 元数据；严格会逐一重读文件内容</span></span>
+              <span className="dcl-trs-field-control">
+                <select
+                  value={value.turnCheckpointTrust}
+                  disabled={!writable || busy !== null}
+                  onChange={(event) => { commitEnum('turnCheckpointTrust', event.target.value) }}
+                >
+                  {(Object.keys(TRUST_LABELS) as TurnRewindSettingsValue['turnCheckpointTrust'][]).map((option) => (
+                    <option key={option} value={option}>{TRUST_LABELS[option]}</option>
+                  ))}
+                </select>
+                {userLayer.turnCheckpointTrust !== undefined && <span className="dcl-trs-override">已覆盖</span>}
+                {userLayer.turnCheckpointTrust !== undefined && (
+                  <Button variant="ghost" size="sm" disabled={!writable || busy !== null}
+                    onClick={() => { setFormError(null); void scope?.unset('turnCheckpointTrust').catch((caught: unknown) => { setFormError(messageOf(caught)) }) }}>恢复默认</Button>
+                )}
+              </span>
+            </div>
+            {NUMBER_FIELDS.map((field) => (
+              <div className="dcl-trs-field" key={field.key}>
+                <span className="dcl-trs-field-label"><strong>{field.label}</strong>
+                  <span className="dcl-trs-field-desc">{field.description}</span></span>
+                <span className="dcl-trs-field-control">
+                  <input
+                    type="number" min={1} step={1}
+                    value={drafts[field.key] ?? String(value[field.key])}
+                    disabled={!writable || busy !== null}
+                    onChange={(event) => { setDrafts((current) => ({ ...current, [field.key]: event.target.value })) }}
+                    onBlur={() => { commitNumber(field.key) }}
+                    onKeyDown={(event) => { if (event.key === 'Enter') commitNumber(field.key) }}
+                  />
+                  {userLayer[field.key] !== undefined && <span className="dcl-trs-override">已覆盖</span>}
+                  {userLayer[field.key] !== undefined && (
+                    <Button variant="ghost" size="sm" disabled={!writable || busy !== null}
+                      onClick={() => { setFormError(null); void scope?.unset(field.key).catch((caught: unknown) => { setFormError(messageOf(caught)) }) }}>恢复默认</Button>
+                  )}
+                </span>
+              </div>
+            ))}
+          </>
+        )}
+        {formError !== null && <p className="dcl-trs-error">{formError}</p>}
+        <p className="dcl-trs-storage">存储目录（在 cordis.patch.yml 中配置，不可在线修改）：{manage?.storageDir ?? '…'}</p>
+      </section>
+      <section className="dcl-trs-section">
+        <div className="dcl-trs-section-title">
+          <strong>检查点管理</strong>
+          <span className="dcl-trs-section-title-actions">
+            <Button variant="outline" size="sm" onClick={() => { void refreshManage() }} disabled={manageLoading}>
+              {manageLoading ? '正在刷新…' : '刷新'}
+            </Button>
+            {manage !== null && manage.workspaces.length > 0 && (
+              confirmClearAll
+                ? (
+                  <>
+                    <Button variant="outline" size="sm" onClick={() => { setConfirmClearAll(false) }} disabled={busy !== null}>取消</Button>
+                    <Button variant="primary" size="sm" onClick={() => { void runManageAction({ action: 'clear-all' }, 'clear-all') }} disabled={busy !== null}>
+                      {busy === 'clear-all' ? '正在清理…' : '确认清空全部'}
+                    </Button>
+                  </>
+                )
+                : <Button variant="outline" size="sm" onClick={() => { setConfirmClearAll(true) }} disabled={busy !== null}>一键清空全部</Button>
+            )}
+          </span>
+        </div>
+        <p className="dcl-trs-manage-total">
+          {manage === null
+            ? '正在读取检查点占用…'
+            : `共 ${String(manage.workspaces.length)} 个工作区，${String(manage.totalBytes >= 0 ? manage.workspaces.reduce((total, workspace) => total + workspace.restorePoints.length, 0) : 0)} 个检查点，约 ${formatBytes(manage.totalBytes)}（Git 原生检查点的实际磁盘占用以 Git 回收为准）。`}
+        </p>
+        {manageError !== null && <p className="dcl-trs-error">{manageError}</p>}
+        {manage?.workspaces.map((workspace) => (
+          <div className="dcl-trs-workspace" key={workspace.workspace}>
+            <div className="dcl-trs-workspace-head">
+              <span className="dcl-trs-workspace-path" title={workspace.workspace}>{workspace.workspace}</span>
+              <span className="dcl-trs-workspace-meta">{String(workspace.restorePoints.length)} 个检查点 · {formatBytes(workspace.totalBytes)}</span>
+              {workspace.recoveryCount > 0 && <span className="dcl-trs-badge">{String(workspace.recoveryCount)} 个恢复待处理</span>}
+              <Button variant="ghost" size="sm" onClick={() => { toggleWorkspace(workspace.workspace) }}>
+                {collapsed.has(workspace.workspace) ? '展开' : '收起'}
+              </Button>
+              <Button variant="outline" size="sm"
+                onClick={() => { void runManageAction({ action: 'clear-workspace', workspace: workspace.workspace }, `clear:${workspace.workspace}`) }}
+                disabled={busy !== null || workspace.restorePoints.length === 0}>
+                {busy === `clear:${workspace.workspace}` ? '正在清理…' : '清空此项目'}
+              </Button>
+            </div>
+            {!collapsed.has(workspace.workspace) && workspace.restorePoints.length > 0 && (
+              <ul className="dcl-trs-points">
+                {workspace.restorePoints.map((point) => (
+                  <li className="dcl-trs-point" key={point.id}>
+                    <time>{formatTime(point.createdAt)}</time>
+                    <span className="dcl-trs-point-kind">{POINT_KIND_LABELS[point.kind] ?? point.kind}</span>
+                    <span className="dcl-trs-point-size">{formatBytes(point.totalBytes)}</span>
+                    <span className="dcl-trs-point-files">{String(point.fileCount)} 个文件</span>
+                    {point.sessionId !== undefined && <code>{point.sessionId}</code>}
+                    <Button variant="ghost" size="sm"
+                      onClick={() => { void runManageAction({ action: 'delete', workspace: workspace.workspace, restorePointId: point.id }, `delete:${point.id}`) }}
+                      disabled={busy !== null}>
+                      {busy === `delete:${point.id}` ? '正在删除…' : '删除'}
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ))}
+        {manage !== null && manage.workspaces.length === 0 && <p className="dcl-trs-status">还没有任何已保存的检查点。</p>}
+      </section>
+    </div>
+  )
+}
+
+function decodeManageOverview(value: unknown): ManageOverview {
+  const record = recordOf(value)
+  const workspacesValue = record.workspaces
+  if (!Array.isArray(workspacesValue)) throw new Error('管理数据缺少 workspaces')
+  return {
+    storageDir: requiredString(record.storageDir, 'storageDir'),
+    totalBytes: requiredInteger(record.totalBytes, 'totalBytes'),
+    workspaces: workspacesValue.map((entry) => {
+      const workspace = recordOf(entry)
+      const pointsValue = workspace.restorePoints
+      if (!Array.isArray(pointsValue)) throw new Error('管理数据缺少 restorePoints')
+      return {
+        workspace: requiredString(workspace.workspace, 'workspace'),
+        totalBytes: requiredInteger(workspace.totalBytes, 'totalBytes'),
+        recoveryCount: requiredInteger(workspace.recoveryCount, 'recoveryCount'),
+        restorePoints: pointsValue.map((pointEntry) => {
+          const point = recordOf(pointEntry)
+          return {
+            id: requiredString(point.id, 'id'),
+            kind: requiredString(point.kind, 'kind'),
+            format: requiredInteger(point.format, 'format'),
+            createdAt: requiredInteger(point.createdAt, 'createdAt'),
+            totalBytes: requiredInteger(point.totalBytes, 'totalBytes'),
+            fileCount: requiredInteger(point.fileCount, 'fileCount'),
+            ...optionalRecordString(point, 'sessionId'),
+            ...optionalRecordString(point, 'label'),
+          }
+        }),
+      }
+    }),
+  }
+}
+
+/** Format one byte count with human-friendly units. */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${unit === 0 ? String(Math.round(value)) : value.toFixed(value >= 100 ? 0 : 1)} ${units[unit]}`
+}
+
+function formatTime(timestamp: number): string {
+  const date = new Date(timestamp)
+  return Number.isNaN(date.getTime()) ? String(timestamp) : date.toLocaleString()
 }
 
 function decodePreview(value: unknown): Preview {
@@ -639,7 +1090,7 @@ function friendlyError(error: unknown): string {
     case 'REPOSITORY_CHANGED': return '这个项目目录已不属于原来的 Git 工作区，无法恢复。'
     case 'GIT_OPERATION_CHANGED': return 'Git 正在执行其他操作。请先完成或取消该操作，再重新检查。'
     case 'RESTORE_POINT_NOT_FOUND': return '没有找到对应的文件状态，可能已被清理。'
-    case 'NO_CHANGES': return '项目文件已经是这条消息发送前的状态，无需恢复。想重新开始时，可以使用“分支新对话”。'
+    case 'NO_CHANGES': return '项目文件已经是这条消息发送前的状态，无需恢复文件。可选择「只回溯消息」重新开始这段对话。'
     case 'RESTORE_FAILED_ROLLED_BACK': return '恢复未能完成，项目文件已自动还原到操作前的状态。'
     case 'CONVERSATION_REWIND_FAILED': return '文件已恢复，但无法创建新对话；项目文件已自动还原。'
     default: return error.message

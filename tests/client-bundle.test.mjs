@@ -67,7 +67,8 @@ test('browser bundle anchors rewind to direct user messages and restores their d
     ['移除后来新增的文件', '找回文件', '恢复之前的版本', '恢复文件权限', '恢复之前的文件类型'],
   )
 
-  let registration
+  let conversationRegistration
+  let settingsRegistration
   const style = { dataset: {}, remove() {} }
   context.document = {
     querySelector: () => null,
@@ -77,6 +78,7 @@ test('browser bundle anchors rewind to direct user messages and restores their d
   let openedSession
   let restoredDraft
   const scope = {}
+  const injectedNames = []
   plugin.apply({
     effect(setup) { setup() },
     sessions: {
@@ -85,22 +87,31 @@ test('browser bundle anchors rewind to direct user messages and restores their d
     },
     conversation: { input: { for(value) { assert.equal(value, scope); return { setDraft(text) { restoredDraft = text } } } } },
     slots: {
-      inject(name, install) { assert.equal(name, 'conversation.session.header.actions'); install() },
-      register(entry, component) { registration = { entry, component }; return () => {} },
+      inject(name, install) { injectedNames.push(name); install() },
+      register(entry, component) {
+        if (entry.name === 'conversation.session.header.actions') conversationRegistration = { entry, component }
+        else if (entry.name === 'settings.plugin.item') settingsRegistration = { entry, component }
+        else throw new Error(`unexpected slot registration ${entry.name}`)
+        return () => {}
+      },
     },
   })
-  assert.equal(registration.entry.name, 'conversation.session.header.actions')
-  assert.equal(registration.entry.id, 'turn-rewind-portals')
+  assert.deepEqual(injectedNames, ['conversation.session.header.actions', 'settings.plugin.item'])
+  assert.equal(conversationRegistration.entry.name, 'conversation.session.header.actions')
+  assert.equal(conversationRegistration.entry.id, 'turn-rewind-portals')
   assert.match(style.textContent, /\.dcl-rewind-dialog\{[^}]*width:min\(560px,100%\)/)
   assert.match(style.textContent, /\.dcl-rewind-body\{[^}]*width:100%;min-width:0;max-width:100%;box-sizing:border-box/)
   assert.match(style.textContent, /\.dcl-rewind-trigger\{[^}]*justify-content:center;width:24px;height:24px;padding:0/)
   assert.doesNotMatch(style.textContent, /:has\(>\.dcl-rewind-tail\)/)
   assert.doesNotMatch(style.textContent, /order:-1/)
-  const injected = registration.entry.inject()
+  const injected = conversationRegistration.entry.inject()
   await injected.openRestoredSession('session-child', '原来的问题')
   assert.equal(openedSession, 'session-child')
   assert.equal(restoredDraft, '原来的问题')
-  assert.equal(typeof registration.component, 'function')
+  assert.equal(typeof conversationRegistration.component, 'function')
+  assert.equal(settingsRegistration.entry.key, 'turn-rewind')
+  assert.equal(typeof settingsRegistration.component, 'function')
+  assert.deepEqual(JSON.parse(JSON.stringify(settingsRegistration.entry.inject())), {})
 })
 
 test('browser bundle finds user actions through the conversation slot wrapper', async () => {
@@ -284,6 +295,19 @@ test('rewind dialog restores files in two modes and allows reviewed Git history 
   assert.equal(code.primary.props.children, '恢复文件')
   assert.equal(code.opened, undefined)
 
+  const messages = await run('messages', ready, { mode: 'messages', sessionId: 'session-child' })
+  assert.equal(messages.primary.props.children, '只回溯消息')
+  assert.equal(messages.primary.props.disabled, false)
+  assert.equal(messages.opened, 'session-child')
+  assert.equal(messages.restoredPrompt, '修复这个问题')
+  assert.deepEqual(JSON.parse(messages.request.options.body), {
+    mode: 'messages', sessionId: 'session-source', messageSeq: 2,
+  })
+  assert.equal(findNode(messages.tree, node => node.type === 'p' && String(node.props.children).includes('项目文件保持不变')), undefined)
+  const radios = collectNodes(messages.tree, node => node.type === 'input' && node.props.type === 'radio')
+  assert.equal(radios.length, 3)
+  assert.ok(radios.every(radio => radio.props.disabled === false))
+
   const advancedHead = await run('both', {
     ...ready, headChanged: true, checkpointHead: 'old', currentHead: 'new',
   }, { mode: 'both', sessionId: 'session-child', rescuePointId: 'rp_rescue' })
@@ -311,7 +335,18 @@ test('rewind dialog restores files in two modes and allows reviewed Git history 
   })
   const noFiles = findNode(noFilesTree, node => node.type === Button && node.props.variant === 'primary')
   assert.equal(noFiles.props.disabled, true)
-  assert.ok(findNode(noFilesTree, node => node.type === 'p' && String(node.props.children).includes('分支新对话')))
+  assert.ok(findNode(noFilesTree, node => node.type === 'p' && String(node.props.children).includes('只回溯消息')))
+  const noFilesRadios = collectNodes(noFilesTree, node => node.type === 'input' && node.props.type === 'radio')
+  assert.deepEqual(noFilesRadios.map(radio => radio.props.disabled), [true, true, false])
+
+  stateIndex = 0
+  values = [true, false, { status: 'skipped', reason: '[TURN_CHECKPOINT_TIMEOUT] automatic checkpoint exceeded 5000 ms' }, 'messages', false, false, false, null, null]
+  const skippedMessagesTree = plugin.RewindMessageAction({
+    matched: { messageSeq: 2, promptText: '修复这个问题' }, sessionId: 'session-source', async openRestoredSession() {},
+  })
+  const skippedMessages = findNode(skippedMessagesTree, node => node.type === Button && node.props.variant === 'primary')
+  assert.equal(skippedMessages.props.disabled, false)
+  assert.equal(skippedMessages.props.children, '只回溯消息')
 
   stateIndex = 0
   values = [true, false, { status: 'skipped', reason: '[TURN_CHECKPOINT_TIMEOUT] automatic checkpoint exceeded 5000 ms' }, 'both', false, false, false, null, null]
@@ -339,18 +374,147 @@ test('rewind dialog restores files in two modes and allows reviewed Git history 
 })
 
 function findNode(value, predicate) {
-  if (Array.isArray(value)) {
-    for (const child of value) {
-      const found = findNode(child, predicate)
-      if (found !== undefined) return found
-    }
-    return undefined
-  }
-  if (value === null || typeof value !== 'object') return undefined
-  if (predicate(value)) return value
-  for (const child of Object.values(value.props ?? {})) {
-    const found = findNode(child, predicate)
-    if (found !== undefined) return found
-  }
-  return undefined
+  return collectNodes(value, predicate)[0]
 }
+
+function collectNodes(value, predicate) {
+  const found = []
+  const visit = (node) => {
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child)
+      return
+    }
+    if (node === null || typeof node !== 'object') return
+    if (predicate(node)) found.push(node)
+    for (const child of Object.values(node.props ?? {})) visit(child)
+  }
+  visit(value)
+  return found
+}
+
+test('settings card renders the namespace form and manages checkpoints', async () => {
+  const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
+  let plugin
+  const stateValues = new Map()
+  const effectsRun = new Set()
+  const Button = function Button() {}
+  const primitives = { Button, Modal: function Modal() {}, Tooltip: function Tooltip() {} }
+  const snapshot = {
+    status: 'ready',
+    value: {
+      maxRestorePoints: 50, maxTurnCheckpointsPerSession: 30, maxFiles: 20000, maxFileBytes: 16777216,
+      maxSnapshotBytes: 536870912, planTtlMs: 900000, staleLockMs: 30000, turnCheckpointMode: 'legacy',
+      turnCheckpointTimeoutMs: 5000, turnCheckpointMaxNewBytes: 33554432, turnCheckpointTrust: 'fast',
+    },
+    base: {}, user: { turnCheckpointMode: 'off' }, revision: 7, writable: true, mode: 'host',
+  }
+  const writes = []
+  const scope = {
+    getSnapshot: () => snapshot,
+    subscribe: () => () => {},
+    async set(field, value) { writes.push({ op: 'set', field, value }) },
+    async unset(field) { writes.push({ op: 'unset', field }) },
+  }
+  const requests = []
+  const manageOverview = {
+    storageDir: '/tmp/state',
+    totalBytes: 2048,
+    workspaces: [{
+      workspace: '/tmp/project-a',
+      totalBytes: 2048,
+      recoveryCount: 1,
+      restorePoints: [{
+        id: 'rp_abc123_def012345678', kind: 'turn', format: 2, createdAt: 1756000000000, totalBytes: 2048, fileCount: 3,
+        sessionId: 'session-a',
+      }],
+    }],
+  }
+  const context = {
+    AbortController,
+    setTimeout,
+    fetch: async (url, options) => {
+      requests.push({ url, options })
+      return { ok: true, json: async () => (options?.method === 'POST' ? { status: 'completed', action: 'clear-all' } : manageOverview) }
+    },
+    window: {
+      __ModuleLoader__: {
+        load(record) {
+          plugin = record.factory((id) => {
+            if (id === 'react/jsx-runtime') return { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }), Fragment: Symbol('fragment') }
+            if (id === 'react') {
+              return {
+                useCallback(value) {
+                  const index = hookIndex
+                  hookIndex += 1
+                  if (!stateValues.has(index)) stateValues.set(index, { memo: value })
+                  return stateValues.get(index).memo
+                },
+                useEffect(setup) {
+                  hookIndex += 1
+                  if (effectsRun.has('card')) return undefined
+                  effectsRun.add('card')
+                  const cleanup = setup()
+                  return cleanup
+                },
+                useLayoutEffect() {},
+                useRef: value => ({ current: value }),
+                useState(initial) {
+                  const index = hookIndex
+                  hookIndex += 1
+                  if (!stateValues.has(index)) stateValues.set(index, initial)
+                  const current = stateValues.get(index)
+                  return [current, (next) => { stateValues.set(index, typeof next === 'function' ? next(current) : next) }]
+                },
+                useSyncExternalStore(_subscribe, getSnapshot) { return getSnapshot() },
+              }
+            }
+            if (id === 'react-dom') return { createPortal: value => value }
+            if (id === '@deepseek-ai/dsh-client-ui-primitives') return primitives
+            throw new Error(`unexpected browser dependency ${id}`)
+          })
+        },
+      },
+    },
+  }
+  let hookIndex = 0
+  vm.runInNewContext(source, context)
+  const render = () => {
+    hookIndex = 0
+    return plugin.TurnRewindSettingsCard({ scope })
+  }
+  const first = render()
+  const selects = collectNodes(first, node => node.type === 'select')
+  assert.equal(selects.length, 2)
+  assert.equal(selects[0].props.value, 'legacy')
+  assert.deepEqual(JSON.parse(JSON.stringify(selects[0].props.children.map(option => option.props.value))), ['off', 'git-native', 'legacy'])
+  assert.ok(collectNodes(first, node => node.type === 'span' && node.props.className === 'dcl-trs-override').length >= 1)
+  selects[0].props.onChange({ target: { value: 'off' } })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.deepEqual(writes, [{ op: 'set', field: 'turnCheckpointMode', value: 'off' }])
+
+  const second = render()
+  const numberInput = findNode(second, node => node.type === 'input' && node.props.type === 'number')
+  assert.equal(numberInput.props.value, '50')
+  numberInput.props.onChange({ target: { value: '3' } })
+  const third = render()
+  const edited = findNode(third, node => node.type === 'input' && node.props.type === 'number' && node.props.value === '3')
+  edited.props.onBlur()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.deepEqual(writes.slice(1), [{ op: 'set', field: 'maxRestorePoints', value: 3 }])
+
+  assert.ok(findNode(third, node => node.type === 'p' && String(node.props.children).includes('/tmp/state')))
+  assert.ok(findNode(third, node => node.type === 'span' && String(node.props.title) === '/tmp/project-a'))
+  assert.equal(collectNodes(third, node => node.props?.className === 'dcl-trs-badge' && String(node.props.children).includes('个恢复待处理')).length, 1)
+  assert.equal(requests.filter(request => request.options?.method === 'GET').length, 1)
+
+  const clearAll = findNode(third, node => node.type === Button && String(node.props.children) === '一键清空全部')
+  clearAll.props.onClick()
+  const fourth = render()
+  const confirm = findNode(fourth, node => node.type === Button && String(node.props.children) === '确认清空全部')
+  confirm.props.onClick()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const posts = requests.filter(request => request.options?.method === 'POST')
+  assert.equal(posts.length, 1)
+  assert.deepEqual(JSON.parse(posts[0].options.body), { action: 'clear-all' })
+  assert.equal(requests.filter(request => request.options?.method === 'GET').length, 2)
+})
