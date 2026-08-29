@@ -434,7 +434,13 @@ test('settings card renders the namespace form and manages checkpoints', async (
     setTimeout,
     fetch: async (url, options) => {
       requests.push({ url, options })
-      return { ok: true, json: async () => (options?.method === 'POST' ? { status: 'completed', action: 'clear-all' } : manageOverview) }
+      return { ok: true, json: async () => (options?.method === 'POST'
+        ? {
+            status: 'partial', action: 'clear-all',
+            reports: [{ deletedRestorePoints: 1, retainedRestorePoints: 1 }],
+            failures: [{ workspace: '/tmp/project-b', error: 'locked' }],
+          }
+        : manageOverview) }
     },
     window: {
       __ModuleLoader__: {
@@ -517,4 +523,9 @@ test('settings card renders the namespace form and manages checkpoints', async (
   assert.equal(posts.length, 1)
   assert.deepEqual(JSON.parse(posts[0].options.body), { action: 'clear-all' })
   assert.equal(requests.filter(request => request.options?.method === 'GET').length, 2)
+  const fifth = render()
+  const notice = findNode(fifth, node => node.props?.className === 'dcl-trs-notice')
+  assert.equal(notice.props['data-warning'], true)
+  assert.match(String(notice.props.children), /1 个受保护检查点未删除/)
+  assert.match(String(notice.props.children), /1 个工作区清理失败/)
 })

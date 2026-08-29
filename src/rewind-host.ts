@@ -423,7 +423,16 @@ export function createRewindHttpHandler(
         const detailsOnly = url.searchParams.get('details') === '1'
         const offset = nonNegativeInteger(url.searchParams.get('offset') ?? '0', 'offset')
         const limit = pageSize(url.searchParams.get('limit'), detailsOnly ? MAX_CHANGE_PAGE_SIZE : INITIAL_CHANGE_PREVIEW_LIMIT)
-        const { target, checkpoint } = await resolveMessageCheckpoint(ctx, engine, sessionId, messageSeq)
+        const { session, target } = await resolveMessageTarget(ctx, sessionId, messageSeq)
+        let checkpoint: MessageCheckpoint | undefined
+        try {
+          checkpoint = await resolveMessageCheckpoint(ctx, engine, sessionId, session, target)
+        } catch (error) {
+          // File-checkpoint discovery is allowed to fail independently: the dialog
+          // must still expose message-only rewind for a valid Session boundary.
+          json(response, 200, { status: 'failed', error: errorMessage(error) })
+          return
+        }
         if (checkpoint === undefined) {
           const durableSkip = await engine.findTurnCheckpointSkip({
             cwd: target.cwd,
@@ -488,7 +497,7 @@ export function createRewindHttpHandler(
           // Message-only rewind never mutates project files, so no checkpoint, no
           // restore plan, and no shared-workspace gate apply; the conversation
           // restart revalidates the message boundary itself.
-          const { target } = await resolveMessageCheckpoint(ctx, engine, sessionId, messageSeq)
+          const { target } = await resolveMessageTarget(ctx, sessionId, messageSeq)
           const fork = await createConversationRestart(ctx, sessionId, target)
           json(response, 200, { status: 'completed', mode, sessionId: fork.sessionId })
           return
@@ -570,20 +579,29 @@ interface MessageCheckpoint extends MessageTarget {
   readonly id: string
 }
 
+async function resolveMessageTarget(
+  ctx: Pick<Context, 'sessions' | 'sessionQuery'>,
+  sessionId: string,
+  messageSeq: number,
+): Promise<{ readonly session: SessionLike; readonly target: MessageTarget }> {
+  const session = await readSession(ctx, sessionId)
+  return { session, target: messageTarget(session, messageSeq) }
+}
+
 async function resolveMessageCheckpoint(
   ctx: Pick<Context, 'sessions' | 'sessionQuery'>,
   engine: ChangeLedgerEngine,
   sessionId: string,
-  messageSeq: number,
-): Promise<{ readonly target: MessageTarget; readonly checkpoint?: MessageCheckpoint }> {
-  let current = await readSession(ctx, sessionId)
-  const target = messageTarget(current, messageSeq)
+  source: SessionLike,
+  target: MessageTarget,
+): Promise<MessageCheckpoint | undefined> {
+  let current = source
   const direct = await engine.findTurnCheckpoint({ cwd: target.cwd, sessionId, turn: target.turn })
   if (direct !== undefined) {
     if (direct.turnStartSeq !== target.turnStartSeq) {
       throw new ChangeLedgerError('PLAN_STALE', 'the message checkpoint no longer matches its turn start')
     }
-    return { target, checkpoint: { ...target, id: direct.id } }
+    return { ...target, id: direct.id }
   }
 
   const seen = new Set<string>([sessionId])
@@ -595,7 +613,7 @@ async function resolveMessageCheckpoint(
     }
     if (parentId === undefined || seedLength === undefined
       || target.messageSeq >= seedLength || target.turnStartSeq >= seedLength) {
-      return { target }
+      return undefined
     }
     if (seen.has(parentId)) {
       throw new ChangeLedgerError('PLAN_STALE', 'session fork lineage contains a cycle')
@@ -606,7 +624,7 @@ async function resolveMessageCheckpoint(
     } catch (error) {
       throw new ChangeLedgerError('PLAN_STALE', `parent session ${parentId} is unavailable`, { cause: error })
     }
-    const parentTarget = messageTarget(current, messageSeq)
+    const parentTarget = messageTarget(current, target.messageSeq)
     if (parentTarget.turn !== target.turn
       || parentTarget.turnStartSeq !== target.turnStartSeq
       || parentTarget.previousTurnEndSeq !== target.previousTurnEndSeq) {
@@ -617,7 +635,7 @@ async function resolveMessageCheckpoint(
     if (inherited.turnStartSeq !== target.turnStartSeq) {
       throw new ChangeLedgerError('PLAN_STALE', 'the inherited message checkpoint no longer matches the fork boundary')
     }
-    return { target, checkpoint: { ...target, id: inherited.id } }
+    return { ...target, id: inherited.id }
   }
 }
 
@@ -628,7 +646,8 @@ async function checkpointForRequest(
   messageSeq: number,
   requestedId: string,
 ): Promise<MessageCheckpoint> {
-  const { target, checkpoint } = await resolveMessageCheckpoint(ctx, engine, sessionId, messageSeq)
+  const { session, target } = await resolveMessageTarget(ctx, sessionId, messageSeq)
+  const checkpoint = await resolveMessageCheckpoint(ctx, engine, sessionId, session, target)
   if (checkpoint === undefined) {
     throw new ChangeLedgerError('RESTORE_POINT_NOT_FOUND', `message ${String(target.messageSeq)} has no rewind checkpoint`)
   }

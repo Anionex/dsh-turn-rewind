@@ -203,6 +203,16 @@ export class LedgerStore {
     }
   }
 
+  /** Acquire only the durable directory lock when the recorded worktree is no longer available. */
+  async acquireWorkspaceDir(
+    workspaceDir: string,
+    workspace: string,
+    signal?: AbortSignal,
+  ): Promise<() => Promise<void>> {
+    const lease = await this.acquireOne(join(workspaceDir, 'lock.json'), workspace, false, true, signal)
+    return () => lease.release()
+  }
+
   private async acquireOne(
     initialLockPath: string,
     workspace: string,

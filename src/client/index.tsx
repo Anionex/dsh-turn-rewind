@@ -234,6 +234,8 @@ const styles = `
 .dcl-trs-point-kind,.dcl-trs-point-size,.dcl-trs-point-files{flex:none;color:var(--dsw-alias-label-tertiary)}
 .dcl-trs-point code{flex:1 1 140px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary)}
 .dcl-trs-status{margin:0;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px}
+.dcl-trs-notice{box-sizing:border-box;max-width:100%;margin:0;padding:8px 10px;overflow-wrap:anywhere;border-radius:8px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
+.dcl-trs-notice[data-warning="true"]{background:var(--dsw-alias-state-warn-tertiary);color:var(--dsw-alias-state-warn-primary)}
 .dcl-trs-error{box-sizing:border-box;max-width:100%;margin:0;padding:10px 12px;overflow-wrap:anywhere;word-break:break-word;border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 30%,transparent);border-radius:10px;color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px}
 .dcl-trs-storage{margin:0;padding:8px 10px;border-radius:8px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-tertiary);font-size:12px;overflow-wrap:anywhere}
 `
@@ -356,7 +358,10 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
         }
       }
     } catch (caught) {
-      if (!controller.signal.aborted) setError(messageOf(caught))
+      if (!controller.signal.aborted) {
+        setPreview({ status: 'failed', error: friendlyError(caught) })
+        if (!modeTouched.current) setMode('messages')
+      }
     } finally {
       if (loadAbort.current === controller) {
         loadAbort.current = null
@@ -589,6 +594,11 @@ interface TurnRewindSettingsCardProps {
   readonly scope: SettingsScopeLike<TurnRewindSettingsValue> | undefined
 }
 
+interface ManageActionNotice {
+  readonly warning: boolean
+  readonly message: string
+}
+
 const EMPTY_SETTINGS_SNAPSHOT: SettingsScopeSnapshotLike<TurnRewindSettingsValue> = {
   status: 'unavailable', value: undefined, base: undefined, user: undefined, revision: undefined, writable: false, mode: 'host',
 }
@@ -635,6 +645,7 @@ export function TurnRewindSettingsCard({ scope }: TurnRewindSettingsCardProps): 
   const [manage, setManage] = useState<ManageOverview | null>(null)
   const [manageLoading, setManageLoading] = useState(false)
   const [manageError, setManageError] = useState<string | null>(null)
+  const [manageNotice, setManageNotice] = useState<ManageActionNotice | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [drafts, setDrafts] = useState<Partial<Record<NumberSettingsField, string>>>({})
@@ -689,13 +700,15 @@ export function TurnRewindSettingsCard({ scope }: TurnRewindSettingsCardProps): 
     if (busy !== null) return
     setBusy(key)
     setManageError(null)
+    setManageNotice(null)
     setConfirmClearAll(false)
     try {
-      await responseJson(await fetch(MANAGE_PATH, {
+      const result = await responseJson(await fetch(MANAGE_PATH, {
         method: 'POST',
         headers: { accept: 'application/json', 'content-type': 'application/json' },
         body: JSON.stringify(body),
       }))
+      setManageNotice(decodeManageActionNotice(result))
       await refreshManage()
     } catch (caught) {
       setManageError(messageOf(caught))
@@ -816,6 +829,7 @@ export function TurnRewindSettingsCard({ scope }: TurnRewindSettingsCardProps): 
             ? '正在读取检查点占用…'
             : `共 ${String(manage.workspaces.length)} 个工作区，${String(manage.totalBytes >= 0 ? manage.workspaces.reduce((total, workspace) => total + workspace.restorePoints.length, 0) : 0)} 个检查点，约 ${formatBytes(manage.totalBytes)}（Git 原生检查点的实际磁盘占用以 Git 回收为准）。`}
         </p>
+        {manageNotice !== null && <p className="dcl-trs-notice" data-warning={manageNotice.warning}>{manageNotice.message}</p>}
         {manageError !== null && <p className="dcl-trs-error">{manageError}</p>}
         {manage?.workspaces.map((workspace) => (
           <div className="dcl-trs-workspace" key={workspace.workspace}>
@@ -888,6 +902,33 @@ function decodeManageOverview(value: unknown): ManageOverview {
         }),
       }
     }),
+  }
+}
+
+function decodeManageActionNotice(value: unknown): ManageActionNotice {
+  const record = recordOf(value)
+  const action = requiredString(record.action, 'action')
+  if (action === 'clear-all') {
+    if (!Array.isArray(record.reports)) throw new Error('清理结果缺少 reports')
+    const totals = record.reports.reduce((current, entry) => {
+      const report = recordOf(entry)
+      return {
+        deleted: current.deleted + requiredInteger(report.deletedRestorePoints, 'deletedRestorePoints'),
+        retained: current.retained + requiredInteger(report.retainedRestorePoints, 'retainedRestorePoints'),
+      }
+    }, { deleted: 0, retained: 0 })
+    const failures = Array.isArray(record.failures) ? record.failures.length : 0
+    const warning = record.status === 'partial' || totals.retained > 0 || failures > 0
+    return {
+      warning,
+      message: `已删除 ${String(totals.deleted)} 个检查点${totals.retained > 0 ? `，${String(totals.retained)} 个受保护检查点未删除` : ''}${failures > 0 ? `，${String(failures)} 个工作区清理失败` : ''}。`,
+    }
+  }
+  const deleted = requiredInteger(record.deletedRestorePoints, 'deletedRestorePoints')
+  const retained = requiredInteger(record.retainedRestorePoints, 'retainedRestorePoints')
+  return {
+    warning: retained > 0,
+    message: `已删除 ${String(deleted)} 个检查点${retained > 0 ? `，${String(retained)} 个受保护检查点未删除` : ''}。`,
   }
 }
 

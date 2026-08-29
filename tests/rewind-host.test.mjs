@@ -612,7 +612,9 @@ test('persisted multi-level lineage validates every inherited message boundary a
     events: events.map(event => event.type === 'turn/start' ? { ...event, seq: 9 } : event),
   })
   const stale = await request(handler, 'GET', '/turn-rewind?sessionId=leaf&messageSeq=2')
-  assert.equal(stale.body.code, 'PLAN_STALE')
+  assert.equal(stale.status, 200)
+  assert.equal(stale.body.status, 'failed')
+  assert.match(stale.body.error, /PLAN_STALE/)
 })
 
 test('message-only rewind forks without restoring files or requiring a checkpoint', async (t) => {
@@ -691,6 +693,33 @@ test('message-only rewind is not blocked by other agents sharing the workspace',
   })
   assert.equal(invalid.body.code, 'INVALID_ARGUMENTS')
   assert.match(invalid.body.error, /"messages"/)
+})
+
+test('message-only rewind remains available when file-checkpoint discovery cannot open the workspace', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  await rm(f.workspace, { recursive: true, force: true })
+  let forkPayload
+  const handler = handlerFor(f, new Map([
+    ['session-source', liveSession('session-source', f.workspace, twoTurnEvents())],
+  ]), {
+    apiProxy: { sessions: {
+      async create() { throw new Error('later messages must fork') },
+      async fork(requestValue) { forkPayload = requestValue.payload; return okSession('session-child') },
+    } },
+  })
+
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-source&messageSeq=6')
+  assert.equal(preview.status, 200)
+  assert.equal(preview.body.status, 'failed')
+  assert.match(preview.body.error, /WORKSPACE_NOT_FOUND/)
+
+  const applied = await request(handler, 'POST', '/turn-rewind', {
+    mode: 'messages', sessionId: 'session-source', messageSeq: 6,
+  })
+  assert.equal(applied.status, 200)
+  assert.equal(applied.body.sessionId, 'session-child')
+  assert.deepEqual(forkPayload, { sessionId: 'session-source', atSeq: 4 })
 })
 
 test('manage route lists, deletes, and purges workspace storage', async (t) => {

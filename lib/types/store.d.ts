@@ -35,6 +35,8 @@ export declare class LedgerStore {
         readonly gitDir: string;
         readonly worktreeId: string;
     }, signal?: AbortSignal): Promise<() => Promise<void>>;
+    /** Acquire only the durable directory lock when the recorded worktree is no longer available. */
+    acquireWorkspaceDir(workspaceDir: string, workspace: string, signal?: AbortSignal): Promise<() => Promise<void>>;
     private acquireOne;
     /** Persist a blob if it is not already present, and verify existing content. */
     putBlob(workspace: string, hash: string, content: Buffer): Promise<void>;

@@ -1995,6 +1995,23 @@ test('purgeWorkspace deletes unprotected points, keeps recovery references, and 
   assert.equal(targeted.retainedRestorePoints, 1)
 })
 
+test('purgeWorkspace refuses to delete while another operation owns the durable workspace lock', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const workspace = await realpath(f.workspace)
+  const point = await f.engine.create({ cwd: workspace, label: 'must remain' })
+  const release = await f.engine.store.acquire(workspace)
+  try {
+    await assert.rejects(
+      () => f.engine.purgeWorkspace({ workspace }),
+      (error) => error instanceof ChangeLedgerError && error.code === 'WORKSPACE_LOCKED',
+    )
+  } finally {
+    await release()
+  }
+  assert.deepEqual((await f.engine.list({ cwd: workspace })).map((entry) => entry.id), [point.id])
+})
+
 test('purgeWorkspace cleans storage for a workspace whose directory no longer exists', async (t) => {
   const outer = await mkdtemp(join(tmpdir(), 'dsh-change-ledger-orphans-'))
   t.after(async () => rm(outer, { recursive: true, force: true }))
