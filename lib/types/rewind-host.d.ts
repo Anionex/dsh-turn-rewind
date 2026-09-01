@@ -20,6 +20,11 @@ interface AgentLike {
     readonly status: 'idle' | 'running';
     readonly session: SessionLike;
 }
+interface ToolExecutionLike {
+    readonly agent?: AgentLike;
+    readonly parent?: symbol;
+    readonly signal: AbortSignal;
+}
 interface AgentsLike {
     list(): AgentLike[];
 }
@@ -106,10 +111,11 @@ declare module '@deepseek-ai/cordis' {
             readonly step: number;
             readonly signal: AbortSignal;
         }, next: () => Promise<unknown>): Promise<unknown>;
+        'tools/execute'(exec: ToolExecutionLike, next: () => Promise<unknown>): Promise<unknown>;
     }
 }
 export declare const REWIND_HTTP_PATH = "/turn-rewind";
-/** Capture each turn before its opening user message can trigger model or tool work. */
+/** Capture each turn beside model work and gate root tool side effects on its bounded outcome. */
 export declare class TurnCheckpointCoordinator {
     private readonly engine;
     private readonly captures;
@@ -118,7 +124,7 @@ export declare class TurnCheckpointCoordinator {
     private readonly skips;
     private readonly workspaceTails;
     constructor(engine: ChangeLedgerEngine);
-    /** Install the first-step gate; checkpoint failures are recorded but never reject the user turn. */
+    /** Keep sidecar checkpoint work out of the Agent response waterfall. */
     install(ctx: Context): void;
     /** Current capture state for a session turn when no durable checkpoint exists yet. */
     state(sessionId: string, turn: number): {
@@ -126,19 +132,22 @@ export declare class TurnCheckpointCoordinator {
         readonly error?: string;
         readonly reason?: string;
     };
+    private startCapture;
     private capture;
+    /** Wait only for the bounded checkpoint outcome of the Agent's open turn. */
+    private waitForOpenTurn;
     private serializeWorkspace;
     private recordFailure;
 }
 /** Register the same-origin preview/apply endpoint consumed by the browser half. */
 export declare function installRewindHttp(ctx: Context, engine: ChangeLedgerEngine, coordinator: TurnCheckpointCoordinator): void;
+/** Build the exact-route handler as a testable unit. */
+export declare function createRewindHttpHandler(ctx: Pick<Context, 'sessions' | 'sessionQuery' | 'apiProxy'> & {
+    readonly agents?: AgentsLike;
+}, engine: ChangeLedgerEngine, coordinator: TurnCheckpointCoordinator): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void>;
 export declare const MANAGE_HTTP_PATH = "/turn-rewind/manage";
 /** Register the same-origin storage-management endpoint consumed by the settings card. */
 export declare function installManageHttp(ctx: Context, engine: ChangeLedgerEngine): void;
 /** Build the storage-management route as a testable unit. */
 export declare function createManageHttpHandler(engine: ChangeLedgerEngine): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void>;
-/** Build the exact-route handler as a testable unit. */
-export declare function createRewindHttpHandler(ctx: Pick<Context, 'sessions' | 'sessionQuery' | 'apiProxy'> & {
-    readonly agents?: AgentsLike;
-}, engine: ChangeLedgerEngine, coordinator: TurnCheckpointCoordinator): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void>;
 export {};

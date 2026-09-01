@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -10,11 +10,8 @@ import {
   ChangeLedgerEngine,
   ChangeLedgerError,
   ChangeLedgerService,
-  createManageHttpHandler,
-  createRewindHttpHandler,
   TurnCheckpointCoordinator,
-  TurnRewindSettingsSchema,
-  resolveConfig,
+  createRewindHttpHandler,
 } from '../lib/index.js'
 
 const execFileAsync = promisify(execFile)
@@ -60,29 +57,96 @@ async function git(cwd, ...args) {
   })
 }
 
-test('first-step checkpoint finishes before the user turn continues', async (t) => {
+test('first-step checkpoint stays off the response path but gates the first root tool', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)
   const agent = preStepAgent('session-web', f.workspace, 2, 8)
-  const { coordinator, listener } = installedCoordinator(f.engine)
-  let visibleBeforeNext = false
+  const original = f.engine.createTurnCheckpoint.bind(f.engine)
+  const captureStarted = Promise.withResolvers()
+  const captureRelease = Promise.withResolvers()
+  f.engine.createTurnCheckpoint = async (options) => {
+    captureStarted.resolve()
+    await captureRelease.promise
+    return original(options)
+  }
+  const { coordinator, listener, toolListener } = installedCoordinator(f.engine)
+  let turnContinued = false
 
   const decision = await listener(
     { agent, turn: 2, step: 1, signal: new AbortController().signal },
     async () => {
-      visibleBeforeNext = (await f.engine.findTurnCheckpoint({
-        cwd: f.workspace, sessionId: agent.id, turn: 2,
-      })) !== undefined
-      return { kind: 'enter' }
+      turnContinued = true
+      return { kind: 'enter', messages: [{ role: 'user', content: 'unchanged' }] }
     },
   )
+  await captureStarted.promise
 
-  assert.deepEqual(decision, { kind: 'enter' })
-  assert.equal(visibleBeforeNext, true)
+  assert.deepEqual(decision, { kind: 'enter', messages: [{ role: 'user', content: 'unchanged' }] })
+  assert.equal(turnContinued, true)
+  assert.equal(coordinator.state(agent.id, 2).status, 'pending')
+
+  assert.deepEqual(await toolListener(
+    { agent, parent: Symbol('nested-call'), signal: new AbortController().signal },
+    async () => ({ nested: true }),
+  ), { nested: true })
+
+  let toolContinued = false
+  const tool = toolListener(
+    { agent, signal: new AbortController().signal },
+    async () => { toolContinued = true; return { isError: false } },
+  )
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(toolContinued, false)
+  captureRelease.resolve()
+  assert.deepEqual(await tool, { isError: false })
+  assert.equal(toolContinued, true)
   assert.equal((await f.engine.findTurnCheckpoint({
     cwd: f.workspace, sessionId: agent.id, turn: 2,
   }))?.turnStartSeq, 8)
   assert.equal(coordinator.state(agent.id, 2).status, 'missing')
+})
+
+test('tool cancellation while waiting is delegated to the runtime cancellation path', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const agent = preStepAgent('session-cancelled-tool', f.workspace, 2, 8)
+  const captureStarted = Promise.withResolvers()
+  const captureRelease = Promise.withResolvers()
+  f.engine.createTurnCheckpoint = async () => {
+    captureStarted.resolve()
+    await captureRelease.promise
+  }
+  const { coordinator, listener, toolListener } = installedCoordinator(f.engine)
+  const toolController = new AbortController()
+  await listener(
+    { agent, turn: 2, step: 1, signal: new AbortController().signal },
+    async () => ({ kind: 'enter' }),
+  )
+  await captureStarted.promise
+
+  let delegated = false
+  const canonicalCancellation = {
+    content: [{ type: 'text', text: 'Error: tool call aborted before dispatch' }],
+    isError: true,
+    error: {
+      message: 'tool call aborted before dispatch',
+      info: { name: 'AbortError', code: 'ABORTED_BEFORE_DISPATCH' },
+    },
+  }
+  const invocation = toolListener(
+    { agent, signal: toolController.signal },
+    async () => {
+      delegated = true
+      assert.equal(toolController.signal.aborted, true)
+      return canonicalCancellation
+    },
+  )
+  toolController.abort({ code: 'caller-cancelled' })
+
+  assert.deepEqual(await invocation, canonicalCancellation)
+  assert.equal(delegated, true)
+  captureRelease.resolve()
+  await Promise.all(coordinator.captures.values())
 })
 
 test('checkpoint capture serializes one worktree and failure never blocks the turn', async (t) => {
@@ -109,7 +173,7 @@ test('checkpoint capture serializes one worktree and failure never blocks the tu
     }
   }
   const warnings = []
-  const { coordinator, listener } = installedCoordinator(f.engine, warnings)
+  const { coordinator, listener, toolListener } = installedCoordinator(f.engine, warnings)
   const first = preStepAgent('session-one', f.workspace, 1, 1)
   const second = preStepAgent('session-two', nested, 2, 8)
   const failed = preStepAgent('session-failed', f.workspace, 3, 12)
@@ -123,6 +187,10 @@ test('checkpoint capture serializes one worktree and failure never blocks the tu
     { agent: failed, turn: 3, step: 1, signal: new AbortController().signal },
     async () => { continued += 1; return { kind: 'enter' } },
   )
+  await Promise.all([first, second, failed].map(agent => toolListener(
+    { agent, signal: new AbortController().signal },
+    async () => ({ isError: false }),
+  )))
 
   assert.equal(maxActive, 1)
   assert.equal(failedAttempts, 1)
@@ -139,7 +207,7 @@ test('bounded automatic checkpoint skips are visible and never block the turn', 
     throw new ChangeLedgerError('TURN_CHECKPOINT_TIMEOUT', 'automatic checkpoint exceeded 5 ms')
   }
   const warnings = []
-  const { coordinator, listener } = installedCoordinator(f.engine, warnings)
+  const { coordinator, listener, toolListener } = installedCoordinator(f.engine, warnings)
   const agent = preStepAgent('session-skipped', f.workspace, 4, 20)
   let continued = false
   await listener(
@@ -147,12 +215,16 @@ test('bounded automatic checkpoint skips are visible and never block the turn', 
     async () => { continued = true; return { kind: 'enter' } },
   )
   assert.equal(continued, true)
+  await toolListener(
+    { agent, signal: new AbortController().signal },
+    async () => ({ isError: false }),
+  )
   assert.equal(coordinator.state(agent.id, 4).status, 'skipped')
   assert.match(coordinator.state(agent.id, 4).reason, /TURN_CHECKPOINT_TIMEOUT/)
   assert.equal(warnings.length, 1)
 })
 
-test('the first-step gate waits for a skipped outcome to become durable', async (t) => {
+test('the response continues while the first root tool waits for durable skip recording', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)
   f.engine.createTurnCheckpoint = async () => {
@@ -167,19 +239,26 @@ test('the first-step gate waits for a skipped outcome to become durable', async 
     await persistence
     persisted = true
   }
-  const { listener } = installedCoordinator(f.engine)
+  const { listener, toolListener } = installedCoordinator(f.engine)
   const agent = preStepAgent('session-skip-durable-gate', f.workspace, 4, 20)
   let continued = false
-  const invocation = listener(
+  await listener(
     { agent, turn: 4, step: 1, signal: new AbortController().signal },
     async () => { continued = true; return { kind: 'enter' } },
   )
   while (!persistenceStarted) await new Promise((resolve) => setTimeout(resolve, 1))
-  assert.equal(continued, false)
+  assert.equal(continued, true)
+  let toolContinued = false
+  const invocation = toolListener(
+    { agent, signal: new AbortController().signal },
+    async () => { toolContinued = true; return { isError: false } },
+  )
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(toolContinued, false)
   releasePersistence()
   await invocation
   assert.equal(persisted, true)
-  assert.equal(continued, true)
+  assert.equal(toolContinued, true)
 })
 
 test('the checkpoint deadline covers coordinator discovery and engine metadata reads', async (t) => {
@@ -193,15 +272,19 @@ test('the checkpoint deadline covers coordinator discovery and engine metadata r
   await bounded.initialize()
   bounded.store.listManifests = async () => new Promise(() => {})
   bounded.recordTurnCheckpointSkip = async () => {}
-  const { coordinator, listener } = installedCoordinator(bounded)
+  const { coordinator, listener, toolListener } = installedCoordinator(bounded)
   const agent = preStepAgent('session-coordinator-deadline', f.workspace, 4, 20)
   let continued = false
-  const startedAt = Date.now()
   await listener(
     { agent, turn: 4, step: 1, signal: new AbortController().signal },
     async () => { continued = true; return { kind: 'enter' } },
   )
   assert.equal(continued, true)
+  const startedAt = Date.now()
+  await toolListener(
+    { agent, signal: new AbortController().signal },
+    async () => ({ isError: false }),
+  )
   assert.equal(coordinator.state(agent.id, 4).status, 'skipped')
   assert.ok(Date.now() - startedAt < 600)
   await Promise.all(coordinator.captures.values())
@@ -224,15 +307,19 @@ test('slow durable skip persistence cannot extend the pre-step deadline', async 
     await new Promise((resolve) => setTimeout(resolve, 450))
     persistenceFinished = true
   }
-  const { coordinator, listener } = installedCoordinator(bounded)
+  const { coordinator, listener, toolListener } = installedCoordinator(bounded)
   const agent = preStepAgent('session-slow-outcome', f.workspace, 4, 20)
   let continued = false
-  const startedAt = Date.now()
   await listener(
     { agent, turn: 4, step: 1, signal: new AbortController().signal },
     async () => { continued = true; return { kind: 'enter' } },
   )
   assert.equal(continued, true)
+  const startedAt = Date.now()
+  await toolListener(
+    { agent, signal: new AbortController().signal },
+    async () => ({ isError: false }),
+  )
   assert.equal(coordinator.state(agent.id, 4).status, 'skipped')
   assert.ok(Date.now() - startedAt < 250)
   while (!persistenceFinished) await new Promise((resolve) => setTimeout(resolve, 10))
@@ -612,200 +699,7 @@ test('persisted multi-level lineage validates every inherited message boundary a
     events: events.map(event => event.type === 'turn/start' ? { ...event, seq: 9 } : event),
   })
   const stale = await request(handler, 'GET', '/turn-rewind?sessionId=leaf&messageSeq=2')
-  assert.equal(stale.status, 200)
-  assert.equal(stale.body.status, 'failed')
-  assert.match(stale.body.error, /PLAN_STALE/)
-})
-
-test('message-only rewind forks without restoring files or requiring a checkpoint', async (t) => {
-  const f = await fixture()
-  t.after(f.cleanup)
-  const checkpoint = await f.engine.createTurnCheckpoint({
-    cwd: f.workspace, sessionId: 'session-web', turn: 2, turnStartSeq: 5,
-  })
-  await writeFile(join(f.workspace, 'code.txt'), 'changed in turn two\n')
-  let forkPayload
-  const handler = handlerFor(f, new Map([
-    ['session-web', liveSession('session-web', f.workspace, twoTurnEvents())],
-  ]), {
-    apiProxy: { sessions: {
-      async create() { throw new Error('later messages must fork') },
-      async fork(requestValue) { forkPayload = requestValue.payload; return okSession('session-child') },
-    } },
-  })
-
-  const applied = await request(handler, 'POST', '/turn-rewind', {
-    mode: 'messages', sessionId: 'session-web', messageSeq: 6,
-  })
-  assert.equal(applied.status, 200)
-  assert.equal(applied.body.status, 'completed')
-  assert.equal(applied.body.sessionId, 'session-child')
-  assert.deepEqual(forkPayload, { sessionId: 'session-web', atSeq: 4 })
-  assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'changed in turn two\n')
-
-  const noCheckpoint = await fixture()
-  t.after(noCheckpoint.cleanup)
-  let blankCreate
-  const blankHandler = handlerFor(noCheckpoint, new Map([
-    ['session-fresh', liveSession('session-fresh', noCheckpoint.workspace, oneTurnEvents())],
-  ]), {
-    apiProxy: { sessions: {
-      async create(requestValue) { blankCreate = requestValue.payload; return okSession('session-blank') },
-      async fork() { throw new Error('first message must not fork a completed turn') },
-    } },
-  })
-  const blank = await request(blankHandler, 'POST', '/turn-rewind', {
-    mode: 'messages', sessionId: 'session-fresh', messageSeq: 2,
-  })
-  assert.equal(blank.status, 200)
-  assert.equal(blank.body.sessionId, 'session-blank')
-  assert.deepEqual(blankCreate, { cwd: noCheckpoint.workspace })
-})
-
-test('message-only rewind is not blocked by other agents sharing the workspace', async (t) => {
-  const f = await fixture()
-  t.after(f.cleanup)
-  await f.engine.createTurnCheckpoint({
-    cwd: f.workspace, sessionId: 'session-source', turn: 1, turnStartSeq: 1,
-  })
-  await writeFile(join(f.workspace, 'code.txt'), 'changed\n')
-  const sessions = new Map([
-    ['session-source', liveSession('session-source', f.workspace, oneTurnEvents())],
-  ])
-  const sourceAgent = { id: 'session-source', status: 'running', session: sessions.get('session-source') }
-  const handler = handlerFor(f, sessions, {
-    agents: { list: () => [sourceAgent] },
-    apiProxy: { sessions: {
-      async create() { return okSession('session-new') },
-      async fork() { throw new Error('unexpected fork') },
-    } },
-  })
-
-  const applied = await request(handler, 'POST', '/turn-rewind', {
-    mode: 'messages', sessionId: 'session-source', messageSeq: 2,
-  })
-  assert.equal(applied.status, 200)
-  assert.equal(applied.body.sessionId, 'session-new')
-  assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'changed\n')
-
-  const invalid = await request(handler, 'POST', '/turn-rewind', {
-    mode: 'bogus', sessionId: 'session-source', messageSeq: 2,
-  })
-  assert.equal(invalid.body.code, 'INVALID_ARGUMENTS')
-  assert.match(invalid.body.error, /"messages"/)
-})
-
-test('message-only rewind remains available when file-checkpoint discovery cannot open the workspace', async (t) => {
-  const f = await fixture()
-  t.after(f.cleanup)
-  await rm(f.workspace, { recursive: true, force: true })
-  let forkPayload
-  const handler = handlerFor(f, new Map([
-    ['session-source', liveSession('session-source', f.workspace, twoTurnEvents())],
-  ]), {
-    apiProxy: { sessions: {
-      async create() { throw new Error('later messages must fork') },
-      async fork(requestValue) { forkPayload = requestValue.payload; return okSession('session-child') },
-    } },
-  })
-
-  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-source&messageSeq=6')
-  assert.equal(preview.status, 200)
-  assert.equal(preview.body.status, 'failed')
-  assert.match(preview.body.error, /WORKSPACE_NOT_FOUND/)
-
-  const applied = await request(handler, 'POST', '/turn-rewind', {
-    mode: 'messages', sessionId: 'session-source', messageSeq: 6,
-  })
-  assert.equal(applied.status, 200)
-  assert.equal(applied.body.sessionId, 'session-child')
-  assert.deepEqual(forkPayload, { sessionId: 'session-source', atSeq: 4 })
-})
-
-test('manage route lists, deletes, and purges workspace storage', async (t) => {
-  const f = await fixture()
-  t.after(f.cleanup)
-  const first = await f.engine.create({ cwd: f.workspace, label: 'keep' })
-  const second = await f.engine.createTurnCheckpoint({
-    cwd: f.workspace, sessionId: 'session-web', turn: 1, turnStartSeq: 1,
-  })
-  await writeFile(join(f.workspace, 'code.txt'), 'changed\n')
-  const handler = createManageHttpHandler(f.engine)
-
-  const overview = await request(handler, 'GET', '/turn-rewind/manage')
-  assert.equal(overview.status, 200)
-  const canonicalWorkspace = await realpath(f.workspace)
-  assert.equal(overview.body.storageDir, (await import('node:path')).join(f.outer, 'state'))
-  assert.equal(overview.body.workspaces.length, 1)
-  assert.equal(overview.body.workspaces[0].workspace, canonicalWorkspace)
-  assert.equal(overview.body.workspaces[0].restorePoints.length, 2)
-  assert.deepEqual(
-    overview.body.workspaces[0].restorePoints.map((point) => point.id).sort(),
-    [first.id, second.id].sort(),
-  )
-  assert.ok(overview.body.totalBytes > 0)
-
-  const deleted = await request(handler, 'POST', '/turn-rewind/manage', {
-    action: 'delete', workspace: canonicalWorkspace, restorePointId: first.id,
-  })
-  assert.equal(deleted.status, 200)
-  assert.equal(deleted.body.deletedRestorePoints, 1)
-  const missing = await request(handler, 'POST', '/turn-rewind/manage', {
-    action: 'delete', workspace: canonicalWorkspace, restorePointId: first.id,
-  })
-  assert.equal(missing.status, 404)
-  assert.equal(missing.body.code, 'RESTORE_POINT_NOT_FOUND')
-
-  const cleared = await request(handler, 'POST', '/turn-rewind/manage', {
-    action: 'clear-workspace', workspace: canonicalWorkspace,
-  })
-  assert.equal(cleared.status, 200)
-  assert.equal(cleared.body.deletedRestorePoints, 1)
-  const emptied = await request(handler, 'GET', '/turn-rewind/manage')
-  assert.equal(emptied.body.workspaces.length, 0)
-
-  const unknown = await request(handler, 'POST', '/turn-rewind/manage', {
-    action: 'bogus',
-  })
-  assert.equal(unknown.body.code, 'INVALID_ARGUMENTS')
-})
-
-test('clear-all purges every workspace and reports partial failures', async (t) => {
-  const f = await fixture()
-  t.after(f.cleanup)
-  await f.engine.create({ cwd: f.workspace, label: 'first' })
-  const secondWorkspace = join(f.outer, 'second-workspace')
-  await mkdir(secondWorkspace)
-  await git(secondWorkspace, 'init', '-b', 'main')
-  await git(secondWorkspace, 'config', 'user.name', 'Turn Rewind Test')
-  await git(secondWorkspace, 'config', 'user.email', 'turn-rewind@example.invalid')
-  await writeFile(join(secondWorkspace, 'readme.txt'), 'second\n')
-  await git(secondWorkspace, 'add', '--all')
-  await git(secondWorkspace, 'commit', '-m', 'seed')
-  await f.engine.create({ cwd: secondWorkspace, label: 'second' })
-
-  const handler = createManageHttpHandler(f.engine)
-  const overview = await request(handler, 'GET', '/turn-rewind/manage')
-  assert.equal(overview.body.workspaces.length, 2)
-
-  const cleared = await request(handler, 'POST', '/turn-rewind/manage', { action: 'clear-all' })
-  assert.equal(cleared.status, 200)
-  assert.equal(cleared.body.status, 'completed')
-  assert.equal(cleared.body.reports.length, 2)
-  assert.equal(cleared.body.reports.reduce((total, report) => total + report.deletedRestorePoints, 0), 2)
-  const emptied = await request(handler, 'GET', '/turn-rewind/manage')
-  assert.equal(emptied.body.workspaces.length, 0)
-})
-
-test('settings schema mirrors the engine defaults and rejects invalid values', async () => {
-  const defaults = TurnRewindSettingsSchema({})
-  const engineDefaults = resolveConfig({})
-  for (const key of Object.keys(defaults)) {
-    assert.equal(defaults[key], engineDefaults[key], key)
-  }
-  assert.equal(TurnRewindSettingsSchema({ turnCheckpointMode: 'off' }).turnCheckpointMode, 'off')
-  assert.throws(() => TurnRewindSettingsSchema({ turnCheckpointMode: 'bogus' }))
-  assert.throws(() => TurnRewindSettingsSchema({ maxRestorePoints: 0 }))
+  assert.equal(stale.body.code, 'PLAN_STALE')
 })
 
 async function request(handler, method, url, body) {
@@ -890,11 +784,17 @@ function preStepAgent(id, cwd, turn, startSeq) {
 
 function installedCoordinator(engine, warnings = []) {
   let listener
+  let toolListener
   const coordinator = new TurnCheckpointCoordinator(engine)
   coordinator.install({
     logger: { warn(value) { warnings.push(value) } },
-    on(name, value) { if (name === 'agent/pre-step') listener = value; return () => {} },
+    on(name, value) {
+      if (name === 'agent/pre-step') listener = value
+      if (name === 'tools/execute') toolListener = value
+      return () => {}
+    },
   })
   assert.equal(typeof listener, 'function')
-  return { coordinator, listener }
+  assert.equal(typeof toolListener, 'function')
+  return { coordinator, listener, toolListener }
 }

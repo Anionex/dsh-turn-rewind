@@ -1017,9 +1017,12 @@ function collectPortalTargets(nodes: readonly RewindNodeLike[]): readonly Rewind
     const target = selectRewindMessageTarget(value)
     if (target === null) continue
     const row = rows.get(target.rowKey)
-    const messageRoot = row?.querySelector<HTMLElement>('[data-time-hover-root="true"]')
-    const actions = messageRoot?.lastElementChild
-    if (!(actions instanceof HTMLElement) || actions.querySelector(':scope > button') === null) continue
+    const messageRoot = row?.querySelector?.<HTMLElement>('[data-time-hover-root="true"]')
+    // Match the actions container by class or last child element
+    const actions = (typeof messageRoot?.querySelector === 'function'
+      ? messageRoot.querySelector<HTMLElement>('[class*="actions"]')
+      : undefined) ?? messageRoot?.lastElementChild
+    if (!(actions instanceof HTMLElement)) continue
     targets.push({ container: actions, matched: target.matched })
   }
   return targets

@@ -4,7 +4,6 @@ import { createDeadline } from './deadline.js'
 import { ChangeLedgerError, errorMessage } from './errors.js'
 import type { ChangeLedgerEngine } from './engine.js'
 import { discoverRepositoryRoot } from './git.js'
-import type { WorkspacePurgeReport } from './types.js'
 
 interface SessionEventLike {
   readonly type: string
@@ -28,6 +27,12 @@ interface AgentLike {
   readonly id: string
   readonly status: 'idle' | 'running'
   readonly session: SessionLike
+}
+
+interface ToolExecutionLike {
+  readonly agent?: AgentLike
+  readonly parent?: symbol
+  readonly signal: AbortSignal
 }
 
 interface AgentsLike {
@@ -103,6 +108,10 @@ declare module '@deepseek-ai/cordis' {
       },
       next: () => Promise<unknown>,
     ): Promise<unknown>
+    'tools/execute'(
+      exec: ToolExecutionLike,
+      next: () => Promise<unknown>,
+    ): Promise<unknown>
   }
 }
 
@@ -111,7 +120,7 @@ const BODY_LIMIT = 64 * 1024
 const INITIAL_CHANGE_PREVIEW_LIMIT = 8
 const MAX_CHANGE_PAGE_SIZE = 200
 
-/** Capture each turn before its opening user message can trigger model or tool work. */
+/** Capture each turn beside model work and gate root tool side effects on its bounded outcome. */
 export class TurnCheckpointCoordinator {
   private readonly captures = new Map<string, Promise<void>>()
   private readonly pending = new Set<string>()
@@ -121,10 +130,17 @@ export class TurnCheckpointCoordinator {
 
   constructor(private readonly engine: ChangeLedgerEngine) {}
 
-  /** Install the first-step gate; checkpoint failures are recorded but never reject the user turn. */
+  /** Keep sidecar checkpoint work out of the Agent response waterfall. */
   install(ctx: Context): void {
     ctx.on('agent/pre-step', async ({ agent, turn, step, signal }, next) => {
-      if (step === 1) await this.capture(ctx, agent, turn, signal)
+      if (step === 1) this.startCapture(ctx, agent, turn, signal)
+      return next()
+    }, { prepend: true })
+
+    ctx.on('tools/execute', async (exec, next) => {
+      if (exec.agent !== undefined && exec.parent === undefined) {
+        await this.waitForOpenTurn(exec.agent, exec.signal)
+      }
       return next()
     }, { prepend: true })
   }
@@ -137,6 +153,20 @@ export class TurnCheckpointCoordinator {
     if (reason !== undefined) return { status: 'skipped', reason }
     const error = this.failures.get(key)
     return error === undefined ? { status: 'missing' } : { status: 'failed', error }
+  }
+
+  private startCapture(
+    ctx: Pick<Context, 'logger'>,
+    agent: AgentLike,
+    turn: number,
+    signal: AbortSignal,
+  ): void {
+    const key = checkpointKey(agent.id, turn)
+    if (this.captures.has(key)) return
+    const capture = this.capture(ctx, agent, turn, signal).catch(async (error: unknown) => {
+      await this.recordFailure(ctx, agent.id, turn, error)
+    })
+    this.captures.set(key, capture)
   }
 
   private async capture(
@@ -160,11 +190,6 @@ export class TurnCheckpointCoordinator {
     const captureDeadline = createDeadline(Math.max(1, timeoutMs - reserveMs))
     const captureSignal = AbortSignal.any([signal, captureDeadline.signal])
     try {
-      const existing = this.captures.get(key)
-      if (existing !== undefined) {
-        await waitWithSignal(existing, captureSignal).catch(() => undefined)
-        return
-      }
       this.pending.add(key)
       this.failures.delete(key)
       this.skips.delete(key)
@@ -202,7 +227,6 @@ export class TurnCheckpointCoordinator {
           this.pending.delete(key)
         }
       })()
-      this.captures.set(key, capture)
       try {
         await waitWithSignal(capture, outcomeSignal)
       } catch (error) {
@@ -218,6 +242,24 @@ export class TurnCheckpointCoordinator {
     } finally {
       captureDeadline.cancel()
       outcomeDeadline.cancel()
+    }
+  }
+
+  /** Wait only for the bounded checkpoint outcome of the Agent's open turn. */
+  private async waitForOpenTurn(agent: AgentLike, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return
+    const boundary = agent.session.events.findLast(event => event.type === 'turn/start' || event.type === 'turn/end')
+    if (boundary?.type !== 'turn/start') return
+    const turn = boundary.data.turn
+    if (!Number.isSafeInteger(turn) || (turn as number) < 0) return
+    const capture = this.captures.get(checkpointKey(agent.id, turn as number))
+    if (capture === undefined) return
+    try {
+      await waitWithSignal(capture, signal)
+    } catch (error) {
+      // Delegate caller cancellation so the DSH tool runtime preserves its
+      // canonical ABORTED_BEFORE_DISPATCH result instead of a wrapper error.
+      if (!signal.aborted) throw error
     }
   }
 
@@ -313,101 +355,6 @@ export function installRewindHttp(
   }), 'change-ledger.rewindHttp')
 }
 
-export const MANAGE_HTTP_PATH = '/turn-rewind/manage'
-
-/** Register the same-origin storage-management endpoint consumed by the settings card. */
-export function installManageHttp(ctx: Context, engine: ChangeLedgerEngine): void {
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'exact',
-    path: MANAGE_HTTP_PATH,
-    handler: createManageHttpHandler(engine),
-  }), 'change-ledger.manageHttp')
-}
-
-/** Build the storage-management route as a testable unit. */
-export function createManageHttpHandler(
-  engine: ChangeLedgerEngine,
-): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void> {
-  return async (request, response) => {
-    try {
-      if (request.method === 'GET') {
-        const workspaces = await engine.listWorkspaces()
-        json(response, 200, {
-          storageDir: engine.config.storageDir,
-          totalBytes: workspaces.reduce((total, workspace) => total + workspace.totalBytes, 0),
-          workspaces: workspaces.map((workspace) => ({
-            workspace: workspace.workspace,
-            totalBytes: workspace.totalBytes,
-            recoveryCount: workspace.recoveryCount,
-            restorePoints: workspace.restorePoints.map((point) => ({
-              id: point.id,
-              kind: point.kind,
-              format: point.format,
-              createdAt: point.createdAt,
-              totalBytes: point.totalBytes,
-              fileCount: point.fileCount,
-              ...(point.sessionId === undefined ? {} : { sessionId: point.sessionId }),
-              ...(point.turn === undefined ? {} : { turn: point.turn }),
-              ...(point.label === undefined ? {} : { label: point.label }),
-            })),
-          })),
-        })
-        return
-      }
-      if (request.method === 'POST') {
-        const body = objectBody(await readBody(request))
-        const action = requiredText(body.action, 'action')
-        if (action === 'delete') {
-          const workspace = requiredText(body.workspace, 'workspace')
-          const restorePointId = requiredText(body.restorePointId, 'restorePointId')
-          const report = await engine.purgeWorkspace({ workspace, restorePointIds: [restorePointId] })
-          if (report.deletedRestorePoints === 0) {
-            throw new ChangeLedgerError(
-              report.retainedRestorePoints > 0 ? 'RECOVERY_REFERENCE' : 'RESTORE_POINT_NOT_FOUND',
-              report.retainedRestorePoints > 0
-                ? 'restore point is required by an incomplete recovery journal'
-                : `restore point ${restorePointId} does not exist`,
-            )
-          }
-          json(response, 200, { status: 'completed', action, ...report })
-          return
-        }
-        if (action === 'clear-workspace') {
-          const workspace = requiredText(body.workspace, 'workspace')
-          json(response, 200, { status: 'completed', action, ...await engine.purgeWorkspace({ workspace }) })
-          return
-        }
-        if (action === 'clear-all') {
-          const reports: WorkspacePurgeReport[] = []
-          const failures: { readonly workspace: string; readonly error: string }[] = []
-          for (const overview of await engine.listWorkspaces()) {
-            try {
-              reports.push(await engine.purgeWorkspace({ workspace: overview.workspace }))
-            } catch (error) {
-              failures.push({ workspace: overview.workspace, error: errorMessage(error) })
-            }
-          }
-          json(response, 200, {
-            status: failures.length > 0 ? 'partial' : 'completed',
-            action,
-            reports,
-            ...(failures.length > 0 ? { failures } : {}),
-          })
-          return
-        }
-        throw new ChangeLedgerError('INVALID_ARGUMENTS', 'action must be "delete", "clear-workspace", or "clear-all"')
-      }
-      json(response, 405, { error: 'method not allowed' })
-    } catch (error) {
-      const status = error instanceof ChangeLedgerError && error.code === 'RESTORE_POINT_NOT_FOUND' ? 404 : 409
-      json(response, status, {
-        error: errorMessage(error),
-        code: error instanceof ChangeLedgerError ? error.code : 'MANAGE_FAILED',
-      })
-    }
-  }
-}
-
 /** Build the exact-route handler as a testable unit. */
 export function createRewindHttpHandler(
   ctx: Pick<Context, 'sessions' | 'sessionQuery' | 'apiProxy'> & { readonly agents?: AgentsLike },
@@ -423,16 +370,7 @@ export function createRewindHttpHandler(
         const detailsOnly = url.searchParams.get('details') === '1'
         const offset = nonNegativeInteger(url.searchParams.get('offset') ?? '0', 'offset')
         const limit = pageSize(url.searchParams.get('limit'), detailsOnly ? MAX_CHANGE_PAGE_SIZE : INITIAL_CHANGE_PREVIEW_LIMIT)
-        const { session, target } = await resolveMessageTarget(ctx, sessionId, messageSeq)
-        let checkpoint: MessageCheckpoint | undefined
-        try {
-          checkpoint = await resolveMessageCheckpoint(ctx, engine, sessionId, session, target)
-        } catch (error) {
-          // File-checkpoint discovery is allowed to fail independently: the dialog
-          // must still expose message-only rewind for a valid Session boundary.
-          json(response, 200, { status: 'failed', error: errorMessage(error) })
-          return
-        }
+        const { target, checkpoint } = await resolveMessageCheckpoint(ctx, engine, sessionId, messageSeq)
         if (checkpoint === undefined) {
           const durableSkip = await engine.findTurnCheckpointSkip({
             cwd: target.cwd,
@@ -488,20 +426,11 @@ export function createRewindHttpHandler(
       if (request.method === 'POST') {
         const body = objectBody(await readBody(request))
         const mode = body.mode
-        if (mode !== 'code' && mode !== 'both' && mode !== 'messages') {
-          throw new ChangeLedgerError('INVALID_ARGUMENTS', 'mode must be "code", "both", or "messages"')
+        if (mode !== 'code' && mode !== 'both') {
+          throw new ChangeLedgerError('INVALID_ARGUMENTS', 'mode must be "code" or "both"')
         }
         const sessionId = requiredText(body.sessionId, 'sessionId')
         const messageSeq = nonNegativeInteger(body.messageSeq, 'messageSeq')
-        if (mode === 'messages') {
-          // Message-only rewind never mutates project files, so no checkpoint, no
-          // restore plan, and no shared-workspace gate apply; the conversation
-          // restart revalidates the message boundary itself.
-          const { target } = await resolveMessageTarget(ctx, sessionId, messageSeq)
-          const fork = await createConversationRestart(ctx, sessionId, target)
-          json(response, 200, { status: 'completed', mode, sessionId: fork.sessionId })
-          return
-        }
         const checkpointId = requiredText(body.checkpointId, 'checkpointId')
         const checkpoint = await checkpointForRequest(ctx, engine, sessionId, messageSeq, checkpointId)
         const activeSessionIds = await sharedWorkspaceSessions(ctx.agents, checkpoint.cwd)
@@ -579,29 +508,20 @@ interface MessageCheckpoint extends MessageTarget {
   readonly id: string
 }
 
-async function resolveMessageTarget(
-  ctx: Pick<Context, 'sessions' | 'sessionQuery'>,
-  sessionId: string,
-  messageSeq: number,
-): Promise<{ readonly session: SessionLike; readonly target: MessageTarget }> {
-  const session = await readSession(ctx, sessionId)
-  return { session, target: messageTarget(session, messageSeq) }
-}
-
 async function resolveMessageCheckpoint(
   ctx: Pick<Context, 'sessions' | 'sessionQuery'>,
   engine: ChangeLedgerEngine,
   sessionId: string,
-  source: SessionLike,
-  target: MessageTarget,
-): Promise<MessageCheckpoint | undefined> {
-  let current = source
+  messageSeq: number,
+): Promise<{ readonly target: MessageTarget; readonly checkpoint?: MessageCheckpoint }> {
+  let current = await readSession(ctx, sessionId)
+  const target = messageTarget(current, messageSeq)
   const direct = await engine.findTurnCheckpoint({ cwd: target.cwd, sessionId, turn: target.turn })
   if (direct !== undefined) {
     if (direct.turnStartSeq !== target.turnStartSeq) {
       throw new ChangeLedgerError('PLAN_STALE', 'the message checkpoint no longer matches its turn start')
     }
-    return { ...target, id: direct.id }
+    return { target, checkpoint: { ...target, id: direct.id } }
   }
 
   const seen = new Set<string>([sessionId])
@@ -613,7 +533,7 @@ async function resolveMessageCheckpoint(
     }
     if (parentId === undefined || seedLength === undefined
       || target.messageSeq >= seedLength || target.turnStartSeq >= seedLength) {
-      return undefined
+      return { target }
     }
     if (seen.has(parentId)) {
       throw new ChangeLedgerError('PLAN_STALE', 'session fork lineage contains a cycle')
@@ -624,7 +544,7 @@ async function resolveMessageCheckpoint(
     } catch (error) {
       throw new ChangeLedgerError('PLAN_STALE', `parent session ${parentId} is unavailable`, { cause: error })
     }
-    const parentTarget = messageTarget(current, target.messageSeq)
+    const parentTarget = messageTarget(current, messageSeq)
     if (parentTarget.turn !== target.turn
       || parentTarget.turnStartSeq !== target.turnStartSeq
       || parentTarget.previousTurnEndSeq !== target.previousTurnEndSeq) {
@@ -635,7 +555,7 @@ async function resolveMessageCheckpoint(
     if (inherited.turnStartSeq !== target.turnStartSeq) {
       throw new ChangeLedgerError('PLAN_STALE', 'the inherited message checkpoint no longer matches the fork boundary')
     }
-    return { ...target, id: inherited.id }
+    return { target, checkpoint: { ...target, id: inherited.id } }
   }
 }
 
@@ -646,8 +566,7 @@ async function checkpointForRequest(
   messageSeq: number,
   requestedId: string,
 ): Promise<MessageCheckpoint> {
-  const { session, target } = await resolveMessageTarget(ctx, sessionId, messageSeq)
-  const checkpoint = await resolveMessageCheckpoint(ctx, engine, sessionId, session, target)
+  const { target, checkpoint } = await resolveMessageCheckpoint(ctx, engine, sessionId, messageSeq)
   if (checkpoint === undefined) {
     throw new ChangeLedgerError('RESTORE_POINT_NOT_FOUND', `message ${String(target.messageSeq)} has no rewind checkpoint`)
   }
@@ -660,23 +579,23 @@ async function checkpointForRequest(
 async function createConversationRestart(
   ctx: Pick<Context, 'sessions' | 'sessionQuery' | 'apiProxy'>,
   sourceId: string,
-  target: MessageTarget,
+  checkpoint: MessageCheckpoint,
 ): Promise<{ readonly sessionId: string }> {
   const source = await readSession(ctx, sourceId)
-  const current = messageTarget(source, target.messageSeq)
-  if (current.turn !== target.turn
-    || current.turnStartSeq !== target.turnStartSeq
-    || current.previousTurnEndSeq !== target.previousTurnEndSeq) {
+  const current = messageTarget(source, checkpoint.messageSeq)
+  if (current.turn !== checkpoint.turn
+    || current.turnStartSeq !== checkpoint.turnStartSeq
+    || current.previousTurnEndSeq !== checkpoint.previousTurnEndSeq) {
     throw new ChangeLedgerError('PLAN_STALE', 'the session no longer contains the selected message boundary')
   }
-  const response = target.previousTurnEndSeq === undefined
+  const response = checkpoint.previousTurnEndSeq === undefined
     ? await ctx.apiProxy.sessions.create({
         rpcId: randomUUID(),
-        payload: { cwd: target.cwd },
+        payload: { cwd: checkpoint.cwd },
       })
     : await ctx.apiProxy.sessions.fork({
         rpcId: randomUUID(),
-        payload: { sessionId: sourceId, atSeq: target.previousTurnEndSeq },
+        payload: { sessionId: sourceId, atSeq: checkpoint.previousTurnEndSeq },
       })
   if (!response.result.ok) {
     throw new ChangeLedgerError('CONVERSATION_REWIND_FAILED', response.result.error.message)
@@ -809,4 +728,74 @@ async function readBody(request: HttpRequestLike): Promise<unknown> {
 function json(response: HttpResponseLike, status: number, value: unknown): void {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
   response.end(`${JSON.stringify(value)}\n`)
+}
+
+export const MANAGE_HTTP_PATH = '/turn-rewind/manage'
+
+/** Register the same-origin storage-management endpoint consumed by the settings card. */
+export function installManageHttp(ctx: Context, engine: ChangeLedgerEngine): void {
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: MANAGE_HTTP_PATH,
+    handler: createManageHttpHandler(engine),
+  }), 'change-ledger.manageHttp')
+}
+
+/** Build the storage-management route as a testable unit. */
+export function createManageHttpHandler(
+  engine: ChangeLedgerEngine,
+): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void> {
+  return async (request, response) => {
+    try {
+      if (request.method === 'GET') {
+        const workspaces = await engine.listWorkspaces()
+        json(response, 200, {
+          storageDir: engine.config.storageDir,
+          totalBytes: workspaces.reduce((total, workspace) => total + workspace.totalBytes, 0),
+          workspaces: workspaces.map((workspace) => ({
+            workspace: workspace.workspace,
+            totalBytes: workspace.totalBytes,
+            recoveryCount: workspace.recoveryCount,
+            restorePoints: workspace.restorePoints.map((point) => ({
+              id: point.id,
+              kind: point.kind,
+              format: point.format,
+              createdAt: point.createdAt,
+              totalBytes: point.totalBytes,
+              fileCount: point.fileCount,
+              ...(point.sessionId === undefined ? {} : { sessionId: point.sessionId }),
+              ...(point.turn === undefined ? {} : { turn: point.turn }),
+              ...(point.label === undefined ? {} : { label: point.label }),
+            })),
+          })),
+        })
+        return
+      }
+      if (request.method === 'POST') {
+        const body = objectBody(await readBody(request))
+        const action = requiredText(body.action, 'action')
+        if (action === 'delete') {
+          const workspace = requiredText(body.workspace, 'workspace')
+          const restorePointId = requiredText(body.restorePointId, 'restorePointId')
+          const report = await engine.purgeWorkspace({ workspace, restorePointIds: [restorePointId] })
+          if (report.deletedRestorePoints === 0) {
+            throw new ChangeLedgerError(
+              report.retainedRestorePoints > 0 ? 'RECOVERY_REFERENCE' : 'RESTORE_POINT_NOT_FOUND',
+              report.retainedRestorePoints > 0
+                ? 'restore point is required by an incomplete recovery journal'
+                : `restore point ${restorePointId} does not exist`,
+            )
+          }
+          json(response, 200, { status: 'completed', action, ...report })
+          return
+        }
+        throw new ChangeLedgerError('INVALID_ARGUMENTS', `unsupported manage action ${action}`)
+      }
+      response.writeHead(405, { allow: 'GET, POST' })
+      response.end()
+    } catch (error) {
+      const status = error instanceof ChangeLedgerError && error.code === 'RESTORE_POINT_NOT_FOUND' ? 404 : 409
+      json(response, status, { error: errorMessage(error), code: error instanceof ChangeLedgerError ? error.code : 'MANAGE_FAILED' })
+    }
+  }
 }
