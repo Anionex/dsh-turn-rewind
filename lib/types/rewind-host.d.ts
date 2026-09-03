@@ -13,7 +13,8 @@ interface SessionHeaderLike {
 interface SessionLike {
     readonly id: string;
     readonly header: SessionHeaderLike;
-    readonly events: readonly SessionEventLike[];
+    readonly events?: readonly SessionEventLike[];
+    snapshotEvents?(fromSeq?: number, toSeqExclusive?: number): readonly SessionEventLike[];
 }
 interface AgentLike {
     readonly id: string;

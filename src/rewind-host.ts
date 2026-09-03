@@ -20,7 +20,8 @@ interface SessionHeaderLike {
 interface SessionLike {
   readonly id: string
   readonly header: SessionHeaderLike
-  readonly events: readonly SessionEventLike[]
+  readonly events?: readonly SessionEventLike[]
+  snapshotEvents?(fromSeq?: number, toSeqExclusive?: number): readonly SessionEventLike[]
 }
 
 interface AgentLike {
@@ -87,6 +88,14 @@ interface ApiProxyLike {
         | { readonly ok: false; readonly error: { readonly message: string } }
     }>
   }
+}
+
+function getSessionEvents(session: SessionLike | undefined): readonly SessionEventLike[] {
+  if (!session) return []
+  if (typeof session.snapshotEvents === 'function') {
+    return session.snapshotEvents()
+  }
+  return session.events ?? []
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -178,7 +187,8 @@ export class TurnCheckpointCoordinator {
     const key = checkpointKey(agent.id, turn)
     const cwd = agent.session.header.cwd
     if (cwd === undefined) return
-    const start = agent.session.events.findLast(event => event.type === 'turn/start' && event.data.turn === turn)
+    const events = getSessionEvents(agent.session)
+    const start = events.findLast(event => event.type === 'turn/start' && event.data.turn === turn)
     if (start === undefined) {
       await this.recordFailure(ctx, agent.id, turn, new Error('turn/start is unavailable before the first step'))
       return
@@ -248,7 +258,8 @@ export class TurnCheckpointCoordinator {
   /** Wait only for the bounded checkpoint outcome of the Agent's open turn. */
   private async waitForOpenTurn(agent: AgentLike, signal: AbortSignal): Promise<void> {
     if (signal.aborted) return
-    const boundary = agent.session.events.findLast(event => event.type === 'turn/start' || event.type === 'turn/end')
+    const events = getSessionEvents(agent.session)
+    const boundary = events.findLast(event => event.type === 'turn/start' || event.type === 'turn/end')
     if (boundary?.type !== 'turn/start') return
     const turn = boundary.data.turn
     if (!Number.isSafeInteger(turn) || (turn as number) < 0) return
@@ -606,16 +617,17 @@ async function createConversationRestart(
 function messageTarget(session: SessionLike, messageSeq: number): MessageTarget {
   const cwd = session.header.cwd
   if (cwd === undefined) throw new ChangeLedgerError('WORKSPACE_REQUIRED', `session ${session.id} has no workspace`)
-  const message = session.events.find(event => event.type === 'user/message' && event.seq === messageSeq && isDirectUserMessage(event))
+  const events = getSessionEvents(session)
+  const message = events.find(event => event.type === 'user/message' && event.seq === messageSeq && isDirectUserMessage(event))
   if (message === undefined) {
     throw new ChangeLedgerError('RESTORE_POINT_NOT_FOUND', `session ${session.id} has no user message at ${String(messageSeq)}`)
   }
-  const start = session.events.findLast(event => event.type === 'turn/start' && event.seq < messageSeq)
+  const start = events.findLast(event => event.type === 'turn/start' && event.seq < messageSeq)
   const turn = start?.data.turn
   if (start === undefined || !Number.isSafeInteger(turn) || (turn as number) < 0) {
     throw new ChangeLedgerError('PLAN_STALE', 'the selected user message has no valid turn start')
   }
-  const openingMessage = session.events.find(event => (
+  const openingMessage = events.find(event => (
     event.type === 'user/message'
     && event.seq > start.seq
     && event.seq <= messageSeq
@@ -624,11 +636,11 @@ function messageTarget(session: SessionLike, messageSeq: number): MessageTarget 
   if (openingMessage?.seq !== messageSeq) {
     throw new ChangeLedgerError('RESTORE_POINT_NOT_FOUND', 'rewind is available only for the opening user message of a turn')
   }
-  const interveningEnd = session.events.find(event => event.type === 'turn/end' && event.seq > start.seq && event.seq < messageSeq)
+  const interveningEnd = events.find(event => event.type === 'turn/end' && event.seq > start.seq && event.seq < messageSeq)
   if (interveningEnd !== undefined) {
     throw new ChangeLedgerError('PLAN_STALE', 'the selected user message is outside its recorded turn')
   }
-  const previousEnd = session.events.findLast(event => event.type === 'turn/end' && event.seq < start.seq)
+  const previousEnd = events.findLast(event => event.type === 'turn/end' && event.seq < start.seq)
   return {
     messageSeq,
     turn: turn as number,
