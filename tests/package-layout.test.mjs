@@ -27,6 +27,10 @@ test('package is a portable, prebuilt DSH Profile Bundle', async () => {
       '0.1.0-rc.8': 'compatible',
       '0.1.1-rc.1': 'compatible',
       '0.1.1-rc.2': 'compatible',
+      '0.1.2-alpha.1': 'compatible',
+      '0.1.2-alpha.3': 'compatible',
+      '0.1.2-alpha.4': 'compatible',
+      '0.1.2-alpha.5': 'compatible',
     },
     profiles: ['web'],
   })

@@ -12,14 +12,29 @@ interface ConversationChatNodeLike {
     readonly kind: string;
     readonly data: ConversationNodeLike;
 }
-interface ConversationSnapshotLike {
-    readonly nodes: readonly ConversationNodeLike[];
-    readonly chat?: {
-        readonly nodes: {
-            values(): readonly ConversationChatNodeLike[];
-        };
-    };
+/**
+ * Chat node store exposed by the Chat target. DSH 0.1.2+ publishes a mutable
+ * keyed store; older clients published a Map with the same `get` contract.
+ */
+interface ChatNodeStoreLike {
+    get(key: string): RewindNodeLike | undefined;
+    values?(): Iterable<RewindNodeLike>;
 }
+/** Chat projection shared by `session.chat` (0.1.1) and the `useChat` hook (0.1.2+). */
+interface ChatSnapshotLike {
+    readonly order?: readonly string[];
+    readonly nodes?: ChatNodeStoreLike | readonly RewindNodeLike[];
+}
+/**
+ * Snapshot seen by a session-scoped slot entry. 0.1.1 exposes the chat
+ * projection as `snapshot.chat`; 0.1.2+ moved it to the separate `useChat`
+ * hook, so the same snapshot is the chat projection itself.
+ */
+interface ConversationSnapshotLike extends ChatSnapshotLike {
+    readonly chat?: ChatSnapshotLike;
+}
+/** Selector hook shape shared by `useSession` and `useChat`. */
+type SnapshotSelectorHook = <T>(selector: (snapshot: ConversationSnapshotLike) => T) => T;
 type RewindNodeLike = ConversationNodeLike | ConversationChatNodeLike;
 interface RewindMatch {
     readonly messageSeq: number;
@@ -33,7 +48,8 @@ interface RewindMessageActionProps {
 interface RewindPortalBridgeProps {
     readonly sessionId: string;
     readonly openRestoredSession: (sessionId: string, promptText: string) => Promise<void>;
-    readonly useSession: <T>(selector: (snapshot: ConversationSnapshotLike) => T) => T;
+    readonly useSession: SnapshotSelectorHook;
+    readonly useChat?: SnapshotSelectorHook;
 }
 interface SlotsLike {
     inject(name: string, install: () => unknown): void;
@@ -127,8 +143,20 @@ export declare function selectRewindMessage(node: ConversationNodeLike): RewindM
 /** Browser plugin entry: bridge every direct user-message action row to the rewind UI. */
 export declare const inject: string[];
 export declare function apply(ctx: ClientContextLike): void;
+/**
+ * Resolve the ordered chat node list from one chat projection.
+ *
+ * Both inputs keep a stable identity across renders: `order` is republished only
+ * when the node set changes and the store is a mutable handle, so the caller can
+ * memoize the list instead of allocating a new array on every render (a fresh
+ * array per render makes `useSyncExternalStore` loop forever).
+ * @param order - ordered node keys, or null when the projection is absent.
+ * @param store - keyed node store, a legacy node array, or null.
+ * @returns the chat nodes in render order.
+ */
+export declare function collectChatNodes(order: readonly string[] | null, store: ChatNodeStoreLike | readonly RewindNodeLike[] | null): readonly RewindNodeLike[];
 /** Session-scoped bridge that portals rewind controls into direct user-message action rows. */
-export declare function RewindMessagePortals({ sessionId, openRestoredSession, useSession }: RewindPortalBridgeProps): ReactNode;
+export declare function RewindMessagePortals({ sessionId, openRestoredSession, useSession, useChat }: RewindPortalBridgeProps): ReactNode;
 /** User-message action and its review-first file/conversation restore dialog. */
 export declare function RewindMessageAction({ matched, sessionId, openRestoredSession }: RewindMessageActionProps): ReactNode;
 interface TurnRewindSettingsCardProps {
@@ -143,6 +171,26 @@ export declare function selectRewindMessageTarget(value: RewindNodeLike): {
     readonly matched: RewindMatch;
     readonly rowKey: string;
 } | null;
+/**
+ * Read one rewind response body without ever leaking a raw parse error.
+ *
+ * A missing route, a restarted Host, or a proxy answering before the plugin
+ * loads all produce a body that is not the plugin's JSON envelope; those must
+ * surface as an explained failure instead of `Failed to execute 'json' …`.
+ * @param response - fetch response from the rewind endpoint.
+ * @returns the decoded JSON body.
+ */
+export declare function responseJson(response: Response): Promise<unknown>;
 /** Describe the user-visible result of restoring one changed file. */
 export declare function fileRecoveryLabel(kind: ChangeKind): string;
+/**
+ * Explain one recorded checkpoint failure in user terms.
+ *
+ * The Host records the raw `[CODE] diagnostic` line; a non-Git project
+ * directory is the common case and deserves a plain sentence instead of a
+ * `git rev-parse` transcript.
+ * @param message - recorded checkpoint failure message.
+ * @returns one user-facing sentence.
+ */
+export declare function explainCheckpointFailure(message: string): string;
 export {};

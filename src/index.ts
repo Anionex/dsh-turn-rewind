@@ -30,7 +30,9 @@ export class ChangeLedgerService {
     this.engine = new ChangeLedgerEngine(config)
     const checkpoints = new TurnCheckpointCoordinator(this.engine)
     ctx.inject(['agents'], (scope: Context) => { checkpoints.install(scope) })
-    ctx.inject(['webServer', 'sessions', 'sessionQuery', 'apiProxy', 'agents'], (scope: Context) => {
+    // `apiProxy` is deliberately absent: DSH 0.1.2-alpha carriers (DSH Desktop 2.x)
+    // provide `sessionController` instead, and the route must exist on both.
+    ctx.inject(['webServer', 'sessions', 'sessionQuery', 'agents'], (scope: Context) => {
       installRewindHttp(scope, this.engine, checkpoints)
       installManageHttp(scope, this.engine)
     })

@@ -97,6 +97,31 @@ interface ApiProxyLike {
         }>;
     };
 }
+/**
+ * Conversation create/fork capability of the Session controller service.
+ *
+ * DSH 0.1.2-alpha replaced the `apiProxy` RPC envelope with this plain service,
+ * so carriers without `apiProxy` (DSH Desktop 2.x) reach the same capability here.
+ */
+interface SessionControllerLike {
+    create(request: {
+        readonly cwd?: string;
+        readonly workspaceId?: string;
+    }): Promise<{
+        readonly sessionId: string;
+    }>;
+    fork(request: {
+        readonly sessionId: string;
+        readonly atSeq?: number;
+    }): Promise<{
+        readonly sessionId: string;
+    }>;
+}
+/** Services a conversation restart can be built on, in either carrier shape. */
+type ConversationRestartContext = Pick<Context, 'sessions' | 'sessionQuery'> & {
+    readonly apiProxy?: ApiProxyLike;
+    readonly sessionController?: SessionControllerLike;
+};
 declare module '@deepseek-ai/cordis' {
     interface Context {
         agents: AgentsLike;
@@ -104,6 +129,7 @@ declare module '@deepseek-ai/cordis' {
         sessionQuery: SessionQueryLike;
         webServer: HttpServerLike;
         apiProxy: ApiProxyLike;
+        sessionController: SessionControllerLike;
     }
     interface Events {
         'agent/pre-step'(payload: {
@@ -143,7 +169,7 @@ export declare class TurnCheckpointCoordinator {
 /** Register the same-origin preview/apply endpoint consumed by the browser half. */
 export declare function installRewindHttp(ctx: Context, engine: ChangeLedgerEngine, coordinator: TurnCheckpointCoordinator): void;
 /** Build the exact-route handler as a testable unit. */
-export declare function createRewindHttpHandler(ctx: Pick<Context, 'sessions' | 'sessionQuery' | 'apiProxy'> & {
+export declare function createRewindHttpHandler(ctx: ConversationRestartContext & {
     readonly agents?: AgentsLike;
 }, engine: ChangeLedgerEngine, coordinator: TurnCheckpointCoordinator): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void>;
 export declare const MANAGE_HTTP_PATH = "/turn-rewind/manage";

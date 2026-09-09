@@ -114,7 +114,14 @@ test('browser bundle anchors rewind to direct user messages and restores their d
   assert.deepEqual(JSON.parse(JSON.stringify(settingsRegistration.entry.inject())), {})
 })
 
-test('browser bundle finds user actions through the conversation slot wrapper', async () => {
+const CHAT_NODE = {
+  key: '13:input-messageabc',
+  kind: 'user',
+  data: { kind: 'user', seq: 7, content: [{ type: 'text', text: '修复问题' }] },
+}
+
+/** Boot the browser bundle against a minimal DOM double for portal-target tests. */
+async function bootPortalBridge() {
   const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
   let plugin
   let capturedTargets
@@ -161,6 +168,7 @@ test('browser bundle finds user actions through the conversation slot wrapper', 
                 useCallback: value => value,
                 useEffect() {},
                 useLayoutEffect(setup) { cleanup = setup() },
+                useMemo: compute => compute(),
                 useRef: value => ({ current: value }),
                 useState(initial) {
                   return [initial, update => {
@@ -178,8 +186,17 @@ test('browser bundle finds user actions through the conversation slot wrapper', 
     },
   }
   vm.runInNewContext(source, context)
+  return {
+    plugin,
+    actions,
+    targets: () => capturedTargets,
+    dispose: () => { if (typeof cleanup === 'function') cleanup() },
+  }
+}
 
-  const rendered = plugin.RewindMessagePortals({
+test('browser bundle finds user actions through the 0.1.1 session chat projection', async () => {
+  const harness = await bootPortalBridge()
+  const rendered = harness.plugin.RewindMessagePortals({
     sessionId: 'session-source',
     async openRestoredSession() {},
     useSession(selector) {
@@ -188,11 +205,7 @@ test('browser bundle finds user actions through the conversation slot wrapper', 
         chat: {
           nodes: {
             values() {
-              return [{
-                key: '13:input-messageabc',
-                kind: 'user',
-                data: { kind: 'user', seq: 7, content: [{ type: 'text', text: '修复问题' }] },
-              }]
+              return [CHAT_NODE]
             },
           },
         },
@@ -201,13 +214,129 @@ test('browser bundle finds user actions through the conversation slot wrapper', 
   })
 
   assert.equal(rendered.length, 0)
-  assert.equal(capturedTargets.length, 1)
-  assert.equal(capturedTargets[0].container, actions)
-  assert.deepEqual(JSON.parse(JSON.stringify(capturedTargets[0].matched)), {
+  const targets = harness.targets()
+  assert.equal(targets.length, 1)
+  assert.equal(targets[0].container, harness.actions)
+  assert.deepEqual(JSON.parse(JSON.stringify(targets[0].matched)), {
     messageSeq: 7,
     promptText: '修复问题',
   })
-  cleanup()
+  harness.dispose()
+})
+
+test('browser bundle follows the 0.1.2 chat hook order and node store', async () => {
+  const harness = await bootPortalBridge()
+  const store = {
+    get(key) {
+      assert.equal(key, '13:input-messageabc')
+      return CHAT_NODE
+    },
+  }
+  const rendered = harness.plugin.RewindMessagePortals({
+    sessionId: 'session-source',
+    async openRestoredSession() {},
+    useSession() {
+      throw new Error('useSession must not be read while useChat is provided')
+    },
+    useChat(selector) {
+      return selector({ order: ['13:input-messageabc'], nodes: store })
+    },
+  })
+
+  assert.equal(rendered.length, 0)
+  const targets = harness.targets()
+  assert.equal(targets.length, 1)
+  assert.equal(targets[0].container, harness.actions)
+  assert.deepEqual(JSON.parse(JSON.stringify(targets[0].matched)), {
+    messageSeq: 7,
+    promptText: '修复问题',
+  })
+  harness.dispose()
+})
+
+test('browser bundle stays inert when neither snapshot exposes chat nodes', async () => {
+  const harness = await bootPortalBridge()
+  const rendered = harness.plugin.RewindMessagePortals({
+    sessionId: 'session-source',
+    async openRestoredSession() {},
+    useSession(selector) {
+      return selector({
+        sessionId: 'session-source',
+        running: false,
+        openState: 'ready',
+      })
+    },
+  })
+
+  assert.equal(rendered.length, 0)
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.targets())), [])
+  harness.dispose()
+})
+
+test('chat node collection accepts keyed stores, legacy arrays, and absent projections', async () => {
+  const harness = await bootPortalBridge()
+  const { collectChatNodes } = harness.plugin
+
+  assert.deepEqual(JSON.parse(JSON.stringify(collectChatNodes(null, null))), [])
+  assert.equal(collectChatNodes(['missing'], { get: () => undefined }).length, 0)
+  assert.deepEqual(JSON.parse(JSON.stringify(collectChatNodes(['13:input-messageabc'], {
+    get: key => key === '13:input-messageabc' ? CHAT_NODE : undefined,
+  }))), [JSON.parse(JSON.stringify(CHAT_NODE))])
+  assert.deepEqual(JSON.parse(JSON.stringify(collectChatNodes(null, [CHAT_NODE]))), [JSON.parse(JSON.stringify(CHAT_NODE))])
+  assert.deepEqual(JSON.parse(JSON.stringify(collectChatNodes(null, {
+    get: () => undefined,
+    values: () => [CHAT_NODE],
+  }))), [JSON.parse(JSON.stringify(CHAT_NODE))])
+  assert.deepEqual(JSON.parse(JSON.stringify(collectChatNodes(null, { get: () => undefined }))), [])
+  harness.dispose()
+})
+
+test('rewind responses never leak raw JSON parse errors', async () => {
+  const harness = await bootPortalBridge()
+  const { responseJson } = harness.plugin
+  const respond = (ok, status, body) => ({ ok, status, text: async () => body })
+
+  await assert.rejects(
+    () => responseJson(respond(false, 404, '')),
+    error => error.code === 'REWIND_ENDPOINT_UNAVAILABLE' && error.message.includes('404'),
+  )
+  await assert.rejects(
+    () => responseJson(respond(false, 502, '<html>bad gateway</html>')),
+    error => error.code === 'REWIND_ENDPOINT_UNAVAILABLE',
+  )
+  await assert.rejects(
+    () => responseJson(respond(true, 200, '')),
+    error => error.code === 'REWIND_INVALID_RESPONSE',
+  )
+  await assert.rejects(
+    () => responseJson(respond(true, 200, 'not json')),
+    error => error.code === 'REWIND_INVALID_RESPONSE',
+  )
+  await assert.rejects(
+    () => responseJson(respond(false, 500, JSON.stringify({ code: 'REWIND_FAILED', error: 'boom' }))),
+    error => error.code === 'REWIND_FAILED' && error.message === 'boom',
+  )
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(await responseJson(respond(true, 200, JSON.stringify({ status: 'missing' }))))),
+    { status: 'missing' },
+  )
+  harness.dispose()
+})
+
+test('checkpoint failures are explained in user terms', async () => {
+  const harness = await bootPortalBridge()
+  const { explainCheckpointFailure } = harness.plugin
+
+  assert.equal(
+    explainCheckpointFailure('[GIT_COMMAND_FAILED] git rev-parse --show-toplevel failed in "/tmp/x": fatal: not a git repository (or any of the parent directories): .git'),
+    '这个项目目录不是 Git 仓库，回退功能无法保存文件检查点。仍可只回溯消息。',
+  )
+  assert.match(
+    explainCheckpointFailure('[FILE_TOO_LARGE] "big.bin" is 104857600 bytes; configured maximum is 16777216'),
+    /大小或数量上限/,
+  )
+  assert.match(explainCheckpointFailure('[WORKSPACE_LOCKED] busy'), /没能保存这条消息发送前的文件/)
+  harness.dispose()
 })
 
 test('rewind dialog restores files in two modes and allows reviewed Git history drift', async () => {
@@ -268,7 +397,7 @@ test('rewind dialog restores files in two modes and allows reviewed Git history 
     let restoredPrompt
     context.fetch = async (url, options) => {
       request = { url, options }
-      return { ok: true, json: async () => result }
+      return { ok: true, status: 200, text: async () => JSON.stringify(result) }
     }
     const tree = plugin.RewindMessageAction({
       matched: { messageSeq: 2, promptText: '修复这个问题' },
@@ -361,7 +490,7 @@ test('rewind dialog restores files in two modes and allows reviewed Git history 
   let retryUrl
   context.fetch = async (url) => {
     retryUrl = url
-    return { ok: true, json: async () => ({ status: 'pending' }) }
+    return { ok: true, status: 200, text: async () => JSON.stringify({ status: 'pending' }) }
   }
   const failedTree = plugin.RewindMessageAction({
     matched: { messageSeq: 2, promptText: '修复这个问题' }, sessionId: 'session-source', async openRestoredSession() {},
@@ -434,7 +563,7 @@ test('settings card renders the namespace form and manages checkpoints', async (
     setTimeout,
     fetch: async (url, options) => {
       requests.push({ url, options })
-      return { ok: true, json: async () => (options?.method === 'POST'
+      return { ok: true, status: 200, text: async () => JSON.stringify(options?.method === 'POST'
         ? {
             status: 'partial', action: 'clear-all',
             reports: [{ deletedRestorePoints: 1, retainedRestorePoints: 1 }],

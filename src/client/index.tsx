@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Button,
@@ -18,14 +18,32 @@ interface ConversationChatNodeLike {
   readonly data: ConversationNodeLike
 }
 
-interface ConversationSnapshotLike {
-  readonly nodes: readonly ConversationNodeLike[]
-  readonly chat?: {
-    readonly nodes: {
-      values(): readonly ConversationChatNodeLike[]
-    }
-  }
+/**
+ * Chat node store exposed by the Chat target. DSH 0.1.2+ publishes a mutable
+ * keyed store; older clients published a Map with the same `get` contract.
+ */
+interface ChatNodeStoreLike {
+  get(key: string): RewindNodeLike | undefined
+  values?(): Iterable<RewindNodeLike>
 }
+
+/** Chat projection shared by `session.chat` (0.1.1) and the `useChat` hook (0.1.2+). */
+interface ChatSnapshotLike {
+  readonly order?: readonly string[]
+  readonly nodes?: ChatNodeStoreLike | readonly RewindNodeLike[]
+}
+
+/**
+ * Snapshot seen by a session-scoped slot entry. 0.1.1 exposes the chat
+ * projection as `snapshot.chat`; 0.1.2+ moved it to the separate `useChat`
+ * hook, so the same snapshot is the chat projection itself.
+ */
+interface ConversationSnapshotLike extends ChatSnapshotLike {
+  readonly chat?: ChatSnapshotLike
+}
+
+/** Selector hook shape shared by `useSession` and `useChat`. */
+type SnapshotSelectorHook = <T>(selector: (snapshot: ConversationSnapshotLike) => T) => T
 
 type RewindNodeLike = ConversationNodeLike | ConversationChatNodeLike
 
@@ -43,7 +61,8 @@ interface RewindMessageActionProps {
 interface RewindPortalBridgeProps {
   readonly sessionId: string
   readonly openRestoredSession: (sessionId: string, promptText: string) => Promise<void>
-  readonly useSession: <T>(selector: (snapshot: ConversationSnapshotLike) => T) => T
+  readonly useSession: SnapshotSelectorHook
+  readonly useChat?: SnapshotSelectorHook
 }
 
 interface RewindPortalTarget {
@@ -281,9 +300,50 @@ export function apply(ctx: ClientContextLike): void {
   }, TurnRewindSettingsCard))
 }
 
+/** Narrow a chat node source to the keyed store form. */
+function isNodeStore(value: ChatNodeStoreLike | readonly RewindNodeLike[]): value is ChatNodeStoreLike {
+  return typeof (value as ChatNodeStoreLike).get === 'function'
+}
+
+/**
+ * Resolve the ordered chat node list from one chat projection.
+ *
+ * Both inputs keep a stable identity across renders: `order` is republished only
+ * when the node set changes and the store is a mutable handle, so the caller can
+ * memoize the list instead of allocating a new array on every render (a fresh
+ * array per render makes `useSyncExternalStore` loop forever).
+ * @param order - ordered node keys, or null when the projection is absent.
+ * @param store - keyed node store, a legacy node array, or null.
+ * @returns the chat nodes in render order.
+ */
+export function collectChatNodes(
+  order: readonly string[] | null,
+  store: ChatNodeStoreLike | readonly RewindNodeLike[] | null,
+): readonly RewindNodeLike[] {
+  if (store === null) return []
+  if (Array.isArray(store)) return store as readonly RewindNodeLike[]
+  if (order !== null && isNodeStore(store)) {
+    const nodes: RewindNodeLike[] = []
+    for (const key of order) {
+      const node = store.get(key)
+      if (node !== undefined) nodes.push(node)
+    }
+    return nodes
+  }
+  return typeof store.values === 'function' ? Array.from(store.values() as Iterable<RewindNodeLike>) : []
+}
+
 /** Session-scoped bridge that portals rewind controls into direct user-message action rows. */
-export function RewindMessagePortals({ sessionId, openRestoredSession, useSession }: RewindPortalBridgeProps): ReactNode {
-  const nodes = useSession<readonly RewindNodeLike[]>(snapshot => snapshot.chat?.nodes.values() ?? snapshot.nodes)
+export function RewindMessagePortals({ sessionId, openRestoredSession, useSession, useChat }: RewindPortalBridgeProps): ReactNode {
+  // DSH 0.1.2+ moved the Chat projection out of the Session snapshot into its own
+  // session-scoped `useChat` hook; `snapshot.chat` remains the 0.1.1 shape.
+  const readSnapshot = useChat ?? useSession
+  const chatOf = (snapshot: ConversationSnapshotLike): ChatSnapshotLike => snapshot.chat ?? snapshot
+  const chatOrder = readSnapshot<readonly string[] | null>(snapshot => chatOf(snapshot).order ?? null)
+  const chatStore = readSnapshot<ChatNodeStoreLike | readonly RewindNodeLike[] | null>(
+    snapshot => chatOf(snapshot).nodes ?? null,
+  )
+  const nodes = useMemo(() => collectChatNodes(chatOrder, chatStore), [chatOrder, chatStore])
   const [targets, setTargets] = useState<readonly RewindPortalTarget[]>([])
 
   useLayoutEffect(() => {
@@ -533,7 +593,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
           {preview?.status === 'pending' && <p className="dcl-rewind-status">这条消息发送前的文件还在保存，请稍后再试。</p>}
           {preview?.status === 'missing' && <p className="dcl-rewind-error">没有保存这条消息发送前的文件。可能是当时还没启用回退功能、记录已超过保留期限，或已关闭自动检查点。仍可只回溯消息。</p>}
           {preview?.status === 'skipped' && <p className="dcl-rewind-status">为避免阻塞消息发送，本轮没有自动保存文件：{preview.reason}仍可只回溯消息。</p>}
-          {preview?.status === 'failed' && <p className="dcl-rewind-error">没能保存这条消息发送前的文件：{preview.error}仍可只回溯消息。</p>}
+          {preview?.status === 'failed' && <p className="dcl-rewind-error">{explainCheckpointFailure(preview.error)}</p>}
           {preview !== null && (
             <div className="dcl-rewind-options">
               <label className="dcl-rewind-option" data-selected={mode === 'both'} data-disabled={applying || !hasFileChanges}>
@@ -1060,14 +1120,39 @@ async function openSessionWithDraft(ctx: ClientContextLike, sessionId: string, p
   throw lastError
 }
 
-async function responseJson(response: Response): Promise<unknown> {
-  const value = await response.json() as unknown
-  if (!response.ok) {
-    const record = recordOf(value)
+/**
+ * Read one rewind response body without ever leaking a raw parse error.
+ *
+ * A missing route, a restarted Host, or a proxy answering before the plugin
+ * loads all produce a body that is not the plugin's JSON envelope; those must
+ * surface as an explained failure instead of `Failed to execute 'json' …`.
+ * @param response - fetch response from the rewind endpoint.
+ * @returns the decoded JSON body.
+ */
+export async function responseJson(response: Response): Promise<unknown> {
+  const text = await response.text()
+  let value: unknown
+  try {
+    value = text === '' ? undefined : JSON.parse(text) as unknown
+  } catch {
     throw new RewindRequestError(
-      typeof record.code === 'string' ? record.code : 'REWIND_FAILED',
-      typeof record.error === 'string' ? record.error : `请求失败：${String(response.status)}`,
+      response.ok ? 'REWIND_INVALID_RESPONSE' : 'REWIND_ENDPOINT_UNAVAILABLE',
+      `回退服务返回了无法解析的内容（HTTP ${String(response.status)}）。`,
     )
+  }
+  const record = value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+  if (!response.ok) {
+    throw new RewindRequestError(
+      typeof record?.code === 'string'
+        ? record.code
+        : response.status === 404 ? 'REWIND_ENDPOINT_UNAVAILABLE' : 'REWIND_FAILED',
+      typeof record?.error === 'string' ? record.error : `请求失败：${String(response.status)}`,
+    )
+  }
+  if (value === undefined) {
+    throw new RewindRequestError('REWIND_INVALID_RESPONSE', '回退服务返回了空响应。')
   }
   return value
 }
@@ -1126,6 +1211,8 @@ function RewindIcon({ size }: { readonly size: number }): ReactNode {
 function friendlyError(error: unknown): string {
   if (!(error instanceof RewindRequestError)) return messageOf(error)
   switch (error.code) {
+    case 'REWIND_ENDPOINT_UNAVAILABLE': return '回退服务没有响应。请确认 @anionex/dsh-turn-rewind 已挂载到当前 DSH，并重启 DSH 后重试。'
+    case 'REWIND_INVALID_RESPONSE': return '回退服务返回了无法解析的内容。请重启 DSH 后重试。'
     case 'PLAN_STALE': return '项目文件在检查后又发生了变化。为避免覆盖新修改，请重新检查后再恢复。'
     case 'PLAN_STALE_REPOSITORY': return 'Git 状态在检查后又发生了变化，恢复已失效。请重新检查后再试。'
     case 'WORKSPACE_IN_USE': return '这个项目目录还有别的对话正在运行。请等那些对话结束或停止后，再重新检查。'
@@ -1138,6 +1225,33 @@ function friendlyError(error: unknown): string {
     case 'RESTORE_FAILED_ROLLED_BACK': return '恢复未能完成，项目文件已自动还原到操作前的状态。'
     case 'CONVERSATION_REWIND_FAILED': return '文件已恢复，但无法创建新对话；项目文件已自动还原。'
     default: return error.message
+  }
+}
+
+/**
+ * Explain one recorded checkpoint failure in user terms.
+ *
+ * The Host records the raw `[CODE] diagnostic` line; a non-Git project
+ * directory is the common case and deserves a plain sentence instead of a
+ * `git rev-parse` transcript.
+ * @param message - recorded checkpoint failure message.
+ * @returns one user-facing sentence.
+ */
+export function explainCheckpointFailure(message: string): string {
+  const code = /^\[([A-Z_]+)\]/.exec(message)?.[1]
+  switch (code) {
+    case 'GIT_COMMAND_FAILED':
+      return /not a git repository/i.test(message)
+        ? '这个项目目录不是 Git 仓库，回退功能无法保存文件检查点。仍可只回溯消息。'
+        : `无法读取这个项目目录的 Git 状态：${message}仍可只回溯消息。`
+    case 'FILE_TOO_LARGE':
+    case 'SNAPSHOT_TOO_LARGE':
+    case 'TOO_MANY_FILES':
+      return '本轮有文件超过检查点的大小或数量上限，没有保存文件检查点。仍可只回溯消息。'
+    case 'INVALID_PATH':
+      return '项目目录里有无法安全保存的路径（例如嵌套的独立 Git 仓库），没有保存文件检查点。仍可只回溯消息。'
+    default:
+      return `没能保存这条消息发送前的文件：${message}仍可只回溯消息。`
   }
 }
 

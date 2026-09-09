@@ -90,6 +90,23 @@ interface ApiProxyLike {
   }
 }
 
+/**
+ * Conversation create/fork capability of the Session controller service.
+ *
+ * DSH 0.1.2-alpha replaced the `apiProxy` RPC envelope with this plain service,
+ * so carriers without `apiProxy` (DSH Desktop 2.x) reach the same capability here.
+ */
+interface SessionControllerLike {
+  create(request: { readonly cwd?: string; readonly workspaceId?: string }): Promise<{ readonly sessionId: string }>
+  fork(request: { readonly sessionId: string; readonly atSeq?: number }): Promise<{ readonly sessionId: string }>
+}
+
+/** Services a conversation restart can be built on, in either carrier shape. */
+type ConversationRestartContext = Pick<Context, 'sessions' | 'sessionQuery'> & {
+  readonly apiProxy?: ApiProxyLike
+  readonly sessionController?: SessionControllerLike
+}
+
 function getSessionEvents(session: SessionLike | undefined): readonly SessionEventLike[] {
   if (!session) return []
   if (typeof session.snapshotEvents === 'function') {
@@ -105,6 +122,7 @@ declare module '@deepseek-ai/cordis' {
     sessionQuery: SessionQueryLike
     webServer: HttpServerLike
     apiProxy: ApiProxyLike
+    sessionController: SessionControllerLike
   }
 
   interface Events {
@@ -368,7 +386,7 @@ export function installRewindHttp(
 
 /** Build the exact-route handler as a testable unit. */
 export function createRewindHttpHandler(
-  ctx: Pick<Context, 'sessions' | 'sessionQuery' | 'apiProxy'> & { readonly agents?: AgentsLike },
+  ctx: ConversationRestartContext & { readonly agents?: AgentsLike },
   engine: ChangeLedgerEngine,
   coordinator: TurnCheckpointCoordinator,
 ): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void> {
@@ -588,7 +606,7 @@ async function checkpointForRequest(
 }
 
 async function createConversationRestart(
-  ctx: Pick<Context, 'sessions' | 'sessionQuery' | 'apiProxy'>,
+  ctx: ConversationRestartContext,
   sourceId: string,
   checkpoint: MessageCheckpoint,
 ): Promise<{ readonly sessionId: string }> {
@@ -599,12 +617,26 @@ async function createConversationRestart(
     || current.previousTurnEndSeq !== checkpoint.previousTurnEndSeq) {
     throw new ChangeLedgerError('PLAN_STALE', 'the session no longer contains the selected message boundary')
   }
+  const controller = ctx.sessionController
+  if (controller !== undefined) {
+    const created = checkpoint.previousTurnEndSeq === undefined
+      ? await controller.create({ cwd: checkpoint.cwd })
+      : await controller.fork({ sessionId: sourceId, atSeq: checkpoint.previousTurnEndSeq })
+    return { sessionId: requiredText(created.sessionId, 'sessionController sessionId') }
+  }
+  const apiProxy = ctx.apiProxy
+  if (apiProxy === undefined) {
+    throw new ChangeLedgerError(
+      'CONVERSATION_REWIND_FAILED',
+      'this DSH host exposes neither sessionController nor apiProxy, so a new conversation cannot be created',
+    )
+  }
   const response = checkpoint.previousTurnEndSeq === undefined
-    ? await ctx.apiProxy.sessions.create({
+    ? await apiProxy.sessions.create({
         rpcId: randomUUID(),
         payload: { cwd: checkpoint.cwd },
       })
-    : await ctx.apiProxy.sessions.fork({
+    : await apiProxy.sessions.fork({
         rpcId: randomUUID(),
         payload: { sessionId: sourceId, atSeq: checkpoint.previousTurnEndSeq },
       })

@@ -30,7 +30,7 @@ test('bundle registers its service and waits for the released Web host service',
   assert.deepEqual(provided, { name: 'changeLedger', value: service })
   assert.deepEqual(injections, [
     ['agents'],
-    ['webServer', 'sessions', 'sessionQuery', 'apiProxy', 'agents'],
+    ['webServer', 'sessions', 'sessionQuery', 'agents'],
     ['settings'],
   ])
   await service.initialize()
@@ -543,6 +543,81 @@ test('combined rewind of a later message forks at the previous completed turn', 
 
   assert.equal(applied.body.sessionId, 'session-child')
   assert.deepEqual(forkPayload, { sessionId: 'session-web', atSeq: 4 })
+})
+
+test('DSH 0.1.2 carriers restart conversations through sessionController without apiProxy', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const checkpoint = await f.engine.createTurnCheckpoint({
+    cwd: f.workspace, sessionId: 'session-web', turn: 2, turnStartSeq: 5,
+  })
+  await writeFile(join(f.workspace, 'code.txt'), 'changed in turn two\n')
+  const calls = []
+  const handler = handlerFor(f, new Map([
+    ['session-web', liveSession('session-web', f.workspace, twoTurnEvents())],
+  ]), {
+    apiProxy: undefined,
+    sessionController: {
+      async create(request) { calls.push(['create', request]); return { sessionId: 'session-created' } },
+      async fork(request) { calls.push(['fork', request]); return { sessionId: 'session-child' } },
+    },
+  })
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-web&messageSeq=6')
+  const applied = await request(handler, 'POST', '/turn-rewind', {
+    mode: 'both', sessionId: 'session-web', messageSeq: 6, checkpointId: checkpoint.id,
+    planId: preview.body.planId, confirmation: preview.body.confirmation,
+  })
+
+  assert.equal(applied.status, 200)
+  assert.equal(applied.body.sessionId, 'session-child')
+  assert.deepEqual(calls, [['fork', { sessionId: 'session-web', atSeq: 4 }]])
+})
+
+test('sessionController creates the blank Session for a first-message rewind', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const checkpoint = await f.engine.createTurnCheckpoint({
+    cwd: f.workspace, sessionId: 'session-web', turn: 1, turnStartSeq: 1,
+  })
+  await writeFile(join(f.workspace, 'code.txt'), 'changed\n')
+  const calls = []
+  const handler = handlerFor(f, new Map([
+    ['session-web', liveSession('session-web', f.workspace, oneTurnEvents())],
+  ]), {
+    apiProxy: undefined,
+    sessionController: {
+      async create(request) { calls.push(['create', request]); return { sessionId: 'session-created' } },
+      async fork(request) { calls.push(['fork', request]); return { sessionId: 'unexpected' } },
+    },
+  })
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-web&messageSeq=2')
+  const applied = await request(handler, 'POST', '/turn-rewind', {
+    mode: 'both', sessionId: 'session-web', messageSeq: 2, checkpointId: checkpoint.id,
+    planId: preview.body.planId, confirmation: preview.body.confirmation,
+  })
+
+  assert.equal(applied.body.sessionId, 'session-created')
+  assert.deepEqual(calls, [['create', { cwd: f.workspace }]])
+})
+
+test('a host exposing neither restart service fails closed with an explained error', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const checkpoint = await f.engine.createTurnCheckpoint({
+    cwd: f.workspace, sessionId: 'session-web', turn: 1, turnStartSeq: 1,
+  })
+  await writeFile(join(f.workspace, 'code.txt'), 'changed\n')
+  const handler = handlerFor(f, new Map([
+    ['session-web', liveSession('session-web', f.workspace, oneTurnEvents())],
+  ]), { apiProxy: undefined, sessionController: undefined })
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-web&messageSeq=2')
+  const applied = await request(handler, 'POST', '/turn-rewind', {
+    mode: 'both', sessionId: 'session-web', messageSeq: 2, checkpointId: checkpoint.id,
+    planId: preview.body.planId, confirmation: preview.body.confirmation,
+  })
+
+  assert.equal(applied.body.code, 'RESTORE_FAILED_ROLLED_BACK')
+  assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'changed\n')
 })
 
 test('file changes after preview invalidate the restore plan before any conversation is created', async (t) => {
