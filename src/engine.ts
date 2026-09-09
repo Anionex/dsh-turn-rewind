@@ -4,13 +4,7 @@ import { join, resolve } from 'node:path'
 import { lstat, realpath } from 'node:fs/promises'
 import { createDeadline } from './deadline.js'
 import { ChangeLedgerError, errorMessage } from './errors.js'
-import {
-  discoverRepository,
-  discoverRepositoryRoot,
-  ensureGitWorktreeIdentity,
-  resolveGitWorktreeRoot,
-  sameRepositoryFence,
-} from './git.js'
+import { ensureGitWorktreeIdentity, resolveGitWorktreeRoot } from './git.js'
 import {
   captureGitTurnCheckpoint,
   deleteGitCheckpoint,
@@ -34,6 +28,7 @@ import {
 } from './path-utils.js'
 import { captureSnapshotEntry, captureStableTree, diffTrees, entriesEqual } from './snapshot.js'
 import { LedgerStore, type GitCheckpointJournal } from './store.js'
+import { discoverWorkspace, discoverWorkspaceIdentity, sameWorkspaceFence } from './workspace.js'
 import {
   LEDGER_FORMAT_VERSION,
   type ChangeLedgerConfig,
@@ -50,6 +45,7 @@ import {
   type SnapshotEntry,
   type WorkspaceChange,
   type WorkspaceOverview,
+  type WorkspaceState,
   type WorkspacePurgeReport,
 } from './types.js'
 
@@ -109,12 +105,24 @@ export class ChangeLedgerEngine {
     return restoredOperations + await this.reconcileGitCheckpointJournals()
   }
 
-  private async acquireWorkspace(workspace: string, signal?: AbortSignal): Promise<() => Promise<void>> {
-    const identity = await ensureGitWorktreeIdentity(workspace, signal)
-    if (identity.root !== workspace) {
-      throw new ChangeLedgerError('GIT_ROOT_INVALID', `workspace moved while acquiring its lock: ${JSON.stringify(workspace)}`)
+  /**
+   * Acquire the exclusive lock for one workspace.
+   *
+   * A Git worktree also binds the shared per-worktree lock derived from its Git
+   * identity; an ordinary directory owns only the durable directory lock.
+   */
+  private async acquireWorkspace(
+    workspace: Pick<WorkspaceState, 'type' | 'root'>,
+    signal?: AbortSignal,
+  ): Promise<() => Promise<void>> {
+    if (workspace.type === 'directory') {
+      return this.store.acquire(workspace.root, undefined, undefined, signal)
     }
-    return this.store.acquire(workspace, identity.lockPath, {
+    const identity = await ensureGitWorktreeIdentity(workspace.root, signal)
+    if (identity.root !== workspace.root) {
+      throw new ChangeLedgerError('GIT_ROOT_INVALID', `workspace moved while acquiring its lock: ${JSON.stringify(workspace.root)}`)
+    }
+    return this.store.acquire(workspace.root, identity.lockPath, {
       commonDir: identity.commonDir,
       gitDir: identity.gitDir,
       worktreeId: identity.worktreeId,
@@ -126,7 +134,7 @@ export class ChangeLedgerEngine {
     for (const journal of await this.store.listGitCheckpointJournals()) {
       const workspace = await resolveGitWorktreeRoot(journal.commonDir, journal.worktreeId, journal.workspace)
       const activeJournal = workspace === journal.workspace ? journal : { ...journal, workspace }
-      const release = await this.acquireWorkspace(workspace)
+      const release = await this.acquireWorkspace({ type: 'git', root: workspace })
       try {
         const manifest = await this.tryReadManifest(workspace, journal.restorePointId)
         if (journal.action === 'publish') {
@@ -223,9 +231,9 @@ export class ChangeLedgerEngine {
     readonly signal?: AbortSignal
   }): Promise<RestorePointSummary> {
     await this.ready
-    const source = await discoverRepository(options.cwd, options.signal)
+    const source = await discoverWorkspace(options.cwd, this.config, options.signal)
     await this.assertStorageSeparated(source.state.root)
-    const release = await this.acquireWorkspace(source.state.root, options.signal)
+    const release = await this.acquireWorkspace(source.state, options.signal)
     try {
       const label = normalizeLabel(options.label)
       const manifest = await this.createLocked({
@@ -267,9 +275,9 @@ export class ChangeLedgerEngine {
         throw new ChangeLedgerError('INVALID_ARGUMENTS', 'turnStartSeq must be a non-negative safe integer')
       }
       try {
-        const source = await discoverRepository(options.cwd, signal)
+        const source = await discoverWorkspace(options.cwd, this.config, signal)
         await this.assertStorageSeparated(source.state.root)
-        const release = await this.acquireWorkspace(source.state.root, signal)
+        const release = await this.acquireWorkspace(source.state, signal)
         try {
           const existing = await waitWithSignal(this.store.listManifests(source.state.root, signal), signal)
           const duplicate = existing.find(manifest => manifest.kind === 'turn'
@@ -289,7 +297,9 @@ export class ChangeLedgerEngine {
 
           throwIfAborted(signal)
           let manifest: RestorePointManifest
-          if (this.config.turnCheckpointMode === 'legacy') {
+          // Git-native checkpoints live in the repository object database, so an
+          // ordinary directory always uses the ledger's own content-addressed store.
+          if (this.config.turnCheckpointMode === 'legacy' || source.state.type === 'directory') {
             manifest = await this.createLocked({
               cwd: source.state.root,
               kind: 'turn',
@@ -352,21 +362,21 @@ export class ChangeLedgerEngine {
     readonly signal?: AbortSignal
   }): Promise<void> {
     await waitWithSignal(this.ready, options.signal)
-    const workspace = await discoverRepositoryRoot(options.cwd, options.signal)
-    await this.assertStorageSeparated(workspace)
+    const workspace = await discoverWorkspaceIdentity(options.cwd, options.signal)
+    await this.assertStorageSeparated(workspace.root)
     const release = await this.acquireWorkspace(workspace, options.signal)
     try {
       throwIfAborted(options.signal)
-      const existing = (await this.store.listManifests(workspace, options.signal)).some(manifest =>
+      const existing = (await this.store.listManifests(workspace.root, options.signal)).some(manifest =>
         manifest.kind === 'turn'
         && manifest.sessionId === options.sessionId
         && manifest.turn === options.turn
         && manifest.turnStartSeq === options.turnStartSeq)
       if (existing) {
-        await this.store.deleteTurnCheckpointSkip(workspace, options.sessionId, options.turn, options.turnStartSeq)
+        await this.store.deleteTurnCheckpointSkip(workspace.root, options.sessionId, options.turn, options.turnStartSeq)
         return
       }
-      await this.store.writeTurnCheckpointSkip(workspace, {
+      await this.store.writeTurnCheckpointSkip(workspace.root, {
         version: 1,
         sessionId: options.sessionId,
         turn: options.turn,
@@ -388,12 +398,12 @@ export class ChangeLedgerEngine {
     readonly signal?: AbortSignal
   }): Promise<{ readonly reason: string } | undefined> {
     await this.ready
-    const workspace = await discoverRepositoryRoot(options.cwd, options.signal)
-    await this.assertStorageSeparated(workspace)
+    const workspace = await discoverWorkspaceIdentity(options.cwd, options.signal)
+    await this.assertStorageSeparated(workspace.root)
     const release = await this.acquireWorkspace(workspace, options.signal)
     try {
       const skip = await this.store.readTurnCheckpointSkip(
-        workspace,
+        workspace.root,
         options.sessionId,
         options.turn,
         options.turnStartSeq,
@@ -412,9 +422,9 @@ export class ChangeLedgerEngine {
     readonly signal?: AbortSignal
   }): Promise<RestorePointSummary | undefined> {
     await this.ready
-    const source = await discoverRepository(options.cwd, options.signal)
+    const source = await discoverWorkspace(options.cwd, this.config, options.signal)
     await this.assertStorageSeparated(source.state.root)
-    const release = await this.acquireWorkspace(source.state.root, options.signal)
+    const release = await this.acquireWorkspace(source.state, options.signal)
     try {
       const manifest = (await this.store.listManifests(source.state.root)).find(point =>
         point.kind === 'turn'
@@ -436,9 +446,9 @@ export class ChangeLedgerEngine {
     readonly signal?: AbortSignal
   }): Promise<RestorePointSummary[]> {
     await this.ready
-    const source = await discoverRepository(options.cwd, options.signal)
+    const source = await discoverWorkspace(options.cwd, this.config, options.signal)
     await this.assertStorageSeparated(source.state.root)
-    const release = await this.acquireWorkspace(source.state.root, options.signal)
+    const release = await this.acquireWorkspace(source.state, options.signal)
     try {
       const manifests = await this.store.listManifests(source.state.root)
       return manifests
@@ -458,9 +468,9 @@ export class ChangeLedgerEngine {
     readonly signal?: AbortSignal
   }): Promise<RestorePointInspection> {
     await this.ready
-    const source = await discoverRepository(options.cwd, options.signal)
+    const source = await discoverWorkspace(options.cwd, this.config, options.signal)
     await this.assertStorageSeparated(source.state.root)
-    const release = await this.acquireWorkspace(source.state.root, options.signal)
+    const release = await this.acquireWorkspace(source.state, options.signal)
     try {
       const manifest = await this.store.readManifest(source.state.root, options.restorePointId)
       if (manifest.version === 2) await verifyGitCheckpoint(manifest, options.signal)
@@ -472,15 +482,17 @@ export class ChangeLedgerEngine {
       })
       const currentEntries = manifest.version === 2 ? current.gitEntries : current.entries
       if (currentEntries === undefined) throw new ChangeLedgerError('STATE_CORRUPT', 'Git comparison entries are unavailable')
+      const currentState = current.source.state
+      assertWorkspaceIdentityCompatible(manifest.repository, currentState)
       return {
         restorePoint: summarize(manifest),
         currentTreeHash: current.treeHash,
-        currentRepository: current.source.state,
-        ...(current.source.state.head === undefined ? {} : { currentHead: current.source.state.head }),
-        ...(current.source.state.branch === undefined ? {} : { currentBranch: current.source.state.branch }),
-        ...(current.source.state.operation === undefined ? {} : { currentOperation: current.source.state.operation }),
-        headChanged: repositoryHeadChanged(manifest.repository, current.source.state),
-        operationChanged: manifest.repository.operation !== current.source.state.operation,
+        currentRepository: currentState,
+        ...(currentState.type === 'git' && currentState.head !== undefined ? { currentHead: currentState.head } : {}),
+        ...(currentState.type === 'git' && currentState.branch !== undefined ? { currentBranch: currentState.branch } : {}),
+        ...(currentState.type === 'git' && currentState.operation !== undefined ? { currentOperation: currentState.operation } : {}),
+        headChanged: repositoryHeadChanged(manifest.repository, currentState),
+        operationChanged: workspaceOperationChanged(manifest.repository, currentState),
         changes: diffTrees(manifest.entries, current.entries, manifest.entries, currentEntries),
       }
     } finally {
@@ -501,9 +513,9 @@ export class ChangeLedgerEngine {
   }): Promise<RestorePlan> {
     await this.ready
     this.expirePlans()
-    const source = await discoverRepository(options.cwd, options.signal)
+    const source = await discoverWorkspace(options.cwd, this.config, options.signal)
     await this.assertStorageSeparated(source.state.root)
-    const release = await this.acquireWorkspace(source.state.root, options.signal)
+    const release = await this.acquireWorkspace(source.state, options.signal)
     try {
       const manifest = await this.store.readManifest(source.state.root, options.restorePointId)
       if (manifest.version === 2) await verifyGitCheckpoint(manifest, options.signal)
@@ -518,8 +530,8 @@ export class ChangeLedgerEngine {
       if (options.expectedCurrentTreeHash !== undefined && options.expectedCurrentTreeHash !== current.treeHash) {
         throw new ChangeLedgerError('PLAN_STALE', 'workspace changed after inspection; inspect and plan again')
       }
-      if (options.expectedRepository !== undefined && !sameRepositoryFence(options.expectedRepository, current.source.state)) {
-        throw new ChangeLedgerError('PLAN_STALE_REPOSITORY', 'Git repository state changed after inspection; inspect and plan again')
+      if (options.expectedRepository !== undefined && !sameWorkspaceFence(options.expectedRepository, current.source.state)) {
+        throw workspaceStaleError(options.expectedRepository, current.source.state, 'inspection')
       }
       assertRepositoryCompatible(manifest, current.source.state, options.allowHeadChange === true)
       const changes = diffTrees(manifest.entries, current.entries, manifest.entries, currentEntries)
@@ -581,7 +593,7 @@ export class ChangeLedgerEngine {
 
     try {
       await this.assertStorageSeparated(plan.workspace)
-      const release = await this.acquireWorkspace(plan.workspace, options.signal)
+      const release = await this.acquireWorkspace(plan.repository, options.signal)
       try {
         const manifest = await this.store.readManifest(plan.workspace, plan.restorePointId)
         if (manifest.version === 2) await verifyGitCheckpoint(manifest, options.signal)
@@ -721,9 +733,9 @@ export class ChangeLedgerEngine {
     if (options.confirmation !== `DELETE ${options.restorePointId}`) {
       throw new ChangeLedgerError('CONFIRMATION_MISMATCH', `confirmation must exactly equal "DELETE ${options.restorePointId}"`)
     }
-    const source = await discoverRepository(options.cwd, options.signal)
+    const source = await discoverWorkspace(options.cwd, this.config, options.signal)
     await this.assertStorageSeparated(source.state.root)
-    const release = await this.acquireWorkspace(source.state.root, options.signal)
+    const release = await this.acquireWorkspace(source.state, options.signal)
     try {
       const manifest = await this.store.readManifest(source.state.root, options.restorePointId)
       if (await this.store.isReferencedByRecovery(source.state.root, options.restorePointId)) {
@@ -740,9 +752,9 @@ export class ChangeLedgerEngine {
   /** List restore operations that were interrupted or require manual recovery. */
   async listRecovery(options: { readonly cwd: string; readonly signal?: AbortSignal }): Promise<RecoverySummary[]> {
     await this.ready
-    const source = await discoverRepository(options.cwd, options.signal)
+    const source = await discoverWorkspace(options.cwd, this.config, options.signal)
     await this.assertStorageSeparated(source.state.root)
-    const release = await this.acquireWorkspace(source.state.root, options.signal)
+    const release = await this.acquireWorkspace(source.state, options.signal)
     try {
       return (await this.store.listOperations(source.state.root))
         .filter((operation): operation is RestoreOperation & { state: 'interrupted' | 'recovery-required' } =>
@@ -842,10 +854,10 @@ export class ChangeLedgerEngine {
     let liveRepository = false
     let release: () => Promise<void>
     try {
-      const root = await discoverRepositoryRoot(workspace, signal)
-      if (root === workspace) {
-        await this.assertStorageSeparated(root)
-        release = await this.acquireWorkspace(root, signal)
+      const identity = await discoverWorkspaceIdentity(workspace, signal)
+      if (identity.root === workspace) {
+        await this.assertStorageSeparated(identity.root)
+        release = await this.acquireWorkspace(identity, signal)
         liveRepository = true
       } else {
         release = await this.store.acquireWorkspaceDir(workspaceDir, workspace, signal)
@@ -1129,11 +1141,13 @@ export function resolveConfig(config: ChangeLedgerConfig): ResolvedChangeLedgerC
 }
 
 function summarize(manifest: RestorePointManifest): RestorePointSummary {
+  const workspace = manifest.repository
   return {
     format: manifest.version,
     id: manifest.id,
     kind: manifest.kind,
     workspace: manifest.workspace,
+    workspaceType: workspace.type,
     ...(manifest.sessionId === undefined ? {} : { sessionId: manifest.sessionId }),
     ...(manifest.label === undefined ? {} : { label: manifest.label }),
     ...(manifest.parentRestorePoint === undefined ? {} : { parentRestorePoint: manifest.parentRestorePoint }),
@@ -1146,11 +1160,24 @@ function summarize(manifest: RestorePointManifest): RestorePointSummary {
     totalBytes: manifest.totalBytes,
     restoreCount: manifest.restoreCount,
     ...(manifest.lastRestoredAt === undefined ? {} : { lastRestoredAt: manifest.lastRestoredAt }),
-    ...(manifest.repository.head === undefined ? {} : { head: manifest.repository.head }),
-    ...(manifest.repository.branch === undefined ? {} : { branch: manifest.repository.branch }),
-    ...(manifest.repository.operation === undefined ? {} : { operation: manifest.repository.operation }),
-    stagedPathCount: manifest.repository.stagedPaths.length,
+    ...(workspace.type === 'git' && workspace.head !== undefined ? { head: workspace.head } : {}),
+    ...(workspace.type === 'git' && workspace.branch !== undefined ? { branch: workspace.branch } : {}),
+    ...(workspace.type === 'git' && workspace.operation !== undefined ? { operation: workspace.operation } : {}),
+    stagedPathCount: workspace.type === 'git' ? workspace.stagedPaths.length : 0,
     ...(manifest.version === 2 ? { trust: manifest.git.trust } : {}),
+  }
+}
+
+/** Reject a fence that now describes a different workspace or workspace mode. */
+function assertWorkspaceIdentityCompatible(before: WorkspaceState, after: WorkspaceState): void {
+  if (before.type !== after.type) {
+    throw new ChangeLedgerError('WORKSPACE_MODE_CHANGED', `workspace mode changed from ${before.type} to ${after.type}`)
+  }
+  if (before.root !== after.root) {
+    throw new ChangeLedgerError('WORKSPACE_CHANGED', 'restore point no longer belongs to this workspace root')
+  }
+  if (before.type === 'git' && after.type === 'git' && before.commonDir !== after.commonDir) {
+    throw new ChangeLedgerError('REPOSITORY_CHANGED', 'restore point no longer belongs to this Git worktree')
   }
 }
 
@@ -1159,9 +1186,8 @@ function assertRepositoryCompatible(
   current: RestorePointManifest['repository'],
   allowHeadChange: boolean,
 ): void {
-  if (manifest.repository.root !== current.root || manifest.repository.commonDir !== current.commonDir) {
-    throw new ChangeLedgerError('REPOSITORY_CHANGED', 'restore point no longer belongs to this Git worktree')
-  }
+  assertWorkspaceIdentityCompatible(manifest.repository, current)
+  if (manifest.repository.type !== 'git' || current.type !== 'git') return
   if (manifest.repository.operation !== current.operation) {
     throw new ChangeLedgerError(
       'GIT_OPERATION_CHANGED',
@@ -1177,23 +1203,33 @@ function assertRepositoryCompatible(
 }
 
 function repositoryHeadChanged(
-  before: RestorePointManifest['repository'],
-  after: RestorePointManifest['repository'],
+  before: WorkspaceState,
+  after: WorkspaceState,
 ): boolean {
+  if (before.type !== 'git' || after.type !== 'git') return false
   return before.head !== after.head || before.branch !== after.branch
 }
 
+function workspaceOperationChanged(before: WorkspaceState, after: WorkspaceState): boolean {
+  if (before.type !== 'git' || after.type !== 'git') return false
+  return before.operation !== after.operation
+}
+
 function assertPlanRepositoryFresh(
-  planned: RestorePointManifest['repository'],
-  current: RestorePointManifest['repository'],
+  planned: WorkspaceState,
+  current: WorkspaceState,
 ): void {
-  if (planned.root !== current.root
-    || planned.commonDir !== current.commonDir
-    || planned.head !== current.head
-    || planned.branch !== current.branch
-    || planned.operation !== current.operation) {
-    throw new ChangeLedgerError('PLAN_STALE_REPOSITORY', 'Git repository state changed after restore planning; inspect and plan again')
+  if (!sameWorkspaceFence(planned, current)) {
+    throw workspaceStaleError(planned, current, 'restore planning')
   }
+}
+
+/** Stable stale-plan error for the workspace mode that actually drifted. */
+function workspaceStaleError(before: WorkspaceState, after: WorkspaceState, phase: string): ChangeLedgerError {
+  if (before.type === 'git' && after.type === 'git') {
+    return new ChangeLedgerError('PLAN_STALE_REPOSITORY', `Git repository state changed after ${phase}; inspect and plan again`)
+  }
+  return new ChangeLedgerError('PLAN_STALE_WORKSPACE', `workspace state changed after ${phase}; inspect and plan again`)
 }
 
 function assertJournalMatchesManifest(journal: GitCheckpointJournal, manifest: RestorePointManifest): asserts manifest is RestorePointManifestV2 {

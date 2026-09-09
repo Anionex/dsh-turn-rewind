@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { createDeadline } from './deadline.js'
 import { ChangeLedgerError, errorMessage } from './errors.js'
 import type { ChangeLedgerEngine } from './engine.js'
-import { discoverRepositoryRoot } from './git.js'
+import { discoverWorkspaceRoot } from './workspace.js'
 
 interface SessionEventLike {
   readonly type: string
@@ -223,7 +223,7 @@ export class TurnCheckpointCoordinator {
       this.skips.delete(key)
       const capture = (async () => {
         try {
-          const workspace = await discoverRepositoryRoot(cwd, captureSignal)
+          const workspace = await discoverWorkspaceRoot(cwd, captureSignal)
           await this.serializeWorkspace(workspace, captureSignal, async () => {
             try {
               await this.engine.createTurnCheckpoint({
@@ -733,16 +733,16 @@ async function sharedWorkspaceSessions(
 ): Promise<readonly string[]> {
   const listed = agents?.list() ?? []
   if (listed.length === 0) return []
-  const root = await discoverRepositoryRoot(cwd)
+  const root = await discoverWorkspaceRoot(cwd)
   const shared: string[] = []
   for (const agent of listed) {
     if (agent.status !== 'running') continue
     const session = agent.session
     if (session.header.cwd === undefined) continue
     try {
-      if (await discoverRepositoryRoot(session.header.cwd) === root) shared.push(session.id)
+      if (await discoverWorkspaceRoot(session.header.cwd) === root) shared.push(session.id)
     } catch {
-      // A live Session whose cwd is not a valid Git worktree cannot share this worktree.
+      // A live Session whose cwd cannot be resolved cannot share this workspace.
     }
   }
   return shared.sort()

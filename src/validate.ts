@@ -102,7 +102,8 @@ export function parseManifest(value: unknown): RestorePointManifest {
   }
   if (version === LEDGER_FORMAT_VERSION) return { version, ...common }
   if (restorePointKind !== 'turn') corrupt('Git-native v2 restore points are automatic turn checkpoints')
-  return { version, ...common, git: parseGitCheckpoint(record.git, id) }
+  if (repository.type !== 'git') corrupt('Git-native v2 restore points must fence a Git workspace')
+  return { version, ...common, repository, git: parseGitCheckpoint(record.git, id) }
 }
 
 /** Parse an untrusted durable restore-operation journal. */
@@ -158,9 +159,27 @@ export function validateBlobHash(value: string): string {
   return value
 }
 
+/**
+ * Parse the durable workspace fence of one manifest.
+ *
+ * A missing `type` is the only legacy interpretation: manifests written before
+ * ordinary-directory support are always Git workspaces and are upgraded in
+ * memory. Directory fences must not carry Git-only fields.
+ * @param value - persisted `repository` field.
+ * @returns the validated workspace state.
+ */
 function parseRepository(value: unknown): RepositoryState {
   const record = objectRecord(value, 'repository state')
   const root = absoluteString(record, 'root')
+  if (record.type === 'directory') {
+    for (const key of ['commonDir', 'head', 'branch', 'operation', 'stagedPaths']) {
+      if (record[key] !== undefined) corrupt(`directory workspace state must not contain ${key}`)
+    }
+    return { type: 'directory', root }
+  }
+  if (record.type !== undefined && record.type !== 'git') {
+    corrupt('workspace state type must be "git" or "directory"')
+  }
   const commonDir = absoluteString(record, 'commonDir')
   const head = optionalHash(record, 'head')
   const branch = optionalString(record, 'branch')
@@ -169,6 +188,7 @@ function parseRepository(value: unknown): RepositoryState {
   if (!Array.isArray(stagedValue)) corrupt('repository stagedPaths must be an array')
   const stagedPaths = stagedValue.map((path) => validateRelativePath(requireString(path, 'staged path')))
   return {
+    type: 'git',
     root,
     commonDir,
     ...(head === undefined ? {} : { head }),

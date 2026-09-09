@@ -1,7 +1,7 @@
-import type { RepositoryState } from './types.js';
+import type { GitWorkspaceState } from './types.js';
 /** Repository discovery result plus the eligible path inventory. */
 export interface RepositorySnapshotSource {
-    readonly state: RepositoryState;
+    readonly state: GitWorkspaceState;
     readonly paths: readonly string[];
 }
 /** Durable identity and shared lock location for one concrete Git worktree. */
@@ -14,6 +14,17 @@ export interface GitWorktreeIdentity {
 }
 /** Discover the Git worktree owning `cwd` and enumerate tracked/non-ignored paths. */
 export declare function discoverRepository(cwd: string, signal?: AbortSignal): Promise<RepositorySnapshotSource>;
+/**
+ * Discover the owning Git worktree, or return undefined when `cwd` is not
+ * inside any repository. Every other discovery failure still throws, so a
+ * broken repository never silently degrades into an ordinary directory.
+ * @param cwd - candidate working directory.
+ * @param signal - optional caller cancellation.
+ * @returns the snapshot source, or undefined outside every repository.
+ */
+export declare function discoverRepositoryOptional(cwd: string, signal?: AbortSignal): Promise<RepositorySnapshotSource | undefined>;
+/** Resolve the Git worktree root, or undefined when `cwd` is outside every repository. */
+export declare function discoverRepositoryRootOptional(cwd: string, signal?: AbortSignal): Promise<string | undefined>;
 /** Resolve the canonical Git worktree root owning `cwd` without inventorying its files. */
 export declare function discoverRepositoryRoot(cwd: string, signal?: AbortSignal): Promise<string>;
 /** Create or read the per-worktree identity used by refs and cross-store locking. */
@@ -21,7 +32,7 @@ export declare function ensureGitWorktreeIdentity(cwd: string, signal?: AbortSig
 /** Resolve a moved linked worktree from its common directory and durable identity. */
 export declare function resolveGitWorktreeRoot(commonDir: string, worktreeId: string, fallback: string, signal?: AbortSignal): Promise<string>;
 /** Return true when two repository fences refer to the same checkout state. */
-export declare function sameRepositoryFence(left: RepositoryState, right: RepositoryState): boolean;
+export declare function sameRepositoryFence(left: GitWorkspaceState, right: GitWorkspaceState): boolean;
 /** Run Git with stable non-interactive defaults and return UTF-8 output. */
 export declare function runGit(cwd: string, args: readonly string[], signal?: AbortSignal, options?: {
     readonly env?: NodeJS.ProcessEnv;
@@ -42,4 +53,4 @@ export declare function runGitBuffer(cwd: string, args: readonly string[], signa
     readonly maxBuffer?: number;
 }): Promise<Buffer>;
 /** Return the Git metadata directory for diagnostics. */
-export declare function gitMetadataParent(state: RepositoryState): string;
+export declare function gitMetadataParent(state: GitWorkspaceState): string;

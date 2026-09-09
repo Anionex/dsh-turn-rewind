@@ -1,9 +1,9 @@
-import { type RepositorySnapshotSource } from './git.js';
 import type { LedgerStore } from './store.js';
+import { type WorkspaceSnapshotSource } from './workspace.js';
 import type { ResolvedChangeLedgerConfig, SnapshotEntry, WorkspaceChange } from './types.js';
 /** One captured tree, optionally persisted into the blob store. */
 export interface CapturedTree {
-    readonly source: RepositorySnapshotSource;
+    readonly source: WorkspaceSnapshotSource;
     readonly entries: Readonly<Record<string, SnapshotEntry>>;
     readonly gitEntries?: Readonly<Record<string, SnapshotEntry>>;
     readonly treeHash: string;

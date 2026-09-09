@@ -19,6 +19,12 @@ export declare class ChangeLedgerEngine {
     /** Wait for startup reconciliation and return the number of interrupted journals found. */
     initialize(): Promise<number>;
     private initializeStore;
+    /**
+     * Acquire the exclusive lock for one workspace.
+     *
+     * A Git worktree also binds the shared per-worktree lock derived from its Git
+     * identity; an ordinary directory owns only the durable directory lock.
+     */
     private acquireWorkspace;
     private reconcileGitCheckpointJournals;
     private publishGitManifest;

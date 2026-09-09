@@ -34,7 +34,8 @@ export interface SymlinkSnapshotEntry {
 export type SnapshotEntry = FileSnapshotEntry | SymlinkSnapshotEntry
 
 /** Git facts that fence a restore point to the repository state it observed. */
-export interface RepositoryState {
+export interface GitWorkspaceState {
+  readonly type: 'git'
   readonly root: string
   readonly commonDir: string
   readonly head?: string
@@ -42,6 +43,18 @@ export interface RepositoryState {
   readonly operation?: string
   readonly stagedPaths: readonly string[]
 }
+
+/** Identity of an ordinary directory workspace captured without Git. */
+export interface DirectoryWorkspaceState {
+  readonly type: 'directory'
+  readonly root: string
+}
+
+/** Workspace facts that fence a restore point to the state it observed. */
+export type WorkspaceState = GitWorkspaceState | DirectoryWorkspaceState
+
+/** @deprecated Use `WorkspaceState`; the durable manifest field keeps its original name. */
+export type RepositoryState = WorkspaceState
 
 /** Why a restore point exists. */
 export type RestorePointKind = 'user' | 'rescue' | 'turn'
@@ -89,8 +102,10 @@ export interface GitCheckpointMetadata {
 }
 
 /** Automatic turn checkpoint whose content is stored in the repository object database. */
-export interface RestorePointManifestV2 extends Omit<RestorePointManifestV1, 'version' | 'treeHash'> {
+export interface RestorePointManifestV2 extends Omit<RestorePointManifestV1, 'version' | 'treeHash' | 'repository'> {
   readonly version: typeof GIT_CHECKPOINT_FORMAT_VERSION
+  /** Git-native checkpoints only exist for a Git worktree. */
+  readonly repository: GitWorkspaceState
   /** Deterministic sidecar identity; Git tree integrity is verified separately. */
   readonly treeHash: string
   readonly git: GitCheckpointMetadata
@@ -126,6 +141,7 @@ export interface RestorePointSummary {
   readonly id: RestorePointId
   readonly kind: RestorePointKind
   readonly workspace: string
+  readonly workspaceType: WorkspaceState['type']
   readonly sessionId?: string
   readonly label?: string
   readonly parentRestorePoint?: RestorePointId

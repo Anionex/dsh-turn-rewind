@@ -27,12 +27,16 @@ interface RestorePointManifestV1 {
   kind: 'user' | 'rescue' | 'turn'
   workspace: string
   repository: {
+    type: 'git'
     root: string
     commonDir: string
     head?: string
     branch?: string
     operation?: string
     stagedPaths: string[]
+  } | {
+    type: 'directory'
+    root: string
   }
   sessionId?: string
   label?: string
@@ -98,4 +102,4 @@ interface RestoreOperationV1 {
 
 ## Compatibility
 
-Readers reject unknown `version` values and malformed durable data. There is no best-effort fallback, path normalization, or legacy coercion. A future incompatible format must use a new state-root version and an explicit migration tool.
+Readers reject unknown `version` values and malformed durable data. The only legacy interpretation is a workspace fence without the additive `type` discriminator: it is read as a Git workspace and rewritten with `type: 'git'` on the next write. A directory fence must not carry `commonDir`, `head`, `branch`, `operation`, or `stagedPaths`, and Git-native (v2) manifests must fence a Git workspace. There is no other best-effort fallback or path normalization. A future incompatible format must use a new state-root version and an explicit migration tool.

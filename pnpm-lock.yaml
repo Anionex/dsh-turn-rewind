@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      ignore:
+        specifier: ^7.0.9
+        version: 7.0.9
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1
@@ -73,6 +77,10 @@ packages:
   csstype@3.2.3:
     resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}
 
+  ignore@7.0.9:
+    resolution: {integrity: sha512-brTTsvFRt5C1gGHtPst/281UjPD5t9fBqbgoMPlVWy11ZLTPfu7HxK4ZYqO9H7o/yC9rSTCI85EaQ4OoY12qYw==}
+    engines: {node: '>= 4'}
+
   js-tokens@3.0.0:
     resolution: {integrity: sha512-poXEQHPMmTrYZuJgNRll2sbc3kJsSU1m/g1Q93IE6txNj3p6xOOOmdj1G/zCVGawYSPzTkSoWGg1otqbeqKJeg==}
 
@@ -125,6 +133,8 @@ snapshots:
       csstype: 3.2.3
 
   csstype@3.2.3: {}
+
+  ignore@7.0.9: {}
 
   js-tokens@3.0.0: {}
 

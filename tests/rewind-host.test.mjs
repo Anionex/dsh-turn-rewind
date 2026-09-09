@@ -938,3 +938,35 @@ function installedCoordinator(engine, warnings = []) {
   assert.equal(typeof toolListener, 'function')
   return { coordinator, listener, toolListener }
 }
+
+test('HTTP rewind captures and restores an ordinary directory session', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const plain = join(f.outer, 'plain-project')
+  await mkdir(join(plain, 'src'), { recursive: true })
+  await writeFile(join(plain, 'src/code.txt'), 'checkpoint\n')
+
+  const checkpoint = await f.engine.createTurnCheckpoint({
+    cwd: plain, sessionId: 'session-plain', turn: 1, turnStartSeq: 1,
+  })
+  assert.equal(checkpoint.workspaceType, 'directory')
+  await writeFile(join(plain, 'src/code.txt'), 'changed\n')
+  const handler = handlerFor(f, new Map([
+    ['session-plain', liveSession('session-plain', plain, oneTurnEvents())],
+  ]))
+
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-plain&messageSeq=2')
+  assert.equal(preview.status, 200)
+  assert.equal(preview.body.status, 'ready')
+  assert.equal(preview.body.totalChanges, 1)
+  assert.equal(preview.body.currentHead, undefined)
+  assert.deepEqual(preview.body.changes.map(change => change.path), ['src/code.txt'])
+
+  const applied = await request(handler, 'POST', '/turn-rewind', {
+    mode: 'code', sessionId: 'session-plain', messageSeq: 2, checkpointId: checkpoint.id,
+    planId: preview.body.planId, confirmation: preview.body.confirmation,
+  })
+  assert.equal(applied.status, 200)
+  assert.equal(applied.body.mode, 'code')
+  assert.equal(await readFile(join(plain, 'src/code.txt'), 'utf8'), 'checkpoint\n')
+})

@@ -2,9 +2,9 @@ import { createHash } from 'node:crypto'
 import { constants, type BigIntStats } from 'node:fs'
 import { lstat, open, readlink } from 'node:fs/promises'
 import { ChangeLedgerError } from './errors.js'
-import { discoverRepository, sameRepositoryFence, type RepositorySnapshotSource } from './git.js'
 import { isNodeError, resolveWorkspacePath } from './path-utils.js'
 import type { LedgerStore } from './store.js'
+import { discoverWorkspace, sameWorkspaceFence, type WorkspaceSnapshotSource } from './workspace.js'
 import type {
   ResolvedChangeLedgerConfig,
   SnapshotEntry,
@@ -15,7 +15,7 @@ const COMPARISON_READ_BUDGET_BYTES = 128 * 1024 * 1024
 
 /** One captured tree, optionally persisted into the blob store. */
 export interface CapturedTree {
-  readonly source: RepositorySnapshotSource
+  readonly source: WorkspaceSnapshotSource
   readonly entries: Readonly<Record<string, SnapshotEntry>>
   readonly gitEntries?: Readonly<Record<string, SnapshotEntry>>
   readonly treeHash: string
@@ -32,7 +32,7 @@ export async function captureTree(options: {
   readonly signal?: AbortSignal
 }): Promise<CapturedTree> {
   throwIfAborted(options.signal)
-  const source = await discoverRepository(options.cwd, options.signal)
+  const source = await discoverWorkspace(options.cwd, options.config, options.signal)
   if (source.paths.length > options.config.maxFiles) {
     throw new ChangeLedgerError(
       'TOO_MANY_FILES',
@@ -41,7 +41,9 @@ export async function captureTree(options: {
   }
 
   const entries: Record<string, SnapshotEntry> = Object.create(null) as Record<string, SnapshotEntry>
-  const gitObjectFormat = options.gitObjectFormat
+  // Git-object capture only applies to a Git worktree; an ordinary directory
+  // always stores its own content-addressed blobs.
+  const gitObjectFormat = source.state.type === 'git' ? options.gitObjectFormat : undefined
   const gitCapture = gitObjectFormat === undefined
     ? undefined
     : {
@@ -135,13 +137,19 @@ export async function captureStableTree(options: {
     })
     const second = await captureTree(options)
     if (first.treeHash === second.treeHash
-      && sameRepositoryFence(first.source.state, second.source.state)
-      && arraysEqual(first.source.state.stagedPaths, second.source.state.stagedPaths)
+      && sameWorkspaceFence(first.source.state, second.source.state)
+      && sameStagedPaths(first.source, second.source)
       && arraysEqual(first.source.paths, second.source.paths)) {
       return second
     }
   }
   throw new ChangeLedgerError('WORKSPACE_CHANGED_DURING_CAPTURE', 'workspace did not remain stable across repeated full-tree captures')
+}
+
+/** Whether two captures observed the same index state; ordinary directories have none. */
+function sameStagedPaths(left: WorkspaceSnapshotSource, right: WorkspaceSnapshotSource): boolean {
+  if (left.state.type !== 'git' || right.state.type !== 'git') return true
+  return arraysEqual(left.state.stagedPaths, right.state.stagedPaths)
 }
 
 /** Compute stable path-level differences between two captured trees. */

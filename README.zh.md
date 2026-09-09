@@ -65,7 +65,9 @@ Agent / 用户 / 外部程序修改工作树
 
 ## 支持范围
 
-`0.1` 只支持普通 Git worktree：
+支持两种工作区，按会话所在目录自动判定：
+
+**普通 Git worktree**
 
 - tracked 文件，包括恢复点创建时已经缺失的 tracked 路径；
 - 未被 `.gitignore` 或 Git 标准 excludes 忽略的 untracked 文件；
@@ -73,15 +75,22 @@ Agent / 用户 / 外部程序修改工作树
 - 符号链接；
 - 可执行位等可移植权限位。
 
+**普通目录（所在目录不是 Git 仓库）**
+
+- 目录内所有普通文件与符号链接，符号链接只记录链接本身、不跟随目标；
+- 默认排除 `.git` 与 `node_modules`；
+- 可在目录根放 `.dsh-rewindignore`（语法同 `.gitignore`）追加排除规则；内置排除项在用户规则之后生效，无法被反向取消；
+- 快照内容存进插件自己的内容寻址存储，不依赖 Git 对象库；
+- 目录里执行 `git init` 后工作区类型改变，旧回退点会失效（`WORKSPACE_MODE_CHANGED`），需要重新发送消息生成新的回退点。
+
 下列对象会被拒绝或明确排除：
 
 - sparse checkout；
 - submodule gitlink（应分别进入每个 submodule 建恢复点）；
-- ignored 文件；
+- ignored 文件、被 `.dsh-rewindignore` 排除的文件；
 - socket、设备、FIFO 等特殊文件；
 - 扩展属性、ACL、所有者、时间戳和 hard-link 拓扑；
-- Git index 和仓库元数据；
-- 非 Git 目录。
+- Git index 和仓库元数据。
 
 如果 ignored 或其他未受管理的文件占据了待恢复路径，插件会拒绝恢复，不会递归删除它。
 

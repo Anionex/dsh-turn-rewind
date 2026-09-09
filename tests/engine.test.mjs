@@ -2035,3 +2035,142 @@ test('purgeWorkspace cleans storage for a workspace whose directory no longer ex
   assert.ok(report.deletedBlobs > 0)
   assert.equal((await engine.listWorkspaces()).length, 0)
 })
+
+async function directoryFixture(config = {}) {
+  const outer = await mkdtemp(join(tmpdir(), 'dsh-change-ledger-dir-'))
+  const workspace = join(outer, 'workspace')
+  await mkdir(workspace)
+  const engine = new ChangeLedgerEngine({ storageDir: join(outer, 'state'), staleLockMs: 1, ...config })
+  await engine.initialize()
+  return {
+    outer,
+    workspace,
+    engine,
+    cleanup: () => rm(outer, { recursive: true, force: true }),
+  }
+}
+
+test('ordinary directories capture, diff, restore, and rescue without Git', async (t) => {
+  const f = await directoryFixture()
+  t.after(f.cleanup)
+  await mkdir(join(f.workspace, 'src'), { recursive: true })
+  await mkdir(join(f.workspace, 'node_modules/pkg'), { recursive: true })
+  await mkdir(join(f.workspace, 'cache'), { recursive: true })
+  await writeFile(join(f.workspace, 'src/main.txt'), 'alpha\n')
+  await writeFile(join(f.workspace, 'node_modules/pkg/index.js'), 'dependency\n')
+  await writeFile(join(f.workspace, 'cache/result.bin'), Buffer.alloc(32, 3))
+
+  const created = await f.engine.create({ cwd: f.workspace, sessionId: 'session-dir' })
+  assert.equal(created.workspaceType, 'directory')
+  assert.equal(created.stagedPathCount, 0)
+  assert.equal(created.fileCount, 2)
+  assert.equal(created.head, undefined)
+
+  await writeFile(join(f.workspace, 'src/main.txt'), 'changed\n')
+  await writeFile(join(f.workspace, 'cache/result.bin'), Buffer.alloc(48, 9))
+  await writeFile(join(f.workspace, 'node_modules/pkg/index.js'), 'dependency changed\n')
+  const inspection = await f.engine.inspect({ cwd: f.workspace, restorePointId: created.id })
+  assert.deepEqual(inspection.changes.map(change => change.path), ['cache/result.bin', 'src/main.txt'])
+  assert.equal(inspection.currentRepository.type, 'directory')
+  assert.equal(inspection.currentHead, undefined)
+
+  const plan = await f.engine.planRestore({ cwd: f.workspace, restorePointId: created.id })
+  const result = await f.engine.applyRestore({ planId: plan.id, confirmation: plan.confirmation })
+  assert.equal(result.restoredPaths.length, 2)
+  assert.equal(await readFile(join(f.workspace, 'src/main.txt'), 'utf8'), 'alpha\n')
+  assert.deepEqual(await readFile(join(f.workspace, 'cache/result.bin')), Buffer.alloc(32, 3))
+  // A dependency tree is outside the snapshot, so a restore must never rewrite it.
+  assert.equal(await readFile(join(f.workspace, 'node_modules/pkg/index.js'), 'utf8'), 'dependency changed\n')
+  // The pre-restore rescue point is stored in the same content-addressed ledger.
+  const rescue = (await f.engine.list({ cwd: f.workspace, includeRescue: true })).filter(point => point.kind === 'rescue')
+  assert.equal(rescue.length, 1)
+  assert.equal(rescue[0]?.workspaceType, 'directory')
+  const rescueInspection = await f.engine.inspect({ cwd: f.workspace, restorePointId: rescue[0].id })
+  assert.deepEqual(rescueInspection.changes.map(change => change.path), ['cache/result.bin', 'src/main.txt'])
+})
+
+test('ordinary-directory ignore rules keep excluded files out of the snapshot', async (t) => {
+  const f = await directoryFixture()
+  t.after(f.cleanup)
+  await writeFile(join(f.workspace, '.dsh-rewindignore'), 'secret.txt\nbuild/\n')
+  await writeFile(join(f.workspace, 'kept.txt'), 'kept\n')
+  await writeFile(join(f.workspace, 'secret.txt'), 'secret\n')
+  await mkdir(join(f.workspace, 'build'))
+  await writeFile(join(f.workspace, 'build/out.js'), 'artifact\n')
+
+  const created = await f.engine.create({ cwd: f.workspace, sessionId: 'session-ignore' })
+  assert.equal(created.fileCount, 2)
+  await writeFile(join(f.workspace, 'kept.txt'), 'changed\n')
+  await writeFile(join(f.workspace, 'secret.txt'), 'secret changed\n')
+  const inspection = await f.engine.inspect({ cwd: f.workspace, restorePointId: created.id })
+  assert.deepEqual(inspection.changes.map(change => change.path), ['kept.txt'])
+  const plan = await f.engine.planRestore({ cwd: f.workspace, restorePointId: created.id })
+  await f.engine.applyRestore({ planId: plan.id, confirmation: plan.confirmation })
+  assert.equal(await readFile(join(f.workspace, 'kept.txt'), 'utf8'), 'kept\n')
+  assert.equal(await readFile(join(f.workspace, 'secret.txt'), 'utf8'), 'secret changed\n')
+})
+
+test('ordinary-directory limits name the offending path and allow explicit exclusion', async (t) => {
+  const f = await directoryFixture({ maxFileBytes: 8 })
+  t.after(f.cleanup)
+  await writeFile(join(f.workspace, 'small.txt'), 'ok\n')
+  await writeFile(join(f.workspace, 'big.txt'), 'way too large\n')
+  await assert.rejects(
+    () => f.engine.create({ cwd: f.workspace, sessionId: 'session-limit' }),
+    (error) => error instanceof ChangeLedgerError && error.code === 'FILE_TOO_LARGE' && error.message.includes('big.txt'),
+  )
+  await writeFile(join(f.workspace, '.dsh-rewindignore'), 'big.txt\n')
+  const created = await f.engine.create({ cwd: f.workspace, sessionId: 'session-limit' })
+  assert.equal(created.fileCount, 2)
+})
+
+test('ordinary directories reject special filesystem entries', { skip: process.platform === 'win32' }, async (t) => {
+  const net = await import('node:net')
+  const f = await directoryFixture()
+  const socketPath = join(f.workspace, 'service.sock')
+  const server = net.createServer()
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(socketPath, resolve)
+  })
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve))
+    await f.cleanup()
+  })
+  await assert.rejects(
+    () => f.engine.create({ cwd: f.workspace, sessionId: 'session-socket' }),
+    (error) => error instanceof ChangeLedgerError && error.code === 'UNSUPPORTED_FILE_TYPE' && error.message.includes('service.sock'),
+  )
+})
+
+test('ordinary-directory symlinks are captured without following targets outside the workspace', async (t) => {
+  const f = await directoryFixture()
+  t.after(f.cleanup)
+  const outside = join(f.outer, 'outside.txt')
+  await writeFile(outside, 'outside\n')
+  await symlink(outside, join(f.workspace, 'link.txt'))
+
+  const created = await f.engine.create({ cwd: f.workspace, sessionId: 'session-link' })
+  assert.equal(created.fileCount, 1)
+  await rm(join(f.workspace, 'link.txt'))
+  await writeFile(join(f.workspace, 'link.txt'), 'replaced\n')
+  const inspection = await f.engine.inspect({ cwd: f.workspace, restorePointId: created.id })
+  assert.equal(inspection.changes[0]?.kind, 'type-changed')
+  const plan = await f.engine.planRestore({ cwd: f.workspace, restorePointId: created.id })
+  await f.engine.applyRestore({ planId: plan.id, confirmation: plan.confirmation })
+  assert.equal(await readlink(join(f.workspace, 'link.txt')), outside)
+  assert.equal(await readFile(outside, 'utf8'), 'outside\n')
+})
+
+test('turning an ordinary directory into a Git worktree invalidates its restore points', async (t) => {
+  const f = await directoryFixture()
+  t.after(f.cleanup)
+  await writeFile(join(f.workspace, 'code.txt'), 'plain\n')
+  const created = await f.engine.create({ cwd: f.workspace, sessionId: 'session-mode' })
+  assert.equal(created.workspaceType, 'directory')
+  await git(f.workspace, 'init', '-b', 'main')
+  await assert.rejects(
+    () => f.engine.inspect({ cwd: f.workspace, restorePointId: created.id }),
+    (error) => error instanceof ChangeLedgerError && error.code === 'WORKSPACE_MODE_CHANGED',
+  )
+})

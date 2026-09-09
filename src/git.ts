@@ -4,13 +4,13 @@ import { link, lstat, mkdir, open, readFile, realpath, unlink } from 'node:fs/pr
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { ChangeLedgerError, errorMessage } from './errors.js'
 import { canonicalDirectory, isNodeError, syncDirectory, validateRelativePath } from './path-utils.js'
-import type { RepositoryState } from './types.js'
+import type { GitWorkspaceState } from './types.js'
 
 const GIT_MAX_BUFFER = 32 * 1024 * 1024
 
 /** Repository discovery result plus the eligible path inventory. */
 export interface RepositorySnapshotSource {
-  readonly state: RepositoryState
+  readonly state: GitWorkspaceState
   readonly paths: readonly string[]
 }
 
@@ -63,6 +63,7 @@ export async function discoverRepository(cwd: string, signal?: AbortSignal): Pro
 
   return {
     state: {
+      type: 'git',
       root,
       commonDir,
       ...(head === undefined ? {} : { head }),
@@ -72,6 +73,46 @@ export async function discoverRepository(cwd: string, signal?: AbortSignal): Pro
     },
     paths,
   }
+}
+
+/**
+ * Discover the owning Git worktree, or return undefined when `cwd` is not
+ * inside any repository. Every other discovery failure still throws, so a
+ * broken repository never silently degrades into an ordinary directory.
+ * @param cwd - candidate working directory.
+ * @param signal - optional caller cancellation.
+ * @returns the snapshot source, or undefined outside every repository.
+ */
+export async function discoverRepositoryOptional(cwd: string, signal?: AbortSignal): Promise<RepositorySnapshotSource | undefined> {
+  try {
+    return await discoverRepository(cwd, signal)
+  } catch (error) {
+    if (isNotRepositoryError(error)) return undefined
+    throw error
+  }
+}
+
+/** Resolve the Git worktree root, or undefined when `cwd` is outside every repository. */
+export async function discoverRepositoryRootOptional(cwd: string, signal?: AbortSignal): Promise<string | undefined> {
+  try {
+    return await discoverRepositoryRoot(cwd, signal)
+  } catch (error) {
+    if (isNotRepositoryError(error)) return undefined
+    throw error
+  }
+}
+
+/**
+ * Whether one discovery failure is Git's plain "not a git repository" verdict.
+ *
+ * `gitEnvironment` pins the C locale, so the message text is stable and this
+ * three-way check (code, exit status, message) cannot swallow a real failure.
+ */
+function isNotRepositoryError(error: unknown): boolean {
+  return error instanceof ChangeLedgerError
+    && error.code === 'GIT_COMMAND_FAILED'
+    && gitExitCode(error.cause) === 128
+    && error.message.includes('not a git repository')
 }
 
 /** Resolve the canonical Git worktree root owning `cwd` without inventorying its files. */
@@ -131,7 +172,7 @@ export async function resolveGitWorktreeRoot(
 }
 
 /** Return true when two repository fences refer to the same checkout state. */
-export function sameRepositoryFence(left: RepositoryState, right: RepositoryState): boolean {
+export function sameRepositoryFence(left: GitWorkspaceState, right: GitWorkspaceState): boolean {
   return left.root === right.root
     && left.commonDir === right.commonDir
     && left.head === right.head
@@ -302,6 +343,10 @@ function gitEnvironment(extra: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv
     ...extra,
     GIT_OPTIONAL_LOCKS: '0',
     GIT_TERMINAL_PROMPT: '0',
+    // Git's diagnostics are matched for the "not a git repository" verdict that
+    // selects ordinary-directory mode; pin the C locale so that stays stable.
+    LC_ALL: 'C',
+    LANG: 'C',
   }
 }
 
@@ -495,6 +540,6 @@ async function publishIdentityFile(path: string, value: string, repairMalformed:
 }
 
 /** Return the Git metadata directory for diagnostics. */
-export function gitMetadataParent(state: RepositoryState): string {
+export function gitMetadataParent(state: GitWorkspaceState): string {
   return dirname(state.commonDir)
 }
