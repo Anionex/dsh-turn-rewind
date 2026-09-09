@@ -455,11 +455,20 @@ export function createRewindHttpHandler(
       if (request.method === 'POST') {
         const body = objectBody(await readBody(request))
         const mode = body.mode
-        if (mode !== 'code' && mode !== 'both') {
-          throw new ChangeLedgerError('INVALID_ARGUMENTS', 'mode must be "code" or "both"')
+        if (mode !== 'code' && mode !== 'both' && mode !== 'messages') {
+          throw new ChangeLedgerError('INVALID_ARGUMENTS', 'mode must be "code", "both", or "messages"')
         }
         const sessionId = requiredText(body.sessionId, 'sessionId')
         const messageSeq = nonNegativeInteger(body.messageSeq, 'messageSeq')
+        // Messages-only rewind never reads or writes project files, so it needs
+        // neither a checkpoint nor an exclusive workspace: it resolves the turn
+        // boundary straight from the Session log and forks there.
+        if (mode === 'messages') {
+          const target = messageTarget(await readSession(ctx, sessionId), messageSeq)
+          const fork = await createConversationRestart(ctx, sessionId, target)
+          json(response, 200, { status: 'completed', mode, sessionId: fork.sessionId })
+          return
+        }
         const checkpointId = requiredText(body.checkpointId, 'checkpointId')
         const checkpoint = await checkpointForRequest(ctx, engine, sessionId, messageSeq, checkpointId)
         const activeSessionIds = await sharedWorkspaceSessions(ctx.agents, checkpoint.cwd)
@@ -608,7 +617,7 @@ async function checkpointForRequest(
 async function createConversationRestart(
   ctx: ConversationRestartContext,
   sourceId: string,
-  checkpoint: MessageCheckpoint,
+  checkpoint: MessageTarget,
 ): Promise<{ readonly sessionId: string }> {
   const source = await readSession(ctx, sourceId)
   const current = messageTarget(source, checkpoint.messageSeq)

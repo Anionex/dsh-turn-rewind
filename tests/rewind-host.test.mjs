@@ -620,6 +620,71 @@ test('a host exposing neither restart service fails closed with an explained err
   assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'changed\n')
 })
 
+test('messages-only rewind forks the conversation in a non-Git directory without touching files', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const plain = join(f.outer, 'plain')
+  await mkdir(plain)
+  await writeFile(join(plain, 'code.txt'), 'untracked change\n')
+  const calls = []
+  const handler = handlerFor(f, new Map([
+    ['session-plain', liveSession('session-plain', plain, oneTurnEvents())],
+  ]), {
+    apiProxy: undefined,
+    sessionController: {
+      async create(request) { calls.push(['create', request]); return { sessionId: 'session-child' } },
+      async fork(request) { calls.push(['fork', request]); return { sessionId: 'session-child' } },
+    },
+  })
+  const applied = await request(handler, 'POST', '/turn-rewind', {
+    mode: 'messages', sessionId: 'session-plain', messageSeq: 2,
+  })
+
+  assert.equal(applied.status, 200)
+  assert.equal(applied.body.mode, 'messages')
+  assert.equal(applied.body.sessionId, 'session-child')
+  assert.deepEqual(calls, [['create', { cwd: plain }]])
+  assert.equal(await readFile(join(plain, 'code.txt'), 'utf8'), 'untracked change\n')
+})
+
+test('messages-only rewind ignores workspace concurrency because it never writes files', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const sessions = new Map([
+    ['session-source', liveSession('session-source', f.workspace, twoTurnEvents())],
+  ])
+  const sourceAgent = { id: 'session-source', status: 'running', session: sessions.get('session-source') }
+  let forked
+  const handler = handlerFor(f, sessions, {
+    agents: { list: () => [sourceAgent] },
+    apiProxy: undefined,
+    sessionController: {
+      async create() { throw new Error('later messages must fork') },
+      async fork(request) { forked = request; return { sessionId: 'session-child' } },
+    },
+  })
+  const applied = await request(handler, 'POST', '/turn-rewind', {
+    mode: 'messages', sessionId: 'session-source', messageSeq: 6,
+  })
+
+  assert.equal(applied.status, 200)
+  assert.equal(applied.body.sessionId, 'session-child')
+  assert.deepEqual(forked, { sessionId: 'session-source', atSeq: 4 })
+  assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'checkpoint\n')
+})
+
+test('an unsupported rewind mode is rejected before any work', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const handler = handlerFor(f, new Map())
+  const applied = await request(handler, 'POST', '/turn-rewind', {
+    mode: 'everything', sessionId: 'session-source', messageSeq: 1,
+  })
+
+  assert.equal(applied.body.code, 'INVALID_ARGUMENTS')
+  assert.match(applied.body.error, /mode must be "code", "both", or "messages"/)
+})
+
 test('file changes after preview invalidate the restore plan before any conversation is created', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)
