@@ -270,6 +270,10 @@ export class LedgerStore {
       throw new ChangeLedgerError('BLOB_HASH_MISMATCH', `refusing to store content whose SHA-256 does not match ${hash}`)
     }
     const path = this.blobPath(workspace, hash)
+    // Content addressing makes an existing blob identical by construction, and
+    // re-writing it costs one fsync per file: a full-tree capture of a large
+    // workspace otherwise spends minutes proving it already stored the content.
+    if (await pathExists(path)) return
     const directory = join(this.workspaceDir(workspace), 'blobs', hash.slice(0, 2))
     await mkdir(directory, { recursive: true, mode: 0o700 })
     const temporary = join(directory, `.${randomUUID()}.tmp`)

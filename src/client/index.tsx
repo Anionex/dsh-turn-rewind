@@ -605,7 +605,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
           {loading && <p className="dcl-rewind-status">正在检查可以恢复的项目文件…</p>}
           {preview?.status === 'pending' && <p className="dcl-rewind-status">这条消息发送前的文件还在保存，请稍后再试。</p>}
           {preview?.status === 'missing' && <p className="dcl-rewind-error">没有保存这条消息发送前的文件。可能是当时还没启用回退功能、记录已超过保留期限，或已关闭自动检查点。仍可只回溯消息。</p>}
-          {preview?.status === 'skipped' && <p className="dcl-rewind-status">为避免阻塞消息发送，本轮没有自动保存文件：{preview.reason}仍可只回溯消息。</p>}
+          {preview?.status === 'skipped' && <p className="dcl-rewind-status">{explainCheckpointSkip(preview.reason)}</p>}
           {preview?.status === 'failed' && <p className="dcl-rewind-error">{explainCheckpointFailure(preview.error)}</p>}
           {preview !== null && (
             <div className="dcl-rewind-options">
@@ -1307,6 +1307,29 @@ export function describeCaptureNotice(ready: ReadyPreview | null): string | null
     return `有 ${String(ready.skippedCount)} 个文件因为超过单文件大小上限或类型不受支持，没有纳入检查点${example === undefined ? '' : `（例如 ${example}）`}。恢复时不会改动它们。`
   }
   return null
+}
+
+/**
+ * Explain one recorded checkpoint skip in user terms.
+ *
+ * A skip is not a failure of the message: the turn ran normally and only the
+ * file snapshot is missing, so the text names the actual cause and the two
+ * levers that fix it.
+ * @param reason - reason recorded by the Host, usually a `[CODE] detail` line.
+ * @returns one user-facing sentence.
+ */
+export function explainCheckpointSkip(reason: string): string {
+  const code = /^\[([A-Z_]+)\]/.exec(reason)?.[1]
+  if (code === 'TURN_CHECKPOINT_TIMEOUT') {
+    return '这个项目目录太大，在检查点时间上限内没保存完文件快照，所以本轮没有回退点（消息本身没有受影响）。可以在插件设置里调大「检查点时间上限」，或在目录根用 .dsh-rewindignore 排除大目录（例如 node_modules、构建产物、数据集）。仍可只回溯消息。'
+  }
+  if (code === 'TURN_CHECKPOINT_DISABLED') {
+    return '自动文件检查点已在设置里关闭，本轮没有回退点。仍可只回溯消息。'
+  }
+  if (code === 'TURN_CHECKPOINT_NEW_CONTENT_LIMIT') {
+    return '这一轮新增的内容超过检查点预算，没有保存文件快照。仍可只回溯消息。'
+  }
+  return `本轮没有保存文件检查点：${reason}仍可只回溯消息。`
 }
 
 /**

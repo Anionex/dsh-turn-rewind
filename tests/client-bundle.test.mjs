@@ -606,7 +606,7 @@ test('rewind dialog restores files in two modes and allows reviewed Git history 
     matched: { messageSeq: 2, promptText: '修复这个问题' }, sessionId: 'session-source', async openRestoredSession() {},
   })
   assert.ok(findNode(skippedTree, node => node.type === 'p'
-    && String(node.props.children).includes('为避免阻塞消息发送，本轮没有自动保存文件')))
+    && String(node.props.children).includes('这个项目目录太大')))
 
   stateIndex = 0
   values = [true, false, { status: 'failed', error: 'transient' }, 'both', false, false, false, null, null]

@@ -235,6 +235,16 @@ export declare function fileRecoveryLabel(kind: ChangeKind): string;
  */
 export declare function describeCaptureNotice(ready: ReadyPreview | null): string | null;
 /**
+ * Explain one recorded checkpoint skip in user terms.
+ *
+ * A skip is not a failure of the message: the turn ran normally and only the
+ * file snapshot is missing, so the text names the actual cause and the two
+ * levers that fix it.
+ * @param reason - reason recorded by the Host, usually a `[CODE] detail` line.
+ * @returns one user-facing sentence.
+ */
+export declare function explainCheckpointSkip(reason: string): string;
+/**
  * Explain one recorded checkpoint failure in user terms.
  *
  * The Host records the raw `[CODE] diagnostic` line; a non-Git project

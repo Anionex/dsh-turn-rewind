@@ -97,7 +97,7 @@ export async function captureTree(options: {
     }
     if (entry === undefined) return
     if (entry.kind === 'file') {
-      if (totalBytes + entry.content.length > options.config.maxSnapshotBytes) {
+      if (budgetSpent || totalBytes + entry.content.length > options.config.maxSnapshotBytes) {
         budgetSpent = true
         truncated ??= 'snapshot-limit'
         recordSkip(path, 'snapshot-limit')
@@ -116,9 +116,10 @@ export async function captureTree(options: {
     entries[path] = entry.snapshot
     if (gitCapture !== undefined) gitCapture.entries[path] = entry.snapshot
   }
-  if (gitCapture === undefined) {
-    for (const path of paths) await capturePath(path)
-  } else {
+  {
+    // Reading one file at a time makes a real project directory take minutes, so
+    // every capture runs through a bounded worker pool. Per-file stability stats
+    // and the synchronous budget check keep the result identical to a serial run.
     let next = 0
     let failed = false
     let firstError: unknown = new ChangeLedgerError('WORKSPACE_CHANGED_DURING_CAPTURE', 'parallel comparison capture failed')

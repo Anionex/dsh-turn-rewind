@@ -1914,7 +1914,7 @@ test('default storage follows DSH_HOME', async (t) => {
     const config = resolveConfig({})
     assert.equal(config.storageDir, join(root, 'change-ledger', 'v1'))
     assert.equal(config.turnCheckpointMode, 'legacy')
-    assert.equal(config.turnCheckpointTimeoutMs, 5_000)
+    assert.equal(config.turnCheckpointTimeoutMs, 60_000)
   } finally {
     if (previous === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previous
@@ -1924,7 +1924,7 @@ test('default storage follows DSH_HOME', async (t) => {
 test('updateConfig swaps runtime-tunable values in place and freezes the storage root', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)
-  assert.equal(f.engine.config.turnCheckpointTimeoutMs, 5_000)
+  assert.equal(f.engine.config.turnCheckpointTimeoutMs, 60_000)
   f.engine.updateConfig({ storageDir: f.storageDir, turnCheckpointTimeoutMs: 250, turnCheckpointMode: 'off' })
   assert.equal(f.engine.config.turnCheckpointTimeoutMs, 250)
   assert.equal(f.engine.config.turnCheckpointMode, 'off')

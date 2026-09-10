@@ -58,7 +58,7 @@ const DEFAULTS = {
   planTtlMs: 15 * 60 * 1_000,
   staleLockMs: 30_000,
   turnCheckpointMode: 'legacy',
-  turnCheckpointTimeoutMs: 5_000,
+  turnCheckpointTimeoutMs: 60_000,
   turnCheckpointMaxNewBytes: 32 * 1024 * 1024,
   turnCheckpointTrust: 'fast',
 } as const
