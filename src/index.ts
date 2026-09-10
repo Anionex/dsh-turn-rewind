@@ -2,6 +2,7 @@
  * DSH Turn Rewind, powered by persistent, inspectable, approval-gated Change Ledger restore points.
  * @module @anionex/dsh-turn-rewind
  */
+import { readFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { ChangeLedgerEngine } from './engine.js'
 import { installManageHttp, installRewindHttp, TurnCheckpointCoordinator } from './rewind-host.js'
@@ -13,6 +14,23 @@ export * from './errors.js'
 export * from './rewind-host.js'
 export * from './settings.js'
 export * from './types.js'
+
+/**
+ * Version of the running package.
+ *
+ * A Profile keeps the previous plugin in memory until DSH restarts, so the
+ * loaded version is logged at activation and can be compared with what is on
+ * disk in `.../profiles/<name>/node_modules/@anionex/dsh-turn-rewind`.
+ * @returns the package version, or `unknown` when the manifest is unreadable.
+ */
+function pluginVersion(): string {
+  try {
+    const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: unknown }
+    return typeof manifest.version === 'string' ? manifest.version : 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -29,6 +47,7 @@ export class ChangeLedgerService {
     ctx.provide('changeLedger', this)
     this.engine = new ChangeLedgerEngine(config)
     const checkpoints = new TurnCheckpointCoordinator(this.engine)
+    ctx.logger.info(`[turn-rewind] v${pluginVersion()} active; workspace modes: git worktree, ordinary directory`)
     ctx.inject(['agents'], (scope: Context) => { checkpoints.install(scope) })
     // `apiProxy` is deliberately absent: DSH 0.1.2-alpha carriers (DSH Desktop 2.x)
     // provide `sessionController` instead, and the route must exist on both.

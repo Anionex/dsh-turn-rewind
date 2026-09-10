@@ -1,7 +1,3 @@
-/**
- * DSH Turn Rewind, powered by persistent, inspectable, approval-gated Change Ledger restore points.
- * @module @anionex/dsh-turn-rewind
- */
 import type { Context } from '@deepseek-ai/cordis';
 import { ChangeLedgerEngine } from './engine.js';
 import type { ChangeLedgerConfig } from './types.js';
