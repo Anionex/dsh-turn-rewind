@@ -33,7 +33,7 @@ test('browser bundle anchors rewind to direct user messages and restores their d
   }
   vm.runInNewContext(source, context)
   assert.ok(plugin)
-  assert.deepEqual(JSON.parse(JSON.stringify(plugin.inject)), ['slots', 'sessions', 'conversation'])
+  assert.deepEqual(JSON.parse(JSON.stringify(plugin.inject)), ['slots', 'sessions', 'conversation', 'settingsScope'])
   assert.deepEqual(
     JSON.parse(JSON.stringify(plugin.selectRewindMessage({
       kind: 'user', seq: 7,
@@ -114,6 +114,109 @@ test('browser bundle anchors rewind to direct user messages and restores their d
   assert.deepEqual(JSON.parse(JSON.stringify(settingsRegistration.entry.inject())), {})
 })
 
+/**
+ * Boot the browser bundle and return `apply()`'s entry, with a document double
+ * small enough for the style effect.
+ * @returns the registered client plugin.
+ */
+async function bootPluginEntry() {
+  const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
+  let plugin
+  const context = {
+    AbortController,
+    document: {
+      querySelector: () => null,
+      createElement: () => ({ dataset: {}, remove() {} }),
+      head: { appendChild() {} },
+    },
+    window: {
+      __ModuleLoader__: {
+        load(record) {
+          plugin = record.factory(id => {
+            if (id === 'react/jsx-runtime') return { jsx() {}, jsxs() {}, Fragment: Symbol('fragment') }
+            if (id === 'react') {
+              return {
+                useCallback: value => value,
+                useEffect() {},
+                useLayoutEffect() {},
+                useMemo: compute => compute(),
+                useRef: value => ({ current: value }),
+                useState: initial => [initial, () => {}],
+                useSyncExternalStore: () => undefined,
+              }
+            }
+            if (id === 'react-dom') return { createPortal: value => value }
+            if (id === '@deepseek-ai/dsh-client-ui-primitives') return { Button() {}, Modal() {}, Tooltip() {} }
+            throw new Error(`unexpected browser dependency ${id}`)
+          })
+        },
+      },
+    },
+  }
+  vm.runInNewContext(source, context)
+  assert.ok(plugin)
+  return plugin
+}
+
+/**
+ * Context double with Cordis's own access rule: reading an undeclared service off
+ * the proxy throws before optional chaining can apply, while a declared service the
+ * profile does not mount reads as `undefined`.
+ * @param plugin - entry whose `inject` list is the declaration set.
+ * @param services - services the web profile provides.
+ * @returns a proxied context.
+ */
+function cordisLikeContext(plugin, services) {
+  const core = new Set(['effect', 'inject', 'on', 'emit', 'get', 'set', 'provide', 'logger', 'fiber'])
+  const declared = new Set(plugin.inject)
+  const target = { effect(setup) { return setup() }, ...services }
+  return new Proxy(target, {
+    get(object, property) {
+      if (typeof property === 'string' && !core.has(property) && !declared.has(property)) {
+        throw new Error(`cannot get property "${property}" without inject`)
+      }
+      return Reflect.get(object, property)
+    },
+  })
+}
+
+test('the client declares every service it reads, and survives an absent settingsScope', async () => {
+  const plugin = await bootPluginEntry()
+  const bound = []
+  const registered = []
+  const slots = {
+    inject(name, install) { install() },
+    register(entry) { registered.push(entry); return () => {} },
+  }
+  const profile = {
+    slots,
+    sessions: { open() {}, scope: () => undefined },
+    conversation: { input: { for: () => ({ setDraft() {} }) } },
+    settingsScope: { bind(spec) { bound.push(spec); return { namespace: spec.namespace } } },
+  }
+
+  // `settingsScope` was the undeclared read that crashed the 0.1.5 settings card.
+  plugin.apply(cordisLikeContext(plugin, profile))
+  const card = registered.find(entry => entry.name === 'settings.plugin.item')
+  assert.deepEqual(JSON.parse(JSON.stringify(card.inject())), { scope: { namespace: 'turn-rewind' } })
+  // The card binds the same namespace literal the host section registers.
+  assert.deepEqual(JSON.parse(JSON.stringify(bound)), [{ namespace: 'turn-rewind' }])
+
+  // The service is optional: declared, so reading it must not throw; absent, so the
+  // card registers without a scope instead of taking the profile down.
+  registered.length = 0
+  bound.length = 0
+  plugin.apply(cordisLikeContext(plugin, {
+    slots,
+    sessions: profile.sessions,
+    conversation: profile.conversation,
+  }))
+  assert.deepEqual(bound, [])
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    registered.find(entry => entry.name === 'settings.plugin.item').inject(),
+  )), {})
+})
+
 const CHAT_NODE = {
   key: '13:input-messageabc',
   kind: 'user',
@@ -121,24 +224,26 @@ const CHAT_NODE = {
 }
 
 /** Boot the browser bundle against a minimal DOM double for portal-target tests. */
-async function bootPortalBridge() {
+async function bootPortalBridge(shape = 'current') {
   const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
   let plugin
   let capturedTargets
   let cleanup
   class Element {}
-  const actions = Object.assign(new Element(), {
-    querySelector(selector) {
-      assert.equal(selector, ':scope > button')
-      return {}
-    },
+  const actions = new Element()
+  // DSH 0.1.5 renders the icon-actions row (class `<hash>_actions`) as a direct child
+  // of the user-message row and removed `data-time-hover-root`; older clients nested
+  // that row under the removed wrapper, which stays a supported fallback.
+  const messageRoot = Object.assign(new Element(), {
+    lastElementChild: actions,
+    querySelector: selector => selector === '[class*="actions"]' ? actions : null,
   })
-  const messageRoot = Object.assign(new Element(), { lastElementChild: actions })
   const row = Object.assign(new Element(), {
     dataset: { chatAnchorKey: '13:input-messageabc' },
     querySelector(selector) {
-      assert.equal(selector, '[data-time-hover-root="true"]')
-      return messageRoot
+      if (selector === '[class*="actions"]') return shape === 'current' ? actions : null
+      if (selector === '[data-time-hover-root="true"]') return shape === 'legacy' ? messageRoot : null
+      throw new Error(`unexpected row query ${selector}`)
     },
   })
   const context = {
@@ -189,12 +294,13 @@ async function bootPortalBridge() {
   return {
     plugin,
     actions,
+    shape,
     targets: () => capturedTargets,
     dispose: () => { if (typeof cleanup === 'function') cleanup() },
   }
 }
 
-test('browser bundle finds user actions through the 0.1.1 session chat projection', async () => {
+test('browser bundle finds the 0.1.5 actions row through the 0.1.1 session chat projection', async () => {
   const harness = await bootPortalBridge()
   const rendered = harness.plugin.RewindMessagePortals({
     sessionId: 'session-source',
@@ -221,6 +327,23 @@ test('browser bundle finds user actions through the 0.1.1 session chat projectio
     messageSeq: 7,
     promptText: '修复问题',
   })
+  harness.dispose()
+})
+
+test('browser bundle keeps following the pre-0.1.5 time-hover wrapper', async () => {
+  const harness = await bootPortalBridge('legacy')
+  const rendered = harness.plugin.RewindMessagePortals({
+    sessionId: 'session-source',
+    async openRestoredSession() {},
+    useChat(selector) {
+      return selector({ order: ['13:input-messageabc'], nodes: { get: () => CHAT_NODE } })
+    },
+  })
+
+  assert.equal(rendered.length, 0)
+  const targets = harness.targets()
+  assert.equal(targets.length, 1)
+  assert.equal(targets[0].container, harness.actions)
   harness.dispose()
 })
 

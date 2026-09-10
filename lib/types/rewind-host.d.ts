@@ -8,11 +8,22 @@ interface SessionEventLike {
 interface SessionHeaderLike {
     readonly cwd?: string;
     readonly parentSession?: string;
+    /**
+     * Fork-inherited prefix length on DSH releases before 0.1.5. 0.1.5 deleted the
+     * field — a stored header that still carries it is rejected outright — and moved
+     * the same quantity to {@link SessionLike.inheritedEventCount}.
+     */
     readonly seedLength?: number;
 }
 interface SessionLike {
     readonly id: string;
     readonly header: SessionHeaderLike;
+    /**
+     * Exact number of leading events inherited from the fork parent, as reported by
+     * DSH 0.1.5+ on the live session and on the stored session-log snapshot. `0` —
+     * never `undefined` — for a session with no inherited prefix.
+     */
+    readonly inheritedEventCount?: number;
     readonly events?: readonly SessionEventLike[];
     snapshotEvents?(fromSeq?: number, toSeqExclusive?: number): readonly SessionEventLike[];
 }
@@ -36,6 +47,7 @@ interface SessionQueryLike {
     readSession(id: string): Promise<{
         readonly session: SessionHeaderLike;
         readonly events: readonly SessionEventLike[];
+        readonly inheritedEventCount?: number;
     }>;
 }
 interface HttpRequestLike {
