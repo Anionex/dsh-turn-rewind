@@ -3,6 +3,7 @@ import { constants, type BigIntStats } from 'node:fs'
 import { lstat, open, readlink } from 'node:fs/promises'
 import { ChangeLedgerError } from './errors.js'
 import { isNodeError, resolveWorkspacePath } from './path-utils.js'
+import { matchesPathCache, toPathCacheEntry, type PathCacheEntry } from './path-cache.js'
 import type { LedgerStore } from './store.js'
 import { discoverWorkspace, sameWorkspaceFence, type WorkspaceSnapshotSource } from './workspace.js'
 import type {
@@ -41,6 +42,8 @@ export async function captureTree(options: {
   readonly config: ResolvedChangeLedgerConfig
   readonly store?: LedgerStore
   readonly gitObjectFormat?: 'sha1' | 'sha256'
+  /** Per-path identity cache: an unchanged path is reused instead of re-read. */
+  readonly pathCache?: Map<string, PathCacheEntry>
   readonly signal?: AbortSignal
 }): Promise<CapturedTree> {
   throwIfAborted(options.signal)
@@ -75,6 +78,28 @@ export async function captureTree(options: {
   let budgetSpent = false
   const capturePath = async (path: string): Promise<void> => {
     throwIfAborted(options.signal)
+    // Reuse is only sound when the identity is unchanged and the stored blob is
+    // still present; a garbage-collected blob falls back to a fresh read.
+    if (options.pathCache !== undefined && options.store !== undefined && gitCapture === undefined) {
+      const cached = options.pathCache.get(path)
+      if (cached !== undefined) {
+        let info: BigIntStats | undefined
+        try {
+          info = await lstat(resolveWorkspacePath(source.state.root, path), { bigint: true })
+        } catch (error) {
+          if (!isNodeError(error, 'ENOENT')) throw error
+        }
+        if (info !== undefined && matchesPathCache(cached, info)) {
+          const reusable = cached.entry.kind === 'symlink'
+            || await options.store.hasBlob(source.state.root, cached.entry.blob)
+          if (reusable) {
+            entries[path] = cached.entry
+            if (cached.entry.kind === 'file') totalBytes += cached.entry.size
+            return
+          }
+        }
+      }
+    }
     if (budgetSpent) {
       // The aggregate budget is gone, but the path is still recorded so a
       // restore can prove this point never observed it.
@@ -115,6 +140,9 @@ export async function captureTree(options: {
     }
     entries[path] = entry.snapshot
     if (gitCapture !== undefined) gitCapture.entries[path] = entry.snapshot
+    if (options.pathCache !== undefined && gitCapture === undefined) {
+      options.pathCache.set(path, toPathCacheEntry(entry.info, entry.snapshot))
+    }
   }
   {
     // Reading one file at a time makes a real project directory take minutes, so
@@ -172,12 +200,16 @@ export async function captureStableTree(options: {
   readonly config: ResolvedChangeLedgerConfig
   readonly store?: LedgerStore
   readonly gitObjectFormat?: 'sha1' | 'sha256'
+  /** Per-path identity cache: an unchanged path is reused instead of re-read. */
+  readonly pathCache?: Map<string, PathCacheEntry>
   readonly signal?: AbortSignal
 }): Promise<CapturedTree> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const first = await captureTree({
       cwd: options.cwd,
       config: options.config,
+      ...(options.store === undefined ? {} : { store: options.store }),
+      ...(options.pathCache === undefined ? {} : { pathCache: options.pathCache }),
       ...(options.gitObjectFormat === undefined ? {} : { gitObjectFormat: options.gitObjectFormat }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     })
@@ -303,8 +335,8 @@ async function captureEntry(
   path: string,
   maxFileBytes: number,
   signal?: AbortSignal,
-): Promise<{ readonly kind: 'file'; readonly snapshot: SnapshotEntry & { readonly kind: 'file' }; readonly content: Buffer }
-  | { readonly kind: 'symlink'; readonly snapshot: SnapshotEntry & { readonly kind: 'symlink' } }
+): Promise<{ readonly kind: 'file'; readonly snapshot: SnapshotEntry & { readonly kind: 'file' }; readonly content: Buffer; readonly info: BigIntStats }
+  | { readonly kind: 'symlink'; readonly snapshot: SnapshotEntry & { readonly kind: 'symlink' }; readonly info: BigIntStats }
   | undefined> {
   const target = resolveWorkspacePath(root, path)
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -321,7 +353,7 @@ async function captureEntry(
       const linkTarget = await readlink(target)
       const after = await lstat(target, { bigint: true })
       if (!sameStat(before, after)) continue
-      return { kind: 'symlink', snapshot: { kind: 'symlink', target: linkTarget, mode } }
+      return { kind: 'symlink', snapshot: { kind: 'symlink', target: linkTarget, mode }, info: after }
     }
     if (!before.isFile()) {
       throw new ChangeLedgerError('UNSUPPORTED_FILE_TYPE', `eligible path is not a regular file or symlink: ${JSON.stringify(path)}`)
@@ -355,6 +387,7 @@ async function captureEntry(
       kind: 'file',
       snapshot: { kind: 'file', blob, size: content.length, mode },
       content,
+      info: { ...before, size: BigInt(content.length) } as BigIntStats,
     }
   }
   throw new ChangeLedgerError('WORKSPACE_CHANGED_DURING_CAPTURE', `path changed repeatedly while being captured: ${JSON.stringify(path)}`)

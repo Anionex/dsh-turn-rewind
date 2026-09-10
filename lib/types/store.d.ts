@@ -39,6 +39,10 @@ export declare class LedgerStore {
     acquireWorkspaceDir(workspaceDir: string, workspace: string, signal?: AbortSignal): Promise<() => Promise<void>>;
     private acquireOne;
     /** Persist a blob if it is not already present, and verify existing content. */
+    /** Whether one content-addressed blob is already stored for a workspace. */
+    hasBlob(workspace: string, hash: string): Promise<boolean>;
+    /** Durable directory holding one workspace's manifests, blobs, and caches. */
+    workspaceDirectory(workspace: string): string;
     putBlob(workspace: string, hash: string, content: Buffer): Promise<void>;
     /** Read and verify one content-addressed blob. */
     readBlob(workspace: string, hash: string): Promise<Buffer>;

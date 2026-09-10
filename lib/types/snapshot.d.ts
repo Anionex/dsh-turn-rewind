@@ -1,3 +1,4 @@
+import { type PathCacheEntry } from './path-cache.js';
 import type { LedgerStore } from './store.js';
 import { type WorkspaceSnapshotSource } from './workspace.js';
 import type { CaptureSkip, CaptureTruncation, ResolvedChangeLedgerConfig, SnapshotEntry, WorkspaceChange } from './types.js';
@@ -23,6 +24,8 @@ export declare function captureTree(options: {
     readonly config: ResolvedChangeLedgerConfig;
     readonly store?: LedgerStore;
     readonly gitObjectFormat?: 'sha1' | 'sha256';
+    /** Per-path identity cache: an unchanged path is reused instead of re-read. */
+    readonly pathCache?: Map<string, PathCacheEntry>;
     readonly signal?: AbortSignal;
 }): Promise<CapturedTree>;
 /**
@@ -35,6 +38,8 @@ export declare function captureStableTree(options: {
     readonly config: ResolvedChangeLedgerConfig;
     readonly store?: LedgerStore;
     readonly gitObjectFormat?: 'sha1' | 'sha256';
+    /** Per-path identity cache: an unchanged path is reused instead of re-read. */
+    readonly pathCache?: Map<string, PathCacheEntry>;
     readonly signal?: AbortSignal;
 }): Promise<CapturedTree>;
 /** Compute stable path-level differences between two captured trees. */

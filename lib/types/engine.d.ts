@@ -25,6 +25,14 @@ export declare class ChangeLedgerEngine {
      * A Git worktree also binds the shared per-worktree lock derived from its Git
      * identity; an ordinary directory owns only the durable directory lock.
      */
+    /** Per-workspace path identity caches, loaded once per process generation. */
+    private readonly pathCaches;
+    /**
+     * Load (once) the identity cache that lets a capture reuse unchanged files.
+     * @param workspaceDir - durable directory of one workspace.
+     * @returns the mutable cache shared by every capture of this workspace.
+     */
+    private pathCacheFor;
     private acquireWorkspace;
     private reconcileGitCheckpointJournals;
     private publishGitManifest;

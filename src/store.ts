@@ -263,6 +263,17 @@ export class LedgerStore {
   }
 
   /** Persist a blob if it is not already present, and verify existing content. */
+  /** Whether one content-addressed blob is already stored for a workspace. */
+  async hasBlob(workspace: string, hash: string): Promise<boolean> {
+    validateBlobHash(hash)
+    return pathExists(this.blobPath(workspace, hash))
+  }
+
+  /** Durable directory holding one workspace's manifests, blobs, and caches. */
+  workspaceDirectory(workspace: string): string {
+    return this.workspaceDir(workspace)
+  }
+
   async putBlob(workspace: string, hash: string, content: Buffer): Promise<void> {
     validateBlobHash(hash)
     const contentHash = createHash('sha256').update(content).digest('hex')

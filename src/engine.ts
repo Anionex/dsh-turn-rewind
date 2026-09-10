@@ -26,6 +26,7 @@ import {
   resolveWorkspacePath,
   validateRelativePath,
 } from './path-utils.js'
+import { readPathCache, writePathCache, type PathCacheEntry } from './path-cache.js'
 import { captureSnapshotEntry, captureStableTree, diffTrees, entriesEqual } from './snapshot.js'
 import { LedgerStore, type GitCheckpointJournal } from './store.js'
 import { discoverWorkspace, discoverWorkspaceIdentity, sameWorkspaceFence } from './workspace.js'
@@ -53,7 +54,7 @@ const DEFAULTS = {
   maxRestorePoints: 50,
   maxTurnCheckpointsPerSession: 30,
   maxFiles: 20_000,
-  maxFileBytes: 16 * 1024 * 1024,
+  maxFileBytes: 64 * 1024 * 1024,
   maxSnapshotBytes: 512 * 1024 * 1024,
   planTtlMs: 15 * 60 * 1_000,
   staleLockMs: 30_000,
@@ -111,6 +112,22 @@ export class ChangeLedgerEngine {
    * A Git worktree also binds the shared per-worktree lock derived from its Git
    * identity; an ordinary directory owns only the durable directory lock.
    */
+  /** Per-workspace path identity caches, loaded once per process generation. */
+  private readonly pathCaches = new Map<string, Map<string, PathCacheEntry>>()
+
+  /**
+   * Load (once) the identity cache that lets a capture reuse unchanged files.
+   * @param workspaceDir - durable directory of one workspace.
+   * @returns the mutable cache shared by every capture of this workspace.
+   */
+  private async pathCacheFor(workspaceDir: string): Promise<Map<string, PathCacheEntry>> {
+    const loaded = this.pathCaches.get(workspaceDir)
+    if (loaded !== undefined) return loaded
+    const cache = await readPathCache(workspaceDir)
+    this.pathCaches.set(workspaceDir, cache)
+    return cache
+  }
+
   private async acquireWorkspace(
     workspace: Pick<WorkspaceState, 'type' | 'root'>,
     signal?: AbortSignal,
@@ -496,6 +513,8 @@ export class ChangeLedgerEngine {
       const current = await captureStableTree({
         cwd: source.state.root,
         config: this.config,
+        store: this.store,
+        pathCache: await this.pathCacheFor(this.store.workspaceDirectory(source.state.root)),
         ...(manifest.version === 2 ? { gitObjectFormat: manifest.git.objectFormat } : {}),
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       })
@@ -541,6 +560,8 @@ export class ChangeLedgerEngine {
       const current = await captureStableTree({
         cwd: source.state.root,
         config: this.config,
+        store: this.store,
+        pathCache: await this.pathCacheFor(this.store.workspaceDirectory(source.state.root)),
         ...(manifest.version === 2 ? { gitObjectFormat: manifest.git.objectFormat } : {}),
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       })
@@ -948,12 +969,16 @@ export class ChangeLedgerEngine {
       await this.store.writeSnapshotCleanup(options.cwd)
     }
     try {
+      const workspaceDir = this.store.workspaceDirectory(options.cwd)
+      const pathCache = await this.pathCacheFor(workspaceDir)
       const tree = await captureStableTree({
         cwd: options.cwd,
         config: this.config,
         store: this.store,
+        pathCache,
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       })
+      await writePathCache(workspaceDir, pathCache).catch(() => undefined)
       const manifest: RestorePointManifest = {
         version: LEDGER_FORMAT_VERSION,
         id: makeId('rp'),
