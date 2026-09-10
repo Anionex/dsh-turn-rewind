@@ -140,7 +140,14 @@ export interface ManageOverview {
 }
 /** Return the rewind anchor and editable text owned by one direct user message. */
 export declare function selectRewindMessage(node: ConversationNodeLike): RewindMatch | null;
-/** Browser plugin entry: bridge every direct user-message action row to the rewind UI. */
+/**
+ * Browser plugin entry: bridge every direct user-message action row to the rewind UI.
+ *
+ * Every service read on `ctx` must be declared here: Cordis throws while reading an
+ * undeclared service off the context proxy, before optional chaining can apply.
+ * `settingsScope` is provided by `@deepseek-ai/dsh-client-ui-settings` and may be
+ * absent, which is what `ctx.settingsScope?.bind(…)` below relies on.
+ */
 export declare const inject: string[];
 export declare function apply(ctx: ClientContextLike): void;
 /**

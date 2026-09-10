@@ -815,6 +815,97 @@ test('child checkpoints win, sibling checkpoints do not leak, and inherited mess
   assert.equal((await request(handler, 'GET', '/turn-rewind?sessionId=cutoff&messageSeq=2')).body.status, 'missing')
 })
 
+test('a root session stays rewindable when 0.1.5 reports inheritedEventCount 0', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const point = await f.engine.createTurnCheckpoint({
+    cwd: f.workspace, sessionId: 'root-015', turn: 1, turnStartSeq: 1,
+  })
+  // DSH 0.1.5 deleted header.seedLength and reports the inherited prefix as
+  // `inheritedEventCount` — 0, never undefined, for a session with no parent. Treating
+  // a defined 0 as lineage metadata would invert the fork guard and reject every
+  // unforked session with PLAN_STALE.
+  const handler = handlerFor(f, new Map([
+    ['root-015', liveSession('root-015', f.workspace, oneTurnEvents(), {}, 0)],
+  ]))
+
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=root-015&messageSeq=2')
+  assert.equal(preview.status, 200)
+  assert.equal(preview.body.status, 'ready')
+  assert.equal(preview.body.checkpointId, point.id)
+})
+
+test('a forked 0.1.5 session resolves the parent checkpoint through inheritedEventCount', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const parentPoint = await f.engine.createTurnCheckpoint({
+    cwd: f.workspace, sessionId: 'parent-015', turn: 1, turnStartSeq: 1,
+  })
+  const childPoint = await f.engine.createTurnCheckpoint({
+    cwd: f.workspace, sessionId: 'child-015', turn: 2, turnStartSeq: 5,
+  })
+  const events = twoTurnEvents()
+  // No seedLength anywhere: 0.1.5 rejects a stored header that still carries the field.
+  const handler = handlerFor(f, new Map([
+    ['child-015', liveSession('child-015', f.workspace, events, { parentSession: 'parent-015' }, 5)],
+    ['parent-015', liveSession('parent-015', f.workspace, events, {}, 0)],
+  ]))
+
+  // The child owns no checkpoint of its own, so the inherited first turn must come
+  // from the parent instead of failing the whole rewind with HTTP 409 PLAN_STALE.
+  const inherited = await request(handler, 'GET', '/turn-rewind?sessionId=child-015&messageSeq=2')
+  assert.equal(inherited.status, 200)
+  assert.equal(inherited.body.status, 'ready')
+  assert.equal(inherited.body.checkpointId, parentPoint.id)
+
+  // Turn two starts at the inherited boundary, so it belongs to the child itself.
+  const own = await request(handler, 'GET', '/turn-rewind?sessionId=child-015&messageSeq=6')
+  assert.equal(own.status, 200)
+  assert.equal(own.body.checkpointId, childPoint.id)
+})
+
+test('the stored session snapshot carries inheritedEventCount into the lineage walk', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const point = await f.engine.createTurnCheckpoint({
+    cwd: f.workspace, sessionId: 'stored-root', turn: 1, turnStartSeq: 1,
+  })
+  const events = oneTurnEvents()
+  const stored = new Map([
+    // Exactly what @deepseek-ai/dsh-session-query returns in 0.1.5: the header has no
+    // seedLength and the inherited prefix rides beside it on the snapshot.
+    ['stored-leaf', { session: { cwd: f.workspace, parentSession: 'stored-root' }, events, inheritedEventCount: 5 }],
+    ['stored-root', { session: { cwd: f.workspace }, events, inheritedEventCount: 0 }],
+  ])
+  const handler = createRewindHttpHandler({
+    sessions: { get: () => undefined },
+    sessionQuery: { readSession: async id => stored.get(id) ?? Promise.reject(new Error(`missing ${id}`)) },
+    apiProxy: defaultApiProxy(),
+  }, f.engine, new TurnCheckpointCoordinator(f.engine))
+
+  const inherited = await request(handler, 'GET', '/turn-rewind?sessionId=stored-leaf&messageSeq=2')
+  assert.equal(inherited.status, 200)
+  assert.equal(inherited.body.checkpointId, point.id)
+})
+
+test('a declared parent without any inherited-prefix datum still fails closed', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  await f.engine.createTurnCheckpoint({
+    cwd: f.workspace, sessionId: 'parent-015', turn: 1, turnStartSeq: 1,
+  })
+  const handler = handlerFor(f, new Map([
+    // Neither 0.1.5's inheritedEventCount nor the legacy seedLength: an inconsistent
+    // pair must stay a stale plan rather than silently resolving the wrong checkpoint.
+    ['broken-015', liveSession('broken-015', f.workspace, oneTurnEvents(), { parentSession: 'parent-015' })],
+    ['parent-015', liveSession('parent-015', f.workspace, oneTurnEvents(), {}, 0)],
+  ]))
+
+  const broken = await request(handler, 'GET', '/turn-rewind?sessionId=broken-015&messageSeq=2')
+  assert.equal(broken.status, 409)
+  assert.equal(broken.body.code, 'PLAN_STALE')
+})
+
 test('persisted multi-level lineage validates every inherited message boundary and fails closed', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)
@@ -890,8 +981,13 @@ function failedSession(message) {
   return { result: { ok: false, error: { message } } }
 }
 
-function liveSession(id, cwd, events, extraHeader = {}) {
-  return { id, header: { cwd, ...extraHeader }, events }
+function liveSession(id, cwd, events, extraHeader = {}, inheritedEventCount) {
+  return {
+    id,
+    header: { cwd, ...extraHeader },
+    events,
+    ...(inheritedEventCount === undefined ? {} : { inheritedEventCount }),
+  }
 }
 
 function oneTurnEvents() {

@@ -6,8 +6,16 @@ import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import { type ChangeLedgerEngine } from './engine.js';
 import type { ChangeLedgerConfig } from './types.js';
-/** Namespace join key shared by the host section and the browser settings card. */
-export declare const TURN_REWIND_SETTINGS_NAMESPACE: Branded<"SettingsNamespace">;
+/**
+ * Namespace join key shared by the host section and the browser settings card.
+ *
+ * DSH 0.1.5 removed the `settingsNamespace` helper and made `SettingsNamespace`
+ * a compile-time-only brand, so a plain lowercase literal is the entire runtime
+ * value — the upstream convention (`const CHAT_SETTINGS_NAMESPACE = 'ui-chat'`).
+ * The literal satisfies 0.1.5's registration grammar `/^[a-z][a-z0-9-]*$/` and is
+ * the exact key the browser card binds through `ctx.settingsScope.bind`.
+ */
+export declare const TURN_REWIND_SETTINGS_NAMESPACE = "turn-rewind";
 /** Every runtime-tunable field of {@link ChangeLedgerConfig}; `storageDir` stays config-layer only. */
 export interface TurnRewindSettings {
     /** Maximum user and rescue restore points retained per workspace. */
@@ -40,5 +48,9 @@ export declare const TurnRewindSettingsSchema: z<TurnRewindSettings>;
  * running engine. The composition entry (from `cordis.patch.yml`) is the base layer;
  * the user layer persists through the DSH settings provider. `storageDir` is never
  * carried by the namespace: the storage root must not move while the engine runs.
+ *
+ * `settings` is an optional service, so the whole wiring stays behind
+ * `ctx.inject(['settings'], …)`: a host without a provider keeps running on the
+ * composition entry alone.
  */
 export declare function installTurnRewindSettings(ctx: Context, config: ChangeLedgerConfig, engine: ChangeLedgerEngine): void;

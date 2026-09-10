@@ -14,12 +14,23 @@ interface SessionEventLike {
 interface SessionHeaderLike {
   readonly cwd?: string
   readonly parentSession?: string
+  /**
+   * Fork-inherited prefix length on DSH releases before 0.1.5. 0.1.5 deleted the
+   * field — a stored header that still carries it is rejected outright — and moved
+   * the same quantity to {@link SessionLike.inheritedEventCount}.
+   */
   readonly seedLength?: number
 }
 
 interface SessionLike {
   readonly id: string
   readonly header: SessionHeaderLike
+  /**
+   * Exact number of leading events inherited from the fork parent, as reported by
+   * DSH 0.1.5+ on the live session and on the stored session-log snapshot. `0` —
+   * never `undefined` — for a session with no inherited prefix.
+   */
+  readonly inheritedEventCount?: number
   readonly events?: readonly SessionEventLike[]
   snapshotEvents?(fromSeq?: number, toSeqExclusive?: number): readonly SessionEventLike[]
 }
@@ -45,7 +56,11 @@ interface SessionsLike {
 }
 
 interface SessionQueryLike {
-  readSession(id: string): Promise<{ readonly session: SessionHeaderLike; readonly events: readonly SessionEventLike[] }>
+  readSession(id: string): Promise<{
+    readonly session: SessionHeaderLike
+    readonly events: readonly SessionEventLike[]
+    readonly inheritedEventCount?: number
+  }>
 }
 
 interface HttpRequestLike {
@@ -531,7 +546,29 @@ async function readSession(
   const live = ctx.sessions.get(sessionId)
   if (live !== undefined) return live
   const stored = await ctx.sessionQuery.readSession(sessionId)
-  return { id: sessionId, header: stored.session, events: stored.events }
+  return {
+    id: sessionId,
+    header: stored.session,
+    events: stored.events,
+    ...(stored.inheritedEventCount === undefined ? {} : { inheritedEventCount: stored.inheritedEventCount }),
+  }
+}
+
+/**
+ * Fork-inherited prefix length reported by the host, or `undefined` when the host
+ * exposes no such datum.
+ *
+ * DSH releases before 0.1.5 carried it as `header.seedLength`; 0.1.5 deleted that
+ * field (a stored header still carrying it is rejected) and publishes the same
+ * quantity as `inheritedEventCount` on the live session and on its stored snapshot.
+ * @param session - live or stored session to read the lineage boundary from.
+ * @returns the inherited prefix length in events.
+ */
+function lineageBoundary(session: SessionLike): number | undefined {
+  const legacy = session.header.seedLength
+  if (typeof legacy === 'number') return legacy
+  const current = session.inheritedEventCount
+  return typeof current === 'number' ? current : undefined
 }
 
 interface MessageTarget {
@@ -565,12 +602,16 @@ async function resolveMessageCheckpoint(
   const seen = new Set<string>([sessionId])
   while (true) {
     const parentId = current.header.parentSession
-    const seedLength = current.header.seedLength
-    if ((parentId === undefined) !== (seedLength === undefined)) {
+    // A session is lineage-bound exactly when it declares a parent, and only then is
+    // the inherited-prefix length meaningful. 0.1.5 reports `0` — not `undefined` —
+    // for a session with no inherited prefix, so the datum must never be consulted
+    // for a root session or this guard inverts and rejects every unforked session.
+    const boundary = parentId === undefined ? undefined : lineageBoundary(current)
+    if ((parentId === undefined) !== (boundary === undefined)) {
       throw new ChangeLedgerError('PLAN_STALE', 'session fork lineage has incomplete parent metadata')
     }
-    if (parentId === undefined || seedLength === undefined
-      || target.messageSeq >= seedLength || target.turnStartSeq >= seedLength) {
+    if (parentId === undefined || boundary === undefined
+      || target.messageSeq >= boundary || target.turnStartSeq >= boundary) {
       return { target }
     }
     if (seen.has(parentId)) {

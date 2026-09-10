@@ -269,8 +269,15 @@ export function selectRewindMessage(node: ConversationNodeLike): RewindMatch | n
   return { messageSeq: node.seq, promptText }
 }
 
-/** Browser plugin entry: bridge every direct user-message action row to the rewind UI. */
-export const inject = ['slots', 'sessions', 'conversation']
+/**
+ * Browser plugin entry: bridge every direct user-message action row to the rewind UI.
+ *
+ * Every service read on `ctx` must be declared here: Cordis throws while reading an
+ * undeclared service off the context proxy, before optional chaining can apply.
+ * `settingsScope` is provided by `@deepseek-ai/dsh-client-ui-settings` and may be
+ * absent, which is what `ctx.settingsScope?.bind(…)` below relies on.
+ */
+export const inject = ['slots', 'sessions', 'conversation', 'settingsScope']
 export function apply(ctx: ClientContextLike): void {
   ctx.effect(() => {
     if (document.querySelector(`style[data-plugin-css="${STYLE_ID}"]`) !== null) return () => {}
@@ -1064,6 +1071,41 @@ export function selectRewindMessageTarget(value: RewindNodeLike): { readonly mat
   }
 }
 
+/** CSS-module class every DSH message action row matches (`<hash>_actions`). */
+const ACTIONS_SELECTOR = '[class*="actions"]'
+/**
+ * Wrapper that owned the hover chrome and the action row before DSH 0.1.5. The
+ * attribute is gone in 0.1.5 — the message row itself is the hover root now — so it
+ * is only a fallback for older clients.
+ */
+const LEGACY_HOVER_ROOT_SELECTOR = '[data-time-hover-root="true"]'
+
+/** Query one descendant, tolerating a row double that implements no `querySelector`. */
+function queryInside(root: Element, selector: string): Element | null {
+  const query = (root as Partial<Element>).querySelector
+  return typeof query === 'function' ? query.call(root, selector) : null
+}
+
+/**
+ * Resolve the container one rewind button is portalled into.
+ *
+ * DSH 0.1.5 renders the copy/branch icon row (`MessageIconActions`, class
+ * `<hash>_actions`) as a direct child of the user-message row and dropped
+ * `data-time-hover-root`; older clients nested that row under the removed wrapper.
+ * Both shapes are tried, current first. There is no official slot for user-message
+ * actions in 0.1.5 — only `conversation.chat.assistant-actions`, for finalized
+ * assistant turns — so this bridge stays DOM-based.
+ * @param row - the `[data-chat-flow-kind="user"]` row owning one message.
+ * @returns the actions container, or null when the row exposes none.
+ */
+function findActionsContainer(row: Element): Element | null {
+  const direct = queryInside(row, ACTIONS_SELECTOR)
+  if (direct !== null) return direct
+  const legacy = queryInside(row, LEGACY_HOVER_ROOT_SELECTOR)
+  if (legacy === null) return null
+  return queryInside(legacy, ACTIONS_SELECTOR) ?? legacy.lastElementChild
+}
+
 function collectPortalTargets(nodes: readonly RewindNodeLike[]): readonly RewindPortalTarget[] {
   const rows = new Map<string, HTMLElement>()
   for (const element of Array.from(document.querySelectorAll<HTMLElement>(
@@ -1077,11 +1119,7 @@ function collectPortalTargets(nodes: readonly RewindNodeLike[]): readonly Rewind
     const target = selectRewindMessageTarget(value)
     if (target === null) continue
     const row = rows.get(target.rowKey)
-    const messageRoot = row?.querySelector?.<HTMLElement>('[data-time-hover-root="true"]')
-    // Match the actions container by class or last child element
-    const actions = (typeof messageRoot?.querySelector === 'function'
-      ? messageRoot.querySelector<HTMLElement>('[class*="actions"]')
-      : undefined) ?? messageRoot?.lastElementChild
+    const actions = row === undefined ? null : findActionsContainer(row)
     if (!(actions instanceof HTMLElement)) continue
     targets.push({ container: actions, matched: target.matched })
   }
