@@ -5,6 +5,8 @@ import { hashTree } from './snapshot.js'
 import {
   GIT_CHECKPOINT_FORMAT_VERSION,
   LEDGER_FORMAT_VERSION,
+  type CaptureSkip,
+  type CaptureTruncation,
   type RepositoryState,
   type RestoreOperation,
   type RestorePointKind,
@@ -81,11 +83,24 @@ export function parseManifest(value: unknown): RestorePointManifest {
     corrupt('only turn restore points may carry turn metadata')
   }
   const lastRestoredAt = optionalNonNegativeInteger(record, 'lastRestoredAt')
+  const skipped = parseCaptureSkips(record.skipped)
+  const skippedCount = optionalNonNegativeInteger(record, 'skippedCount')
+  if (skippedCount !== undefined && skippedCount < (skipped?.length ?? 0)) {
+    corrupt('skippedCount cannot be smaller than the recorded skipped paths')
+  }
+  const truncatedValue = record.truncated
+  if (truncatedValue !== undefined && truncatedValue !== 'file-limit' && truncatedValue !== 'snapshot-limit') {
+    corrupt('truncated must be "file-limit" or "snapshot-limit"')
+  }
+  const truncated: CaptureTruncation | undefined = truncatedValue
   const common = {
     id,
     kind: restorePointKind,
     workspace,
     repository,
+    ...(skipped === undefined ? {} : { skipped }),
+    ...(skippedCount === undefined ? {} : { skippedCount }),
+    ...(truncated === undefined ? {} : { truncated }),
     ...(sessionId === undefined ? {} : { sessionId }),
     ...(label === undefined ? {} : { label }),
     ...(parentRestorePoint === undefined ? {} : { parentRestorePoint }),
@@ -168,6 +183,25 @@ export function validateBlobHash(value: string): string {
  * @param value - persisted `repository` field.
  * @returns the validated workspace state.
  */
+/**
+ * Parse the optional bounded list of eligible paths a restore point could not store.
+ * @param value - persisted `skipped` field.
+ * @returns the validated list, or undefined when the manifest carries none.
+ */
+function parseCaptureSkips(value: unknown): readonly CaptureSkip[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) corrupt('skipped must be an array')
+  return value.map((entry) => {
+    const record = objectRecord(entry, 'skipped path')
+    const path = validateRelativePath(requireString(record.path, 'skipped path'))
+    const reason = record.reason
+    if (reason !== 'file-too-large' && reason !== 'unsupported-file-type') {
+      corrupt('skipped reason must be "file-too-large" or "unsupported-file-type"')
+    }
+    return { path, reason }
+  })
+}
+
 function parseRepository(value: unknown): RepositoryState {
   const record = objectRecord(value, 'repository state')
   const root = absoluteString(record, 'root')

@@ -117,7 +117,7 @@ interface SessionControllerLike {
 }
 
 /** Services a conversation restart can be built on, in either carrier shape. */
-type ConversationRestartContext = Pick<Context, 'sessions' | 'sessionQuery'> & {
+type ConversationRestartContext = Pick<Context, 'sessions' | 'sessionQuery' | 'get'> & {
   readonly apiProxy?: ApiProxyLike
   readonly sessionController?: SessionControllerLike
 }
@@ -432,6 +432,11 @@ export function createRewindHttpHandler(
         const changes = inspection.changes.slice(offset, offset + limit)
         const common = {
           status: 'ready', sessionId, messageSeq, turn: checkpoint.turn, checkpointId: checkpoint.id,
+          // A restore point that could not store every eligible path stays usable;
+          // the browser shows what was left out instead of blocking the rewind.
+          skippedCount: inspection.restorePoint.skippedCount,
+          ...(inspection.restorePoint.skipped === undefined ? {} : { skipped: inspection.restorePoint.skipped }),
+          ...(inspection.restorePoint.truncated === undefined ? {} : { captureTruncated: inspection.restorePoint.truncated }),
           turnStartSeq: checkpoint.turnStartSeq,
           totalChanges: inspection.changes.length,
           changes: changes.map(change => ({ path: change.path, kind: change.kind })),
@@ -667,14 +672,18 @@ async function createConversationRestart(
     || current.previousTurnEndSeq !== checkpoint.previousTurnEndSeq) {
     throw new ChangeLedgerError('PLAN_STALE', 'the session no longer contains the selected message boundary')
   }
-  const controller = ctx.sessionController
+  // Cordis throws when a context reads a service property it did not inject, and
+  // no single inject list covers both carriers: 0.1.1 provides `apiProxy` while
+  // 0.1.2-alpha provides `sessionController`. `ctx.get` is the optional accessor
+  // that returns undefined instead of failing the request.
+  const controller = ctx.get('sessionController') as SessionControllerLike | undefined
   if (controller !== undefined) {
     const created = checkpoint.previousTurnEndSeq === undefined
       ? await controller.create({ cwd: checkpoint.cwd })
       : await controller.fork({ sessionId: sourceId, atSeq: checkpoint.previousTurnEndSeq })
     return { sessionId: requiredText(created.sessionId, 'sessionController sessionId') }
   }
-  const apiProxy = ctx.apiProxy
+  const apiProxy = ctx.get('apiProxy') as ApiProxyLike | undefined
   if (apiProxy === undefined) {
     throw new ChangeLedgerError(
       'CONVERSATION_REWIND_FAILED',

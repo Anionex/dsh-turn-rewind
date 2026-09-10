@@ -116,6 +116,11 @@ interface ReadyPreview {
   readonly changes: readonly { readonly path: string; readonly kind: ChangeKind }[]
   readonly offset: number
   readonly truncated: boolean
+  /** Eligible paths the checkpoint could not store; a restore never touches them. */
+  readonly skippedCount: number
+  readonly skipped: readonly { readonly path: string; readonly reason: string }[]
+  /** Set when limits stopped the capture before every eligible path was read. */
+  readonly captureTruncated?: 'file-limit' | 'snapshot-limit'
   readonly headChanged: boolean
   readonly operationChanged: boolean
   readonly checkpointHead?: string
@@ -567,6 +572,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
     }
   }
 
+  const captureNotice = describeCaptureNotice(ready)
   const actionLabel = mode === 'both' ? '恢复并从这里继续' : mode === 'code' ? '恢复文件' : '只回溯消息'
   const radioName = `dcl-rewind-${sessionId}-${String(matched.messageSeq)}`
   const branchChanged = ready !== null && ready.checkpointBranch !== ready.currentBranch
@@ -619,6 +625,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
           )}
           {ready !== null && (
             <>
+              {captureNotice !== null && <p className="dcl-rewind-warning">{captureNotice}</p>}
               <div className="dcl-rewind-summary">
                 {mode === 'messages'
                   ? <strong>项目文件保持不变</strong>
@@ -1045,6 +1052,16 @@ function decodePreview(value: unknown): Preview {
     changes,
     offset: requiredInteger(record.offset, 'offset'),
     truncated: requiredBoolean(record.truncated, 'truncated'),
+    skippedCount: typeof record.skippedCount === 'number' ? record.skippedCount : 0,
+    skipped: Array.isArray(record.skipped)
+      ? record.skipped.map((entry) => {
+          const skip = recordOf(entry)
+          return { path: requiredString(skip.path, 'path'), reason: requiredString(skip.reason, 'reason') }
+        })
+      : [],
+    ...(record.captureTruncated === 'file-limit' || record.captureTruncated === 'snapshot-limit'
+      ? { captureTruncated: record.captureTruncated as 'file-limit' | 'snapshot-limit' }
+      : {}),
     headChanged: requiredBoolean(record.headChanged, 'headChanged'),
     operationChanged: requiredBoolean(record.operationChanged, 'operationChanged'),
     ...optionalRecordString(record, 'checkpointHead'),
@@ -1267,6 +1284,29 @@ function friendlyError(error: unknown): string {
     case 'CONVERSATION_REWIND_FAILED': return '文件已恢复，但无法创建新对话；项目文件已自动还原。'
     default: return error.message
   }
+}
+
+/**
+ * Describe what a checkpoint could not store, in one user-facing sentence.
+ *
+ * Limits leave a restore point partial rather than failing it, so the dialog has
+ * to say which files stay untouched when the restore runs.
+ * @param ready - decoded ready preview, or null.
+ * @returns the warning text, or null when the checkpoint is complete.
+ */
+export function describeCaptureNotice(ready: ReadyPreview | null): string | null {
+  if (ready === null) return null
+  const example = (ready.skipped ?? [])[0]?.path
+  if (ready.captureTruncated === 'snapshot-limit') {
+    return '本轮要保存的文件总量超过上限，剩下的文件没有纳入检查点。恢复时不会改动它们。'
+  }
+  if (ready.captureTruncated === 'file-limit') {
+    return '本轮文件数量超过上限，多出来的文件没有纳入检查点。恢复时不会改动它们。'
+  }
+  if (ready.skippedCount > 0) {
+    return `有 ${String(ready.skippedCount)} 个文件因为超过单文件大小上限或类型不受支持，没有纳入检查点${example === undefined ? '' : `（例如 ${example}）`}。恢复时不会改动它们。`
+  }
+  return null
 }
 
 /**

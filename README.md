@@ -151,6 +151,9 @@ Override the composition base (and `storageDir`) in the profile patch layer:
     turnCheckpointTimeoutMs: 5000
     turnCheckpointMaxNewBytes: 33554432
     turnCheckpointTrust: fast    # fast | strict
+
+A file above `maxFileBytes`, or one whose type is unsupported, is skipped and recorded on the restore point instead of discarding the whole checkpoint; the dialog names it, and a restore never touches a skipped path. Reaching `maxFiles` or `maxSnapshotBytes` keeps the captured part and says so in the dialog.
+
 ```
 
 Setting `turnCheckpointMode: off` (in the patch or in the settings card) stops automatic file checkpoints; every turn records a durable skip instead, and the rewind dialog still offers **Rewind messages only** for those messages.

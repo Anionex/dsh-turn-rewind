@@ -4,15 +4,34 @@ import { join, resolve } from 'node:path'
 import ignore, { type Ignore } from 'ignore'
 import { ChangeLedgerError } from './errors.js'
 import { canonicalDirectory, isNodeError, isWithin } from './path-utils.js'
-import type { DirectoryWorkspaceState, ResolvedChangeLedgerConfig } from './types.js'
+import type {
+  CaptureSkip,
+  CaptureTruncation,
+  DirectoryWorkspaceState,
+  ResolvedChangeLedgerConfig,
+} from './types.js'
 
 const IGNORE_FILE = '.dsh-rewindignore'
+const MAX_RECORDED_SKIPS = 50
 const DEFAULT_IGNORE_PATTERNS = ['.git', 'node_modules'] as const
 
 /** Ordinary-directory discovery result plus its eligible path inventory. */
 export interface DirectorySnapshotSource {
   readonly state: DirectoryWorkspaceState
   readonly paths: readonly string[]
+  /** Eligible paths that cannot be stored at all, such as sockets. */
+  readonly skipped: readonly CaptureSkip[]
+  readonly skippedCount: number
+  /** Set when the file-count limit stopped the walk early. */
+  readonly truncated?: CaptureTruncation
+}
+
+/** Mutable walk accumulator shared by one directory enumeration. */
+interface DirectoryWalk {
+  readonly paths: string[]
+  readonly skipped: CaptureSkip[]
+  skippedCount: number
+  truncated?: CaptureTruncation
 }
 
 /** Resolve the canonical ordinary directory used as a non-Git workspace root. */
@@ -28,10 +47,16 @@ export async function discoverDirectory(
 ): Promise<DirectorySnapshotSource> {
   const root = await discoverDirectoryRoot(cwd)
   const matcher = await loadIgnoreMatcher(root, config.maxFileBytes, signal)
-  const paths: string[] = []
-  await walkDirectory(root, root, '', matcher, paths, config.maxFiles, signal)
-  paths.sort(comparePaths)
-  return { state: { type: 'directory', root }, paths }
+  const walk: DirectoryWalk = { paths: [], skipped: [], skippedCount: 0 }
+  await walkDirectory(root, root, '', matcher, walk, config.maxFiles, signal)
+  walk.paths.sort(comparePaths)
+  return {
+    state: { type: 'directory', root },
+    paths: walk.paths,
+    skipped: walk.skipped,
+    skippedCount: walk.skippedCount,
+    ...(walk.truncated === undefined ? {} : { truncated: walk.truncated }),
+  }
 }
 
 /**
@@ -90,7 +115,7 @@ async function walkDirectory(
   directory: string,
   directoryPath: string,
   matcher: Ignore,
-  paths: string[],
+  walk: DirectoryWalk,
   maxFiles: number,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -108,6 +133,7 @@ async function walkDirectory(
 
   entries.sort((left, right) => comparePaths(left.name, right.name))
   for (const entry of entries) {
+    if (walk.truncated !== undefined) return
     throwIfAborted(signal)
     await assertSafeDirectory(root, directory, after)
     const path = directoryPath === '' ? entry.name : `${directoryPath}/${entry.name}`
@@ -121,24 +147,26 @@ async function walkDirectory(
     }
     if (info.isDirectory() && !info.isSymbolicLink()) {
       if (matcher.ignores(`${path}/`)) continue
-      await walkDirectory(root, target, path, matcher, paths, maxFiles, signal)
+      await walkDirectory(root, target, path, matcher, walk, maxFiles, signal)
       continue
     }
     if (path !== IGNORE_FILE && matcher.ignores(path)) continue
     if (!info.isFile() && !info.isSymbolicLink()) {
-      throw new ChangeLedgerError(
-        'UNSUPPORTED_FILE_TYPE',
-        `ordinary-directory path is not a regular file or symlink: ${JSON.stringify(path)}`,
-      )
+      recordSkip(walk, path, 'unsupported-file-type')
+      continue
     }
-    paths.push(path)
-    if (paths.length > maxFiles) {
-      throw new ChangeLedgerError(
-        'TOO_MANY_FILES',
-        `workspace has more than ${maxFiles} eligible paths; latest path is ${JSON.stringify(path)}`,
-      )
+    if (walk.paths.length >= maxFiles) {
+      walk.truncated = 'file-limit'
+      return
     }
+    walk.paths.push(path)
   }
+}
+
+/** Record one skipped path, bounding the durable list while counting every entry. */
+function recordSkip(walk: DirectoryWalk, path: string, reason: CaptureSkip['reason']): void {
+  walk.skippedCount += 1
+  if (walk.skipped.length < MAX_RECORDED_SKIPS) walk.skipped.push({ path, reason })
 }
 
 /**

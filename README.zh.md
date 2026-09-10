@@ -149,6 +149,9 @@ DSH Session 日志只追加不改写，因此“恢复文件并从这里继续�
     turnCheckpointTimeoutMs: 5000
     turnCheckpointMaxNewBytes: 33554432
     turnCheckpointTrust: fast    # fast | strict
+
+超过 `maxFileBytes` 或类型不受支持的文件会被跳过并记入检查点（弹窗会提示），不会因此丢弃整轮检查点；被跳过的路径在恢复时不会被改动。达到 `maxFiles` 或 `maxSnapshotBytes` 时同样保留已完成的部分，并在弹窗中说明。
+
 ```
 
 把 `turnCheckpointMode` 设为 `off`（patch 层或设置卡均可）后，插件不再为每条消息自动创建文件检查点，而是记录持久跳过标记；回退弹窗对这些消息仍然提供**只回溯消息**。

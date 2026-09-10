@@ -83,6 +83,41 @@ interface ClientContextLike {
     effect(setup: () => (() => void), label?: string): unknown;
 }
 type ChangeKind = 'added' | 'deleted' | 'modified' | 'mode-changed' | 'type-changed';
+interface ReadyPreview {
+    readonly status: 'ready';
+    readonly sessionId: string;
+    readonly messageSeq: number;
+    readonly turn: number;
+    readonly checkpointId: string;
+    readonly turnStartSeq: number;
+    readonly totalChanges: number;
+    readonly changes: readonly {
+        readonly path: string;
+        readonly kind: ChangeKind;
+    }[];
+    readonly offset: number;
+    readonly truncated: boolean;
+    /** Eligible paths the checkpoint could not store; a restore never touches them. */
+    readonly skippedCount: number;
+    readonly skipped: readonly {
+        readonly path: string;
+        readonly reason: string;
+    }[];
+    /** Set when limits stopped the capture before every eligible path was read. */
+    readonly captureTruncated?: 'file-limit' | 'snapshot-limit';
+    readonly headChanged: boolean;
+    readonly operationChanged: boolean;
+    readonly checkpointHead?: string;
+    readonly checkpointBranch?: string;
+    readonly checkpointOperation?: string;
+    readonly currentHead?: string;
+    readonly currentBranch?: string;
+    readonly currentOperation?: string;
+    readonly activeSessionIds: readonly string[];
+    readonly restoreBlocked: boolean;
+    readonly planId?: string;
+    readonly confirmation?: string;
+}
 /** Runtime-tunable Turn Rewind settings mirrored from the `turn-rewind` namespace. */
 export interface TurnRewindSettingsValue {
     readonly maxRestorePoints: number;
@@ -190,6 +225,15 @@ export declare function selectRewindMessageTarget(value: RewindNodeLike): {
 export declare function responseJson(response: Response): Promise<unknown>;
 /** Describe the user-visible result of restoring one changed file. */
 export declare function fileRecoveryLabel(kind: ChangeKind): string;
+/**
+ * Describe what a checkpoint could not store, in one user-facing sentence.
+ *
+ * Limits leave a restore point partial rather than failing it, so the dialog has
+ * to say which files stay untouched when the restore runs.
+ * @param ready - decoded ready preview, or null.
+ * @returns the warning text, or null when the checkpoint is complete.
+ */
+export declare function describeCaptureNotice(ready: ReadyPreview | null): string | null;
 /**
  * Explain one recorded checkpoint failure in user terms.
  *

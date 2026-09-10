@@ -1,11 +1,18 @@
 import type { LedgerStore } from './store.js';
 import { type WorkspaceSnapshotSource } from './workspace.js';
-import type { ResolvedChangeLedgerConfig, SnapshotEntry, WorkspaceChange } from './types.js';
+import type { CaptureSkip, CaptureTruncation, ResolvedChangeLedgerConfig, SnapshotEntry, WorkspaceChange } from './types.js';
 /** One captured tree, optionally persisted into the blob store. */
 export interface CapturedTree {
     readonly source: WorkspaceSnapshotSource;
     readonly entries: Readonly<Record<string, SnapshotEntry>>;
     readonly gitEntries?: Readonly<Record<string, SnapshotEntry>>;
+    /** Eligible paths this capture could not store; a restore never touches them. */
+    readonly skipped: readonly CaptureSkip[];
+    readonly skippedCount: number;
+    /** Set when a limit stopped the capture before every eligible path was read. */
+    readonly truncated?: CaptureTruncation;
+    /** True when the recorded skip list is shorter than `skippedCount`. */
+    readonly skippedListTruncated: boolean;
     readonly treeHash: string;
     readonly fileCount: number;
     readonly totalBytes: number;

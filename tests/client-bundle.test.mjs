@@ -781,3 +781,19 @@ test('settings card renders the namespace form and manages checkpoints', async (
   assert.match(String(notice.props.children), /1 个受保护检查点未删除/)
   assert.match(String(notice.props.children), /1 个工作区清理失败/)
 })
+
+test('partial checkpoints explain which files stay untouched', async () => {
+  const harness = await bootPortalBridge()
+  const { describeCaptureNotice } = harness.plugin
+  const base = { skippedCount: 0, skipped: [] }
+
+  assert.equal(describeCaptureNotice(null), null)
+  assert.equal(describeCaptureNotice({ ...base, captureTruncated: undefined }), null)
+  assert.match(
+    describeCaptureNotice({ ...base, skippedCount: 2, skipped: [{ path: 'artifacts/big.bin', reason: 'file-too-large' }] }),
+    /2 个文件.*artifacts\/big\.bin/s,
+  )
+  assert.match(describeCaptureNotice({ ...base, captureTruncated: 'snapshot-limit' }), /总量超过上限/)
+  assert.match(describeCaptureNotice({ ...base, captureTruncated: 'file-limit' }), /文件数量超过上限/)
+  harness.dispose()
+})

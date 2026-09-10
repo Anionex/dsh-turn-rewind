@@ -241,10 +241,14 @@ test('clean tracked Git blobs still obey maxFileBytes', async (t) => {
     maxFileBytes: 4,
   })
   await limited.initialize()
-  await assert.rejects(
-    limited.createTurnCheckpoint({ cwd: f.workspace, sessionId: 'session-clean-limit', turn: 1, turnStartSeq: 1 }),
-    (error) => error instanceof ChangeLedgerError && error.code === 'FILE_TOO_LARGE',
-  )
+  const limitedPoint = await limited.createTurnCheckpoint({
+    cwd: f.workspace, sessionId: 'session-clean-limit', turn: 1, turnStartSeq: 1,
+  })
+  // The Git-native tree cannot omit a path, so an over-limit file degrades this
+  // turn to the ledger's own store instead of discarding the whole checkpoint.
+  assert.equal(limitedPoint.format, LEDGER_FORMAT_VERSION)
+  assert.equal(limitedPoint.skippedCount, 1)
+  assert.equal(limitedPoint.skipped[0]?.reason, 'file-too-large')
 })
 
 test('core.filemode=false rewrites a mismatched executable bit in the private worktree tree', async (t) => {
@@ -1736,15 +1740,30 @@ test('symlink contents round-trip without following the target', async (t) => {
   assert.equal(await readlink(join(f.workspace, 'link')), 'target-a')
 })
 
-test('configured size limits fail loudly instead of silently omitting files', async (t) => {
+test('an over-limit file is reported instead of discarding the whole checkpoint', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)
-  await seedCommitted(f.workspace, { 'large.bin': '0123456789' })
+  await seedCommitted(f.workspace, { 'large.bin': '0123456789', 'small.txt': 'ok\n' })
   const limited = new ChangeLedgerEngine({ storageDir: join(f.outer, 'small-state'), maxFileBytes: 4 })
+  const created = await limited.create({ cwd: f.workspace })
+  assert.equal(created.skippedCount, 1)
+  assert.deepEqual(created.skipped, [{ path: 'large.bin', reason: 'file-too-large' }])
+  // The remaining eligible files are still captured, so the point stays useful.
+  assert.equal(created.fileCount, 1)
+  await writeFile(join(f.workspace, 'small.txt'), 'no\n')
+  const inspection = await limited.inspect({ cwd: f.workspace, restorePointId: created.id })
+  assert.deepEqual(inspection.changes.map(change => change.path), ['small.txt'])
+  const plan = await limited.planRestore({ cwd: f.workspace, restorePointId: created.id })
+  await limited.applyRestore({ planId: plan.id, confirmation: plan.confirmation })
+  assert.equal(await readFile(join(f.workspace, 'small.txt'), 'utf8'), 'ok\n')
+
+  // A path this point never observed must survive a rewind even when it now fits.
+  await writeFile(join(f.workspace, 'large.bin'), 'tiny\n')
   await assert.rejects(
-    limited.create({ cwd: f.workspace }),
-    (error) => error instanceof ChangeLedgerError && error.code === 'FILE_TOO_LARGE',
+    () => limited.planRestore({ cwd: f.workspace, restorePointId: created.id }),
+    (error) => error instanceof ChangeLedgerError && error.code === 'NO_CHANGES',
   )
+  assert.equal(await readFile(join(f.workspace, 'large.bin'), 'utf8'), 'tiny\n')
 })
 
 test('startup does not steal an active process lock', async (t) => {
@@ -2115,13 +2134,15 @@ test('ordinary-directory limits name the offending path and allow explicit exclu
   t.after(f.cleanup)
   await writeFile(join(f.workspace, 'small.txt'), 'ok\n')
   await writeFile(join(f.workspace, 'big.txt'), 'way too large\n')
-  await assert.rejects(
-    () => f.engine.create({ cwd: f.workspace, sessionId: 'session-limit' }),
-    (error) => error instanceof ChangeLedgerError && error.code === 'FILE_TOO_LARGE' && error.message.includes('big.txt'),
-  )
+  const limited = await f.engine.create({ cwd: f.workspace, sessionId: 'session-limit' })
+  assert.equal(limited.skippedCount, 1)
+  assert.deepEqual(limited.skipped, [{ path: 'big.txt', reason: 'file-too-large' }])
+  assert.equal(limited.fileCount, 1)
+  // Excluding it keeps the checkpoint complete and lets the file be restored.
   await writeFile(join(f.workspace, '.dsh-rewindignore'), 'big.txt\n')
   const created = await f.engine.create({ cwd: f.workspace, sessionId: 'session-limit' })
   assert.equal(created.fileCount, 2)
+  assert.equal(created.skippedCount, 0)
 })
 
 test('ordinary directories reject special filesystem entries', { skip: process.platform === 'win32' }, async (t) => {
@@ -2137,10 +2158,9 @@ test('ordinary directories reject special filesystem entries', { skip: process.p
     await new Promise((resolve) => server.close(resolve))
     await f.cleanup()
   })
-  await assert.rejects(
-    () => f.engine.create({ cwd: f.workspace, sessionId: 'session-socket' }),
-    (error) => error instanceof ChangeLedgerError && error.code === 'UNSUPPORTED_FILE_TYPE' && error.message.includes('service.sock'),
-  )
+  const created = await f.engine.create({ cwd: f.workspace, sessionId: 'session-socket' })
+  assert.equal(created.skippedCount, 1)
+  assert.deepEqual(created.skipped, [{ path: 'service.sock', reason: 'unsupported-file-type' }])
 })
 
 test('ordinary-directory symlinks are captured without following targets outside the workspace', async (t) => {

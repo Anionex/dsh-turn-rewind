@@ -963,6 +963,8 @@ function handlerFor(fixtureValue, sessions, overrides = {}) {
     apiProxy: defaultApiProxy(),
     ...overrides,
   }
+  // Optional services resolve through the Cordis accessor, never a property read.
+  ctx.get = name => ctx[name]
   return createRewindHttpHandler(ctx, fixtureValue.engine, new TurnCheckpointCoordinator(fixtureValue.engine))
 }
 
@@ -1065,4 +1067,53 @@ test('HTTP rewind captures and restores an ordinary directory session', async (t
   assert.equal(applied.status, 200)
   assert.equal(applied.body.mode, 'code')
   assert.equal(await readFile(join(plain, 'src/code.txt'), 'utf8'), 'checkpoint\n')
+})
+
+test('conversation restart reads optional services through ctx.get, never through property access', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const checkpoint = await f.engine.createTurnCheckpoint({
+    cwd: f.workspace, sessionId: 'session-source', turn: 1, turnStartSeq: 1,
+  })
+  await writeFile(join(f.workspace, 'code.txt'), 'changed\n')
+  const sessions = new Map([
+    ['session-source', liveSession('session-source', f.workspace, oneTurnEvents())],
+  ])
+  // The Cordis context proxy throws when a context reads a service property it did
+  // not inject; only `get()` may answer with `undefined`.
+  const services = {
+    sessionController: {
+      async create() { return { sessionId: 'session-child' } },
+      async fork() { throw new Error('first message must not fork a completed turn') },
+    },
+  }
+  const injected = {
+    sessions: { get: id => sessions.get(id) },
+    sessionQuery: { readSession: async id => {
+      const session = sessions.get(id)
+      if (session === undefined) throw new Error(`missing ${id}`)
+      return { session: session.header, events: session.events }
+    } },
+    agents: { list: () => [] },
+  }
+  const ctx = new Proxy(injected, {
+    get(target, property) {
+      if (property === 'get') return name => services[name]
+      if (Reflect.has(target, property)) return Reflect.get(target, property)
+      if (property === 'sessionController' || property === 'apiProxy') {
+        throw new Error(`cannot get property "${String(property)}" without inject`)
+      }
+      return undefined
+    },
+  })
+  const handler = createRewindHttpHandler(ctx, f.engine, new TurnCheckpointCoordinator(f.engine))
+  const preview = await request(handler, 'GET', '/turn-rewind?sessionId=session-source&messageSeq=2')
+  const applied = await request(handler, 'POST', '/turn-rewind', {
+    mode: 'both', sessionId: 'session-source', messageSeq: 2, checkpointId: checkpoint.id,
+    planId: preview.body.planId, confirmation: preview.body.confirmation,
+  })
+
+  assert.equal(applied.status, 200)
+  assert.equal(applied.body.sessionId, 'session-child')
+  assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'checkpoint\n')
 })

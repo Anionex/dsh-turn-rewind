@@ -1,8 +1,12 @@
-import type { GitWorkspaceState } from './types.js';
+import type { CaptureSkip, CaptureTruncation, GitWorkspaceState } from './types.js';
 /** Repository discovery result plus the eligible path inventory. */
 export interface RepositorySnapshotSource {
     readonly state: GitWorkspaceState;
     readonly paths: readonly string[];
+    /** Git discovery never skips a path; per-file limits are reported by capture. */
+    readonly skipped: readonly CaptureSkip[];
+    readonly skippedCount: number;
+    readonly truncated?: CaptureTruncation;
 }
 /** Durable identity and shared lock location for one concrete Git worktree. */
 export interface GitWorktreeIdentity {

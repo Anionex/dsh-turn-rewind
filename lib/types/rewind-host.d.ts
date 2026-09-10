@@ -130,7 +130,7 @@ interface SessionControllerLike {
     }>;
 }
 /** Services a conversation restart can be built on, in either carrier shape. */
-type ConversationRestartContext = Pick<Context, 'sessions' | 'sessionQuery'> & {
+type ConversationRestartContext = Pick<Context, 'sessions' | 'sessionQuery' | 'get'> & {
     readonly apiProxy?: ApiProxyLike;
     readonly sessionController?: SessionControllerLike;
 };

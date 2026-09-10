@@ -6,6 +6,9 @@ import { isNodeError, resolveWorkspacePath } from './path-utils.js'
 import type { LedgerStore } from './store.js'
 import { discoverWorkspace, sameWorkspaceFence, type WorkspaceSnapshotSource } from './workspace.js'
 import type {
+  CaptureSkip,
+  CaptureSkipReason,
+  CaptureTruncation,
   ResolvedChangeLedgerConfig,
   SnapshotEntry,
   WorkspaceChange,
@@ -18,10 +21,19 @@ export interface CapturedTree {
   readonly source: WorkspaceSnapshotSource
   readonly entries: Readonly<Record<string, SnapshotEntry>>
   readonly gitEntries?: Readonly<Record<string, SnapshotEntry>>
+  /** Eligible paths this capture could not store; a restore never touches them. */
+  readonly skipped: readonly CaptureSkip[]
+  readonly skippedCount: number
+  /** Set when a limit stopped the capture before every eligible path was read. */
+  readonly truncated?: CaptureTruncation
+  /** True when the recorded skip list is shorter than `skippedCount`. */
+  readonly skippedListTruncated: boolean
   readonly treeHash: string
   readonly fileCount: number
   readonly totalBytes: number
 }
+
+const MAX_RECORDED_SKIPS = 50
 
 /** Capture the current tracked and non-ignored Git working tree. */
 export async function captureTree(options: {
@@ -33,12 +45,21 @@ export async function captureTree(options: {
 }): Promise<CapturedTree> {
   throwIfAborted(options.signal)
   const source = await discoverWorkspace(options.cwd, options.config, options.signal)
-  if (source.paths.length > options.config.maxFiles) {
-    throw new ChangeLedgerError(
-      'TOO_MANY_FILES',
-      `workspace has ${source.paths.length} eligible paths; configured maximum is ${options.config.maxFiles}`,
-    )
+  // Limits never discard an entire restore point: an over-limit path is left out
+  // and reported, and the remaining eligible paths are still captured. A restore
+  // only ever rewrites captured paths, so a partial point stays safe to apply.
+  const skipped: CaptureSkip[] = [...source.skipped]
+  let skippedCount = source.skippedCount
+  let truncated: CaptureTruncation | undefined = source.truncated
+  const recordSkip = (path: string, reason: CaptureSkipReason): void => {
+    skippedCount += 1
+    if (skipped.length < MAX_RECORDED_SKIPS) skipped.push({ path, reason })
+    else truncated ??= reason === 'snapshot-limit' ? 'snapshot-limit' : 'file-limit'
   }
+  const paths = source.paths.length > options.config.maxFiles
+    ? source.paths.slice(0, options.config.maxFiles)
+    : source.paths
+  if (source.paths.length > options.config.maxFiles) truncated ??= 'file-limit'
 
   const entries: Record<string, SnapshotEntry> = Object.create(null) as Record<string, SnapshotEntry>
   // Git-object capture only applies to a Git worktree; an ordinary directory
@@ -51,18 +72,38 @@ export async function captureTree(options: {
         entries: Object.create(null) as Record<string, SnapshotEntry>,
       }
   let totalBytes = 0
+  let budgetSpent = false
   const capturePath = async (path: string): Promise<void> => {
     throwIfAborted(options.signal)
-    const entry = await captureEntry(source.state.root, path, options.config.maxFileBytes, options.signal)
+    if (budgetSpent) {
+      // The aggregate budget is gone, but the path is still recorded so a
+      // restore can prove this point never observed it.
+      recordSkip(path, 'snapshot-limit')
+      return
+    }
+    let entry: Awaited<ReturnType<typeof captureEntry>>
+    try {
+      entry = await captureEntry(source.state.root, path, options.config.maxFileBytes, options.signal)
+    } catch (error) {
+      if (error instanceof ChangeLedgerError && error.code === 'FILE_TOO_LARGE') {
+        recordSkip(path, 'file-too-large')
+        return
+      }
+      if (error instanceof ChangeLedgerError && error.code === 'UNSUPPORTED_FILE_TYPE') {
+        recordSkip(path, 'unsupported-file-type')
+        return
+      }
+      throw error
+    }
     if (entry === undefined) return
     if (entry.kind === 'file') {
-      totalBytes += entry.content.length
-      if (totalBytes > options.config.maxSnapshotBytes) {
-        throw new ChangeLedgerError(
-          'SNAPSHOT_TOO_LARGE',
-          `eligible files exceed configured aggregate limit of ${options.config.maxSnapshotBytes} bytes`,
-        )
+      if (totalBytes + entry.content.length > options.config.maxSnapshotBytes) {
+        budgetSpent = true
+        truncated ??= 'snapshot-limit'
+        recordSkip(path, 'snapshot-limit')
+        return
       }
+      totalBytes += entry.content.length
       if (options.store !== undefined) {
         await options.store.putBlob(source.state.root, entry.snapshot.blob, entry.content)
       }
@@ -76,21 +117,21 @@ export async function captureTree(options: {
     if (gitCapture !== undefined) gitCapture.entries[path] = entry.snapshot
   }
   if (gitCapture === undefined) {
-    for (const path of source.paths) await capturePath(path)
+    for (const path of paths) await capturePath(path)
   } else {
     let next = 0
     let failed = false
     let firstError: unknown = new ChangeLedgerError('WORKSPACE_CHANGED_DURING_CAPTURE', 'parallel comparison capture failed')
     const concurrency = Math.min(
       32,
-      source.paths.length,
+      paths.length,
       Math.max(1, Math.floor(COMPARISON_READ_BUDGET_BYTES / options.config.maxFileBytes)),
     )
     const workers = Array.from({ length: concurrency }, async () => {
-      while (!failed && next < source.paths.length) {
+      while (!failed && next < paths.length) {
         const index = next
         next += 1
-        const path = source.paths[index]
+        const path = paths[index]
         if (path === undefined) continue
         try {
           await capturePath(path)
@@ -110,6 +151,10 @@ export async function captureTree(options: {
     source,
     entries,
     ...(gitCapture === undefined ? {} : { gitEntries: gitCapture.entries }),
+    skipped,
+    skippedCount,
+    skippedListTruncated: skippedCount > skipped.length,
+    ...(truncated === undefined ? {} : { truncated }),
     treeHash: hashTree(entries),
     fileCount: Object.keys(entries).length,
     totalBytes,

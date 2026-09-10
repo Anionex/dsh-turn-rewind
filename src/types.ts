@@ -33,6 +33,18 @@ export interface SymlinkSnapshotEntry {
 /** One path captured by a restore point. */
 export type SnapshotEntry = FileSnapshotEntry | SymlinkSnapshotEntry
 
+/** Why one eligible path was left out of a restore point. */
+export type CaptureSkipReason = 'file-too-large' | 'unsupported-file-type' | 'snapshot-limit'
+
+/** One eligible path that a restore point could not store. */
+export interface CaptureSkip {
+  readonly path: string
+  readonly reason: CaptureSkipReason
+}
+
+/** Why a capture stopped before it enumerated every eligible path. */
+export type CaptureTruncation = 'file-limit' | 'snapshot-limit'
+
 /** Git facts that fence a restore point to the repository state it observed. */
 export interface GitWorkspaceState {
   readonly type: 'git'
@@ -80,6 +92,15 @@ export interface RestorePointManifestV1 {
   readonly fileCount: number
   readonly totalBytes: number
   readonly entries: Readonly<Record<string, SnapshotEntry>>
+  /**
+   * Eligible paths this restore point could not store, bounded for storage.
+   * A restore never touches them, so a partial point stays safe to apply.
+   */
+  readonly skipped?: readonly CaptureSkip[]
+  /** Total skipped paths, including any beyond the bounded list. */
+  readonly skippedCount?: number
+  /** Set when limits stopped the capture before every eligible path was read. */
+  readonly truncated?: CaptureTruncation
   readonly restoreCount: number
   readonly lastRestoredAt?: number
 }
@@ -152,6 +173,9 @@ export interface RestorePointSummary {
   readonly treeHash: string
   readonly fileCount: number
   readonly totalBytes: number
+  readonly skipped?: readonly CaptureSkip[]
+  readonly skippedCount: number
+  readonly truncated?: CaptureTruncation
   readonly restoreCount: number
   readonly lastRestoredAt?: number
   readonly head?: string

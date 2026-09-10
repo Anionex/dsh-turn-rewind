@@ -4,7 +4,7 @@ import { link, lstat, mkdir, open, readFile, realpath, unlink } from 'node:fs/pr
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { ChangeLedgerError, errorMessage } from './errors.js'
 import { canonicalDirectory, isNodeError, syncDirectory, validateRelativePath } from './path-utils.js'
-import type { GitWorkspaceState } from './types.js'
+import type { CaptureSkip, CaptureTruncation, GitWorkspaceState } from './types.js'
 
 const GIT_MAX_BUFFER = 32 * 1024 * 1024
 
@@ -12,6 +12,10 @@ const GIT_MAX_BUFFER = 32 * 1024 * 1024
 export interface RepositorySnapshotSource {
   readonly state: GitWorkspaceState
   readonly paths: readonly string[]
+  /** Git discovery never skips a path; per-file limits are reported by capture. */
+  readonly skipped: readonly CaptureSkip[]
+  readonly skippedCount: number
+  readonly truncated?: CaptureTruncation
 }
 
 /** Durable identity and shared lock location for one concrete Git worktree. */
@@ -72,6 +76,8 @@ export async function discoverRepository(cwd: string, signal?: AbortSignal): Pro
       stagedPaths,
     },
     paths,
+    skipped: [],
+    skippedCount: 0,
   }
 }
 
