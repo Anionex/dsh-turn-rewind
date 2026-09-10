@@ -3,3 +3,14 @@ packages:
 
 nodeLinker: hoisted
 autoInstallPeers: false
+
+# The dev copy of this plugin's optional host peer is pinned to the DSH release
+# this plugin now supports. Keeping it current is deliberate: the previous
+# stale copy resolved the removed `@deepseek-ai/dsh-settings` exports locally and
+# hid a host-API break that stopped the whole profile from booting on DSH 0.1.5.
+# Only these exact vendor versions are exempted, and only because pnpm 11's
+# default 24h release quarantine would otherwise reject them in CI. Drop this
+# block once the versions age past the quarantine.
+minimumReleaseAgeExclude:
+  - '@deepseek-ai/dsh-settings@0.1.5-rc.1'
+  - '@deepseek-ai/dsh-util-values@0.1.5-rc.1'
