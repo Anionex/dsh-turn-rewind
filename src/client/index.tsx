@@ -85,6 +85,17 @@ interface SlotsLike {
   ): () => void
 }
 
+/** Immutable locale state published by `@deepseek-ai/dsh-client-locale`. */
+interface LocaleSnapshotLike {
+  /** Active locale id, a BCP 47-style tag such as `zh` or `en`. */
+  readonly active: string
+}
+
+/** The part of the Host locale service this plugin reads. */
+interface LocaleRuntimeLike {
+  getSnapshot(): LocaleSnapshotLike
+}
+
 interface ClientContextLike {
   readonly slots: SlotsLike
   readonly sessions: {
@@ -100,6 +111,14 @@ interface ClientContextLike {
     bind<T>(spec: { readonly namespace: string }): SettingsScopeLike<T>
   }
   effect(setup: () => (() => void), label?: string): unknown
+  /**
+   * Cordis's un-injected service read: the service value, or `undefined` when
+   * the profile mounts none. Optional because older clients and the test
+   * doubles expose no such method.
+   */
+  get?(name: 'locale'): LocaleRuntimeLike | undefined
+  /** Cordis's event subscription; the result is a disposer when it is one. */
+  on?(name: 'locale/change', listener: (snapshot: LocaleSnapshotLike) => void): unknown
 }
 
 type RewindMode = 'both' | 'code' | 'messages'
@@ -271,6 +290,552 @@ const styles = `
 .dcl-trs-storage{margin:0;padding:8px 10px;border-radius:8px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-tertiary);font-size:12px;overflow-wrap:anywhere}
 `
 
+/** UI languages this plugin ships copy for. */
+type UiLocale = 'zh' | 'en'
+
+/** Label and help text for one numeric settings field. */
+interface FieldText {
+  readonly label: string
+  readonly description: string
+}
+
+/** Every user-facing string the rewind surface renders, in one language. */
+interface RewindText {
+  readonly rewindTooltip: string
+  readonly dialogClose: string
+  readonly dialogDescription: string
+  readonly cancel: string
+  readonly applying: string
+  readonly done: string
+  readonly actionRestoreAndRestart: string
+  readonly actionRestoreFiles: string
+  readonly actionMessagesOnly: string
+  readonly checkingFiles: string
+  readonly previewPending: string
+  readonly previewMissing: string
+  readonly modeBothTitle: string
+  readonly modeBothDescription: string
+  readonly modeCodeTitle: string
+  readonly modeCodeDescription: string
+  readonly modeMessagesTitle: string
+  readonly modeMessagesDescription: string
+  readonly filesUnchanged: string
+  readonly filesToRestore: (count: number) => string
+  readonly summaryBoth: string
+  readonly summaryCode: string
+  readonly summaryMessages: string
+  readonly sharedBlocked: string
+  readonly branchChanged: string
+  readonly headAdvanced: string
+  readonly driftBlocked: string
+  readonly planMissing: string
+  readonly stale: string
+  readonly nothingToRestore: string
+  readonly loadingAllFiles: string
+  readonly viewAllFiles: (count: number) => string
+  readonly backupNote: string
+  readonly recheck: string
+  readonly completedMessages: string
+  readonly completedCode: string
+  readonly completedBoth: string
+  readonly openFailed: (reason: string) => string
+  readonly restoredButOpenFailed: (reason: string) => string
+  readonly modeMismatch: (mode: string) => string
+  readonly listChangedWhileExpanding: string
+  readonly incompleteFileList: string
+  readonly fileKinds: Readonly<Record<ChangeKind, string>>
+  /** Keyed by the Host error code, which stays the same in every language. */
+  readonly errors: Readonly<Record<string, string>>
+  readonly captureSnapshotLimit: string
+  readonly captureFileLimit: string
+  readonly captureSkipped: (count: number, example: string | undefined) => string
+  readonly skipTimeout: string
+  readonly skipDisabled: string
+  readonly skipNewContentLimit: string
+  readonly skipOther: (reason: string) => string
+  readonly failureNotGitRepository: string
+  readonly failureGitStatus: (message: string) => string
+  readonly failureSizeOrCount: string
+  readonly failureUnsupportedType: string
+  readonly failureIgnoreFileInvalid: string
+  readonly failureInvalidPath: string
+  readonly failureOther: (message: string) => string
+  readonly settingsCardTitle: string
+  readonly settingsCardDescription: string
+  readonly autoCheckpointSection: string
+  readonly settingsLoading: string
+  readonly settingsUnavailable: string
+  readonly settingsReadOnly: string
+  readonly autoCheckpointLabel: string
+  readonly autoCheckpointDescription: string
+  readonly trustLabel: string
+  readonly trustDescription: string
+  readonly overridden: string
+  readonly resetToDefault: string
+  readonly positiveInteger: (field: string) => string
+  readonly storageDir: (directory: string) => string
+  readonly manageSection: string
+  readonly refreshing: string
+  readonly refresh: string
+  readonly clearing: string
+  readonly confirmClearAll: string
+  readonly clearAll: string
+  readonly manageLoading: string
+  readonly manageTotal: (workspaces: number, points: number, size: string) => string
+  readonly workspacePoints: (count: number) => string
+  readonly pendingRecoveries: (count: number) => string
+  readonly expand: string
+  readonly collapse: string
+  readonly clearWorkspace: string
+  readonly fileCount: (count: number) => string
+  readonly deleting: string
+  readonly remove: string
+  readonly noCheckpoints: string
+  readonly clearedAll: (deleted: number, retained: number, failures: number) => string
+  readonly cleared: (deleted: number, retained: number) => string
+  readonly checkpointModes: Readonly<Record<TurnRewindSettingsValue['turnCheckpointMode'], string>>
+  readonly trustOptions: Readonly<Record<TurnRewindSettingsValue['turnCheckpointTrust'], string>>
+  /** Keyed by the durable restore-point kind, which is not a display value. */
+  readonly pointKinds: Readonly<Record<string, string>>
+  readonly numberFields: Readonly<Record<NumberSettingsField, FieldText>>
+  readonly manageMissingWorkspaces: string
+  readonly manageMissingRestorePoints: string
+  readonly clearMissingReports: string
+  readonly previewMissingChanges: string
+  readonly previewMissingActiveSessionIds: string
+  readonly invalidField: (name: string) => string
+  readonly invalidObject: string
+  readonly unknownStatus: (status: string) => string
+  readonly sessionNotReady: string
+  readonly unparsableResponse: (status: string) => string
+  readonly requestFailed: (status: string) => string
+  readonly emptyResponse: string
+}
+
+/** Chinese copy — the language this plugin shipped in before English existed. */
+const ZH: RewindText = {
+  rewindTooltip: '恢复到发送这条消息之前',
+  dialogClose: '关闭',
+  dialogDescription: '查看恢复的文件，选择适合你的回退方式。当前会话不受影响。',
+  cancel: '取消',
+  applying: '正在恢复…',
+  done: '已完成',
+  actionRestoreAndRestart: '恢复并从这里继续',
+  actionRestoreFiles: '恢复文件',
+  actionMessagesOnly: '只回溯消息',
+  checkingFiles: '正在检查可以恢复的项目文件…',
+  previewPending: '这条消息发送前的文件还在保存，请稍后再试。',
+  previewMissing: '没有保存这条消息发送前的文件。可能是当时还没启用回退功能、记录已超过保留期限，或已关闭自动检查点。仍可只回溯消息。',
+  modeBothTitle: '恢复文件并从这里继续',
+  modeBothDescription: '创建一个从这里开始的新会话（当前对话会保留）',
+  modeCodeTitle: '只恢复文件',
+  modeCodeDescription: '恢复这条消息发送前的文件，当前对话保持不变。',
+  modeMessagesTitle: '只回溯消息（不动文件）',
+  modeMessagesDescription: '创建一个从这里开始的新会话，项目文件保持当前状态。',
+  filesUnchanged: '项目文件保持不变',
+  filesToRestore: count => `将恢复 ${String(count)} 个文件`,
+  summaryBoth: '恢复后在新对话里继续',
+  summaryCode: '当前对话保持不变',
+  summaryMessages: '仅创建从这里继续的新对话',
+  sharedBlocked: '这个项目目录还有别的对话正在运行。恢复文件会影响到它们，因此本次操作已被阻止。请等那些对话结束或停止后，再重新检查。',
+  branchChanged: '当前所在的 Git 分支和发送这条消息时不同。恢复不会切换分支，只会把当时的文件内容恢复到当前分支。',
+  headAdvanced: '这条消息之后有了新的 Git 提交。恢复只会改文件，不会撤销提交；完成后这些文件会显示为未提交修改。',
+  driftBlocked: 'Git 正在进行合并、变基或类似操作。请先完成或取消这次 Git 操作，再重新检查。',
+  planMissing: '恢复信息已经失效，请重新检查。',
+  stale: '项目文件在检查后又发生了变化。为避免覆盖新修改，这次恢复已失效，请重新检查。',
+  nothingToRestore: '项目文件已经是这条消息发送前的状态，无需恢复文件。可选择「只回溯消息」重新开始这段对话。',
+  loadingAllFiles: '正在读取全部文件…',
+  viewAllFiles: count => `查看全部 ${String(count)} 个文件`,
+  backupNote: '恢复前会自动备份当前文件；若恢复失败会自动还原，项目不会停留在只恢复了一部分的状态。',
+  recheck: '重新检查',
+  completedMessages: '已创建从这里开始的新对话；项目文件保持不变。',
+  completedCode: '项目文件已恢复；当前对话保持不变。恢复前的文件已自动备份。',
+  completedBoth: '项目文件已恢复，并已创建新对话。恢复前的文件已自动备份。',
+  openFailed: reason => `新对话已创建，但没能自动打开：${reason}`,
+  restoredButOpenFailed: reason => `文件已经恢复，新对话也已创建，但没能自动打开：${reason}`,
+  modeMismatch: mode => `服务器返回了不匹配的回退模式：${mode}`,
+  listChangedWhileExpanding: '项目文件在展开列表时发生了变化。',
+  incompleteFileList: '无法读取完整的文件列表。',
+  fileKinds: {
+    added: '移除后来新增的文件',
+    deleted: '找回文件',
+    modified: '恢复之前的版本',
+    'mode-changed': '恢复文件权限',
+    'type-changed': '恢复之前的文件类型',
+  },
+  errors: {
+    REWIND_ENDPOINT_UNAVAILABLE: '回退服务没有响应。请确认 @anionex/dsh-turn-rewind 已挂载到当前 DSH，并重启 DSH 后重试。',
+    REWIND_INVALID_RESPONSE: '回退服务返回了无法解析的内容。请重启 DSH 后重试。',
+    PLAN_STALE: '项目文件在检查后又发生了变化。为避免覆盖新修改，请重新检查后再恢复。',
+    PLAN_STALE_WORKSPACE: '项目文件在检查后又发生了变化。为避免覆盖新修改，请重新检查后再恢复。',
+    PLAN_STALE_REPOSITORY: 'Git 状态在检查后又发生了变化，恢复已失效。请重新检查后再试。',
+    WORKSPACE_IN_USE: '这个项目目录还有别的对话正在运行。请等那些对话结束或停止后，再重新检查。',
+    WORKSPACE_LOCKED: '另一个恢复操作正在处理这个项目目录。请等待它完成后重新检查。',
+    WORKSPACE_CHANGED: '这个项目目录已经不在原来的位置，旧的回退点无法再使用。',
+    WORKSPACE_MODE_CHANGED: '这个项目目录的工作区类型变了（例如从普通目录变成了 Git 仓库）。旧的回退点不再适用，请重新发送一条消息生成新的回退点。',
+    HEAD_CHANGED: '项目的提交或分支已发生变化。为避免覆盖新改动，请重新检查后再恢复。',
+    REPOSITORY_CHANGED: '这个项目目录已不属于原来的 Git 工作区，无法恢复。',
+    GIT_OPERATION_CHANGED: 'Git 正在执行其他操作。请先完成或取消该操作，再重新检查。',
+    RESTORE_POINT_NOT_FOUND: '没有找到对应的文件状态，可能已被清理。',
+    NO_CHANGES: '项目文件已经是这条消息发送前的状态，无需恢复文件。可选择「只回溯消息」重新开始这段对话。',
+    RESTORE_FAILED_ROLLED_BACK: '恢复未能完成，项目文件已自动还原到操作前的状态。',
+    CONVERSATION_REWIND_FAILED: '文件已恢复，但无法创建新对话；项目文件已自动还原。',
+  },
+  captureSnapshotLimit: '本轮要保存的文件总量超过上限，剩下的文件没有纳入检查点。恢复时不会改动它们。',
+  captureFileLimit: '本轮文件数量超过上限，多出来的文件没有纳入检查点。恢复时不会改动它们。',
+  captureSkipped: (count, example) => `有 ${String(count)} 个文件因为超过单文件大小上限或类型不受支持，没有纳入检查点${example === undefined ? '' : `（例如 ${example}）`}。恢复时不会改动它们。`,
+  skipTimeout: '这个项目目录太大，在检查点时间上限内没保存完文件快照，所以本轮没有回退点（消息本身没有受影响）。可以在插件设置里调大「检查点时间上限」，或在目录根用 .dsh-rewindignore 排除大目录（例如 node_modules、构建产物、数据集）。仍可只回溯消息。',
+  skipDisabled: '自动文件检查点已在设置里关闭，本轮没有回退点。仍可只回溯消息。',
+  skipNewContentLimit: '这一轮新增的内容超过检查点预算，没有保存文件快照。仍可只回溯消息。',
+  skipOther: reason => `本轮没有保存文件检查点：${reason}仍可只回溯消息。`,
+  failureNotGitRepository: '这个项目目录不是 Git 仓库，回退功能无法保存文件检查点。仍可只回溯消息。',
+  failureGitStatus: message => `无法读取这个项目目录的 Git 状态：${message}仍可只回溯消息。`,
+  failureSizeOrCount: '本轮有文件超过检查点的大小或数量上限，没有保存文件检查点。仍可只回溯消息。',
+  failureUnsupportedType: '项目目录里有无法保存的特殊文件（如 socket、设备文件、FIFO），没有保存文件检查点。仍可只回溯消息。',
+  failureIgnoreFileInvalid: '项目目录里的 .dsh-rewindignore 内容无效，没有保存文件检查点。修正该文件后可重新发送消息。',
+  failureInvalidPath: '项目目录里有无法安全保存的路径（例如嵌套的独立 Git 仓库），没有保存文件检查点。仍可只回溯消息。',
+  failureOther: message => `没能保存这条消息发送前的文件：${message}仍可只回溯消息。`,
+  settingsCardTitle: 'Turn Rewind 回退设置',
+  settingsCardDescription: '自动文件检查点、信任策略与检查点保留上限；回退按钮在各条用户消息上',
+  autoCheckpointSection: '自动文件检查点',
+  settingsLoading: '正在加载设置…',
+  settingsUnavailable: '当前部署未提供设置服务，以下选项不可用。',
+  settingsReadOnly: '设置为只读（当前浏览器进程内保存），修改不可用。',
+  autoCheckpointLabel: '自动文件检查点',
+  autoCheckpointDescription: '关闭后不再为每条消息保存文件检查点；回退弹窗仍可只回溯消息',
+  trustLabel: '检查点信任策略',
+  trustDescription: '快速信任 Git/stat 元数据；严格会逐一重读文件内容',
+  overridden: '已覆盖',
+  resetToDefault: '恢复默认',
+  positiveInteger: field => `${field} 必须是正整数。`,
+  storageDir: directory => `存储目录（在 cordis.patch.yml 中配置，不可在线修改）：${directory}`,
+  manageSection: '检查点管理',
+  refreshing: '正在刷新…',
+  refresh: '刷新',
+  clearing: '正在清理…',
+  confirmClearAll: '确认清空全部',
+  clearAll: '一键清空全部',
+  manageLoading: '正在读取检查点占用…',
+  manageTotal: (workspaces, points, size) => `共 ${String(workspaces)} 个工作区，${String(points)} 个检查点，约 ${size}（Git 原生检查点的实际磁盘占用以 Git 回收为准）。`,
+  workspacePoints: count => `${String(count)} 个检查点`,
+  pendingRecoveries: count => `${String(count)} 个恢复待处理`,
+  expand: '展开',
+  collapse: '收起',
+  clearWorkspace: '清空此项目',
+  fileCount: count => `${String(count)} 个文件`,
+  deleting: '正在删除…',
+  remove: '删除',
+  noCheckpoints: '还没有任何已保存的检查点。',
+  clearedAll: (deleted, retained, failures) => `已删除 ${String(deleted)} 个检查点${retained > 0 ? `，${String(retained)} 个受保护检查点未删除` : ''}${failures > 0 ? `，${String(failures)} 个工作区清理失败` : ''}。`,
+  cleared: (deleted, retained) => `已删除 ${String(deleted)} 个检查点${retained > 0 ? `，${String(retained)} 个受保护检查点未删除` : ''}。`,
+  checkpointModes: {
+    off: '关闭（不创建文件检查点）',
+    auto: '自动（推荐）',
+    'git-native': 'Git 原生（大仓库）',
+    legacy: '完整快照（兼容模式）',
+  },
+  trustOptions: {
+    fast: '快速',
+    strict: '严格',
+  },
+  pointKinds: {
+    user: '手动',
+    rescue: '救援',
+    turn: '轮次',
+  },
+  numberFields: {
+    maxRestorePoints: { label: '用户/救援恢复点上限', description: '每个工作区保留的最大手动与救援恢复点数量' },
+    maxTurnCheckpointsPerSession: { label: '轮次检查点上限', description: '每个会话保留的最大自动轮次检查点数量（最旧的先清理）' },
+    maxFiles: { label: '单恢复点文件数上限', description: '一个恢复点最多纳入的文件数量' },
+    maxFileBytes: { label: '单文件大小上限', description: '读取单个普通文件的最大字节数' },
+    maxSnapshotBytes: { label: '快照总量上限', description: '单个恢复点读取的最大字节总量' },
+    planTtlMs: { label: '恢复计划有效期（毫秒）', description: '回溯计划从创建到失效的时间' },
+    staleLockMs: { label: '锁回收时长（毫秒）', description: '锁属主消失多久后允许回收该锁' },
+    turnCheckpointTimeoutMs: { label: '检查点超时（毫秒）', description: '单次自动检查点最多阻塞消息发送的时间，超时记录跳过' },
+    turnCheckpointMaxNewBytes: { label: '检查点读取上限', description: '单次 Git 原生检查点最多读取的未缓存字节数' },
+  },
+  manageMissingWorkspaces: '管理数据缺少 workspaces',
+  manageMissingRestorePoints: '管理数据缺少 restorePoints',
+  clearMissingReports: '清理结果缺少 reports',
+  previewMissingChanges: '回退预览缺少 changes',
+  previewMissingActiveSessionIds: '回退预览缺少 activeSessionIds',
+  invalidField: name => `${name} 无效`,
+  invalidObject: '服务器返回了无效对象',
+  unknownStatus: status => `未知回退状态：${status}`,
+  sessionNotReady: '新对话还没有准备好',
+  unparsableResponse: status => `回退服务返回了无法解析的内容（HTTP ${status}）。`,
+  requestFailed: status => `请求失败：${status}`,
+  emptyResponse: '回退服务返回了空响应。',
+}
+
+/**
+ * Count one English noun, used only by the English copy.
+ * @param count - the quantity to render.
+ * @param singular - the noun in its singular form.
+ * @param plural - the plural form, when adding `s` is wrong.
+ * @returns the counted phrase.
+ */
+function counted(count: number, singular: string, plural = `${singular}s`): string {
+  return `${String(count)} ${count === 1 ? singular : plural}`
+}
+
+/** English copy, used when the Host reports a non-Chinese UI language. */
+const EN: RewindText = {
+  rewindTooltip: 'Return to before sending this message',
+  dialogClose: 'Close',
+  dialogDescription: 'Review the files that would be restored and pick the rewind mode you want. The current session is unaffected.',
+  cancel: 'Cancel',
+  applying: 'Restoring…',
+  done: 'Done',
+  actionRestoreAndRestart: 'Restore and continue from here',
+  actionRestoreFiles: 'Restore files',
+  actionMessagesOnly: 'Rewind messages only',
+  checkingFiles: 'Checking which project files can be restored…',
+  previewPending: 'The files from before this message are still being saved. Try again in a moment.',
+  previewMissing: 'No files were saved from before this message. Rewind may not have been enabled yet, the record may have passed its retention limit, or automatic checkpoints may be turned off. You can still rewind messages only.',
+  modeBothTitle: 'Restore files and restart',
+  modeBothDescription: 'Creates a new session starting here (the current conversation is kept)',
+  modeCodeTitle: 'Restore files only',
+  modeCodeDescription: 'Restores the files from before this message and leaves the current conversation unchanged.',
+  modeMessagesTitle: 'Rewind messages only (files untouched)',
+  modeMessagesDescription: 'Creates a new session starting here and leaves the project files exactly as they are.',
+  filesUnchanged: 'Project files stay unchanged',
+  filesToRestore: count => `Will restore ${counted(count, 'file')}`,
+  summaryBoth: 'Continue in a new conversation after restoring',
+  summaryCode: 'The current conversation stays unchanged',
+  summaryMessages: 'Only creates a new conversation continuing from here',
+  sharedBlocked: 'Another conversation is still running in this project directory. Restoring files would affect it, so this operation is blocked. Wait for those conversations to finish or stop them, then check again.',
+  branchChanged: 'The current Git branch is not the one you were on when this message was sent. Restoring never switches branches; it only restores that file content onto the current branch.',
+  headAdvanced: 'There are new Git commits after this message. Restoring only changes files and never undoes commits; afterwards those files appear as uncommitted changes.',
+  driftBlocked: 'Git is in the middle of a merge, rebase, or similar operation. Finish or cancel that Git operation, then check again.',
+  planMissing: 'The restore information has expired. Check again.',
+  stale: 'The project files changed again after the check. To avoid overwriting the newer edits, this restore is no longer valid. Check again.',
+  nothingToRestore: 'The project files already match the state from before this message, so no files need restoring. Choose “Rewind messages only” to restart this conversation from here.',
+  loadingAllFiles: 'Loading all files…',
+  viewAllFiles: count => `View all ${counted(count, 'file')}`,
+  backupNote: 'The current files are backed up automatically before a restore; if the restore fails they are rolled back, so the project is never left partly restored.',
+  recheck: 'Check again',
+  completedMessages: 'A new conversation starting here has been created; the project files are unchanged.',
+  completedCode: 'The project files have been restored; the current conversation is unchanged. The files from before the restore were backed up automatically.',
+  completedBoth: 'The project files have been restored and a new conversation was created. The files from before the restore were backed up automatically.',
+  openFailed: reason => `The new conversation was created but could not be opened automatically: ${reason}`,
+  restoredButOpenFailed: reason => `The files were restored and the new conversation was created, but it could not be opened automatically: ${reason}`,
+  modeMismatch: mode => `The server returned a rewind mode that does not match: ${mode}`,
+  listChangedWhileExpanding: 'The project files changed while the full list was being loaded.',
+  incompleteFileList: 'Could not read the complete file list.',
+  fileKinds: {
+    added: 'Remove the file added later',
+    deleted: 'Bring the file back',
+    modified: 'Restore the earlier version',
+    'mode-changed': 'Restore the file permissions',
+    'type-changed': 'Restore the earlier file type',
+  },
+  errors: {
+    REWIND_ENDPOINT_UNAVAILABLE: 'The rewind service did not respond. Check that @anionex/dsh-turn-rewind is mounted in this DSH, restart DSH, and try again.',
+    REWIND_INVALID_RESPONSE: 'The rewind service returned content that could not be parsed. Restart DSH and try again.',
+    PLAN_STALE: 'The project files changed again after the check. To avoid overwriting the newer edits, check again before restoring.',
+    PLAN_STALE_WORKSPACE: 'The project files changed again after the check. To avoid overwriting the newer edits, check again before restoring.',
+    PLAN_STALE_REPOSITORY: 'The Git state changed after the check, so the restore is no longer valid. Check again and retry.',
+    WORKSPACE_IN_USE: 'Another conversation is still running in this project directory. Wait for those conversations to finish or stop them, then check again.',
+    WORKSPACE_LOCKED: 'Another restore is already working on this project directory. Wait for it to finish, then check again.',
+    WORKSPACE_CHANGED: 'This project directory is no longer in its original location, so the earlier restore points cannot be used.',
+    WORKSPACE_MODE_CHANGED: 'The workspace type of this project directory changed (for example from an ordinary directory to a Git repository). The earlier restore points no longer apply; send a new message to create a new one.',
+    HEAD_CHANGED: 'The commits or branch of this project changed. To avoid overwriting newer work, check again before restoring.',
+    REPOSITORY_CHANGED: 'This project directory no longer belongs to its original Git worktree, so it cannot be restored.',
+    GIT_OPERATION_CHANGED: 'Git is running another operation. Finish or cancel it, then check again.',
+    RESTORE_POINT_NOT_FOUND: 'No matching file state was found; it may already have been cleaned up.',
+    NO_CHANGES: 'The project files already match the state from before this message, so no files need restoring. Choose “Rewind messages only” to restart this conversation from here.',
+    RESTORE_FAILED_ROLLED_BACK: 'The restore did not finish; the project files were rolled back to their state before the operation.',
+    CONVERSATION_REWIND_FAILED: 'The files were restored but the new conversation could not be created; the project files were rolled back.',
+  },
+  captureSnapshotLimit: 'The files in this turn exceeded the total size limit, so the remaining files were left out of the checkpoint. A restore will not touch them.',
+  captureFileLimit: 'This turn had more files than the limit allows, so the extra files were left out of the checkpoint. A restore will not touch them.',
+  captureSkipped: (count, example) => `${counted(count, 'file')} ${count === 1 ? 'was' : 'were'} left out of the checkpoint for exceeding the per-file size limit or having an unsupported type${example === undefined ? '' : ` (for example ${example})`}. A restore will not touch them.`,
+  skipTimeout: 'This project directory is too large to finish a file snapshot within the checkpoint time limit, so this turn has no restore point (the message itself was unaffected). Raise “Checkpoint timeout (ms)” in the plugin settings, or exclude large directories with a .dsh-rewindignore in the directory root (for example node_modules, build output, datasets). You can still rewind messages only.',
+  skipDisabled: 'Automatic file checkpoints are turned off in settings, so this turn has no restore point. You can still rewind messages only.',
+  skipNewContentLimit: 'This turn added more content than the checkpoint budget allows, so no file snapshot was saved. You can still rewind messages only.',
+  skipOther: reason => `No file checkpoint was saved for this turn: ${reason} You can still rewind messages only.`,
+  failureNotGitRepository: 'This project directory is not a Git repository, so rewind cannot save file checkpoints. You can still rewind messages only.',
+  failureGitStatus: message => `Could not read the Git state of this project directory: ${message} You can still rewind messages only.`,
+  failureSizeOrCount: 'Files in this turn exceeded the checkpoint size or count limit, so no file checkpoint was saved. You can still rewind messages only.',
+  failureUnsupportedType: 'The project directory contains special files that cannot be saved (such as sockets, device files, or FIFOs), so no file checkpoint was saved. You can still rewind messages only.',
+  failureIgnoreFileInvalid: 'The .dsh-rewindignore in the project directory is invalid, so no file checkpoint was saved. Fix that file and send the message again.',
+  failureInvalidPath: 'The project directory contains paths that cannot be saved safely (for example a nested standalone Git repository), so no file checkpoint was saved. You can still rewind messages only.',
+  failureOther: message => `Could not save the files from before this message: ${message} You can still rewind messages only.`,
+  settingsCardTitle: 'Turn Rewind settings',
+  settingsCardDescription: 'Automatic file checkpoints, trust policy, and checkpoint retention limits; the rewind button sits on each user message',
+  autoCheckpointSection: 'Automatic file checkpoints',
+  settingsLoading: 'Loading settings…',
+  settingsUnavailable: 'This deployment provides no settings service, so the options below are unavailable.',
+  settingsReadOnly: 'Settings are read-only (kept inside this browser process), so changes are unavailable.',
+  autoCheckpointLabel: 'Automatic file checkpoints',
+  autoCheckpointDescription: 'When off, no file checkpoint is saved for each message; the rewind dialog can still rewind messages only',
+  trustLabel: 'Checkpoint trust policy',
+  trustDescription: 'Fast trusts Git/stat metadata; Strict re-reads every file’s content',
+  overridden: 'Overridden',
+  resetToDefault: 'Reset to default',
+  positiveInteger: field => `${field} must be a positive integer.`,
+  storageDir: directory => `Storage directory (configured in cordis.patch.yml, not editable here): ${directory}`,
+  manageSection: 'Checkpoint management',
+  refreshing: 'Refreshing…',
+  refresh: 'Refresh',
+  clearing: 'Clearing…',
+  confirmClearAll: 'Confirm clear all',
+  clearAll: 'Clear all',
+  manageLoading: 'Reading checkpoint usage…',
+  manageTotal: (workspaces, points, size) => `${counted(workspaces, 'workspace')}, ${counted(points, 'checkpoint')}, about ${size} (disk use for Git-native checkpoints follows Git garbage collection).`,
+  workspacePoints: count => counted(count, 'checkpoint'),
+  pendingRecoveries: count => `${counted(count, 'recovery', 'recoveries')} pending`,
+  expand: 'Expand',
+  collapse: 'Collapse',
+  clearWorkspace: 'Clear this project',
+  fileCount: count => counted(count, 'file'),
+  deleting: 'Deleting…',
+  remove: 'Delete',
+  noCheckpoints: 'No checkpoints have been saved yet.',
+  clearedAll: (deleted, retained, failures) => `Deleted ${counted(deleted, 'checkpoint')}${retained > 0 ? `; ${counted(retained, 'protected checkpoint')} kept` : ''}${failures > 0 ? `; ${counted(failures, 'workspace')} failed to clear` : ''}.`,
+  cleared: (deleted, retained) => `Deleted ${counted(deleted, 'checkpoint')}${retained > 0 ? `; ${counted(retained, 'protected checkpoint')} kept` : ''}.`,
+  checkpointModes: {
+    off: 'Off (no file checkpoints)',
+    auto: 'Auto (recommended)',
+    'git-native': 'Git-native (large repositories)',
+    legacy: 'Full snapshot (compatibility mode)',
+  },
+  trustOptions: {
+    fast: 'Fast',
+    strict: 'Strict',
+  },
+  pointKinds: {
+    user: 'Manual',
+    rescue: 'Rescue',
+    turn: 'Turn',
+  },
+  numberFields: {
+    maxRestorePoints: { label: 'User/rescue restore point limit', description: 'Most manual and rescue restore points kept per workspace' },
+    maxTurnCheckpointsPerSession: { label: 'Turn checkpoint limit', description: 'Most automatic turn checkpoints kept per session (oldest pruned first)' },
+    maxFiles: { label: 'Files per restore point', description: 'Most files one restore point may include' },
+    maxFileBytes: { label: 'Maximum file size', description: 'Most bytes read from a single regular file' },
+    maxSnapshotBytes: { label: 'Maximum snapshot size', description: 'Most bytes read in total for one restore point' },
+    planTtlMs: { label: 'Restore plan lifetime (ms)', description: 'How long a rewind plan stays valid after it is created' },
+    staleLockMs: { label: 'Stale lock timeout (ms)', description: 'How long after its owner disappears a lock may be reclaimed' },
+    turnCheckpointTimeoutMs: { label: 'Checkpoint timeout (ms)', description: 'How long one automatic checkpoint may hold up sending a message before it is recorded as skipped' },
+    turnCheckpointMaxNewBytes: { label: 'Checkpoint read limit', description: 'Most uncached bytes one Git-native checkpoint may read' },
+  },
+  manageMissingWorkspaces: 'The management data is missing workspaces',
+  manageMissingRestorePoints: 'The management data is missing restorePoints',
+  clearMissingReports: 'The clear result is missing reports',
+  previewMissingChanges: 'The rewind preview is missing changes',
+  previewMissingActiveSessionIds: 'The rewind preview is missing activeSessionIds',
+  invalidField: name => `${name} is invalid`,
+  invalidObject: 'The server returned an invalid object',
+  unknownStatus: status => `Unknown rewind status: ${status}`,
+  sessionNotReady: 'The new conversation is not ready yet',
+  unparsableResponse: status => `The rewind service returned content that could not be parsed (HTTP ${status}).`,
+  requestFailed: status => `Request failed: ${status}`,
+  emptyResponse: 'The rewind service returned an empty response.',
+}
+
+const TEXT: Readonly<Record<UiLocale, RewindText>> = { zh: ZH, en: EN }
+
+/**
+ * Active UI language, and the listeners rendering it.
+ *
+ * One browser runs one copy of this plugin, so the active language is module
+ * state rather than React context: the pure helpers below (`friendlyError`,
+ * `explainCheckpointSkip`, and the decoders) produce user-facing sentences
+ * outside any render and would otherwise need their exported signatures
+ * changed.
+ */
+let uiLocale: UiLocale = 'zh'
+const localeListeners = new Set<() => void>()
+
+/**
+ * Resolve one Host locale id to a language this plugin ships copy for.
+ *
+ * An absent, empty, or unreadable id means the Host published no UI language —
+ * DSH releases without the locale plugin, and profiles that do not mount it —
+ * and keeps Chinese, so an existing install never changes language on upgrade.
+ * Any other registered language resolves to English, mirroring the Host's own
+ * per-key fallback chain, which terminates at English rather than Chinese.
+ * @param active - the Host's active locale id, when it publishes one.
+ * @returns the language whose copy to render.
+ */
+export function resolveUiLocale(active: string | undefined): UiLocale {
+  if (typeof active !== 'string' || active === '') return 'zh'
+  return /^zh(?:[-_]|$)/i.test(active) ? 'zh' : 'en'
+}
+
+/** Current UI copy. Chinese until the Host publishes another language. */
+function uiText(): RewindText {
+  return TEXT[uiLocale]
+}
+
+/** Adopt one Host locale id and re-render everything currently mounted. */
+function adoptLocale(active: string | undefined): void {
+  const next = resolveUiLocale(active)
+  if (next === uiLocale) return
+  uiLocale = next
+  for (const listener of localeListeners) listener()
+}
+
+/** `useSyncExternalStore` subscribe half for the active language. */
+function subscribeLocale(listener: () => void): () => void {
+  localeListeners.add(listener)
+  return () => { localeListeners.delete(listener) }
+}
+
+/** Read the current copy and re-render this component when the language changes. */
+function useText(): RewindText {
+  return useSyncExternalStore(subscribeLocale, uiText, uiText)
+}
+
+/**
+ * Follow the Host's UI language for as long as the plugin is mounted.
+ *
+ * The locale service is read through `ctx.get`, Cordis's un-injected read, and
+ * not declared in `inject`: an injected service the profile does not mount
+ * holds the fiber inactive, which would stop the rewind button appearing at all
+ * on a profile without the locale plugin. Late arrival is covered by the
+ * `locale/change` event, which is emitted on the context rather than on the
+ * service, so a listener registered here sees a switch even when the locale
+ * plugin loads after this one.
+ * @param ctx - the client context this plugin was applied to.
+ * @returns the teardown restoring the default language.
+ */
+function followHostLocale(ctx: ClientContextLike): () => void {
+  adoptLocale(hostLocale(ctx))
+  let off: unknown
+  try {
+    off = ctx.on?.('locale/change', (snapshot: LocaleSnapshotLike) => {
+      adoptLocale(typeof snapshot?.active === 'string' ? snapshot.active : hostLocale(ctx))
+    })
+  } catch {
+    off = undefined
+  }
+  return () => {
+    if (typeof off === 'function') off()
+    adoptLocale(undefined)
+  }
+}
+
+/**
+ * Read the Host's active locale id.
+ *
+ * The locale service belongs to the Host, so its presence and shape are not
+ * this plugin's to guarantee: a language that cannot be read leaves the rewind
+ * surface in Chinese instead of failing the effect that installs the button.
+ * @param ctx - the client context this plugin was applied to.
+ * @returns the active locale id, or `undefined` when none can be read.
+ */
+function hostLocale(ctx: ClientContextLike): string | undefined {
+  try {
+    const active = ctx.get?.('locale')?.getSnapshot().active
+    return typeof active === 'string' ? active : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** Return the rewind anchor and editable text owned by one direct user message. */
 export function selectRewindMessage(node: ConversationNodeLike): RewindMatch | null {
   if (node.kind !== 'user' || !Number.isSafeInteger(node.seq) || node.seq < 0) return null
@@ -291,6 +856,7 @@ export function selectRewindMessage(node: ConversationNodeLike): RewindMatch | n
  */
 export const inject = ['slots', 'sessions', 'conversation', 'settingsScope']
 export function apply(ctx: ClientContextLike): void {
+  ctx.effect(() => followHostLocale(ctx), 'turn-rewind: locale')
   ctx.effect(() => {
     if (document.querySelector(`style[data-plugin-css="${STYLE_ID}"]`) !== null) return () => {}
     const tag = document.createElement('style')
@@ -399,6 +965,7 @@ export function RewindMessagePortals({ sessionId, openRestoredSession, useSessio
 
 /** User-message action and its review-first file/conversation restore dialog. */
 export function RewindMessageAction({ matched, sessionId, openRestoredSession }: RewindMessageActionProps): ReactNode {
+  const t = useText()
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [preview, setPreview] = useState<Preview | null>(null)
@@ -502,13 +1069,13 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
           || page.checkpointId !== ready.checkpointId
           || page.totalChanges !== ready.totalChanges
           || page.offset !== offset) {
-          throw new RewindRequestError('PLAN_STALE', '项目文件在展开列表时发生了变化。')
+          throw new RewindRequestError('PLAN_STALE', t.listChangedWhileExpanding)
         }
         collected.push(...page.changes)
         offset += page.changes.length
         if (page.changes.length === 0) break
       }
-      if (offset !== ready.totalChanges) throw new RewindRequestError('PLAN_STALE', '无法读取完整的文件列表。')
+      if (offset !== ready.totalChanges) throw new RewindRequestError('PLAN_STALE', t.incompleteFileList)
       setPreview({ ...ready, changes: collected, truncated: false })
     } catch (caught) {
       if (caught instanceof RewindRequestError && caught.code === 'PLAN_STALE') setStale(true)
@@ -542,31 +1109,31 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
       })
       const result = recordOf(await responseJson(response))
       const resultMode = requiredString(result.mode, 'mode')
-      if (resultMode !== mode) throw new Error(`服务器返回了不匹配的回退模式：${resultMode}`)
+      if (resultMode !== mode) throw new Error(t.modeMismatch(resultMode))
       if (mode === 'messages') {
         const childSessionId = requiredString(result.sessionId, 'sessionId')
-        setCompleted('已创建从这里开始的新对话；项目文件保持不变。')
+        setCompleted(t.completedMessages)
         try {
           await openRestoredSession(childSessionId, matched.promptText)
           setOpen(false)
         } catch (navigationError) {
-          setError(`新对话已创建，但没能自动打开：${messageOf(navigationError)}`)
+          setError(t.openFailed(messageOf(navigationError)))
         }
         return
       }
       if (mode === 'code') {
         requiredString(result.rescuePointId, 'rescuePointId')
-        setCompleted('项目文件已恢复；当前对话保持不变。恢复前的文件已自动备份。')
+        setCompleted(t.completedCode)
         return
       }
       const childSessionId = requiredString(result.sessionId, 'sessionId')
       requiredString(result.rescuePointId, 'rescuePointId')
-      setCompleted('项目文件已恢复，并已创建新对话。恢复前的文件已自动备份。')
+      setCompleted(t.completedBoth)
       try {
         await openRestoredSession(childSessionId, matched.promptText)
         setOpen(false)
       } catch (navigationError) {
-        setError(`文件已经恢复，新对话也已创建，但没能自动打开：${messageOf(navigationError)}`)
+        setError(t.restoredButOpenFailed(messageOf(navigationError)))
       }
     } catch (caught) {
       if (caught instanceof RewindRequestError && (caught.code === 'PLAN_STALE' || caught.code === 'WORKSPACE_IN_USE')) {
@@ -580,53 +1147,53 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
   }
 
   const captureNotice = describeCaptureNotice(ready)
-  const actionLabel = mode === 'both' ? '恢复并从这里继续' : mode === 'code' ? '恢复文件' : '只回溯消息'
+  const actionLabel = mode === 'both' ? t.actionRestoreAndRestart : mode === 'code' ? t.actionRestoreFiles : t.actionMessagesOnly
   const radioName = `dcl-rewind-${sessionId}-${String(matched.messageSeq)}`
   const branchChanged = ready !== null && ready.checkpointBranch !== ready.currentBranch
 
   return (
     <div className="dcl-rewind-tail">
-      <Tooltip label="恢复到发送这条消息之前" side="bottom">
-        <button type="button" className="dcl-rewind-trigger" onClick={show} aria-label="恢复到发送这条消息之前">
+      <Tooltip label={t.rewindTooltip} side="bottom">
+        <button type="button" className="dcl-rewind-trigger" onClick={show} aria-label={t.rewindTooltip}>
           <RewindIcon size={16} />
         </button>
       </Tooltip>
       <Modal
         open={open}
         onClose={close}
-        title="恢复到发送这条消息之前"
-        closeLabel="关闭"
-        description="查看恢复的文件，选择适合你的回退方式。当前会话不受影响。"
+        title={t.rewindTooltip}
+        closeLabel={t.dialogClose}
+        description={t.dialogDescription}
         className="dcl-rewind-dialog"
         contentClassName="dcl-rewind-content"
         footer={(
           <>
-            <Button variant="outline" onClick={close} disabled={applying}>取消</Button>
+            <Button variant="outline" onClick={close} disabled={applying}>{t.cancel}</Button>
             <Button variant="primary" onClick={() => { void applyRestore() }} disabled={!canApply}>
-              {applying ? '正在恢复…' : completed === null ? actionLabel : '已完成'}
+              {applying ? t.applying : completed === null ? actionLabel : t.done}
             </Button>
           </>
         )}
       >
         <div className="dcl-rewind-body">
-          {loading && <p className="dcl-rewind-status">正在检查可以恢复的项目文件…</p>}
-          {preview?.status === 'pending' && <p className="dcl-rewind-status">这条消息发送前的文件还在保存，请稍后再试。</p>}
-          {preview?.status === 'missing' && <p className="dcl-rewind-error">没有保存这条消息发送前的文件。可能是当时还没启用回退功能、记录已超过保留期限，或已关闭自动检查点。仍可只回溯消息。</p>}
+          {loading && <p className="dcl-rewind-status">{t.checkingFiles}</p>}
+          {preview?.status === 'pending' && <p className="dcl-rewind-status">{t.previewPending}</p>}
+          {preview?.status === 'missing' && <p className="dcl-rewind-error">{t.previewMissing}</p>}
           {preview?.status === 'skipped' && <p className="dcl-rewind-status">{explainCheckpointSkip(preview.reason)}</p>}
           {preview?.status === 'failed' && <p className="dcl-rewind-error">{explainCheckpointFailure(preview.error)}</p>}
           {preview !== null && (
             <div className="dcl-rewind-options">
               <label className="dcl-rewind-option" data-selected={mode === 'both'} data-disabled={applying || !hasFileChanges}>
                 <input type="radio" name={radioName} checked={mode === 'both'} disabled={applying || !hasFileChanges} onChange={() => { chooseMode('both') }} />
-                <span className="dcl-rewind-option-content"><strong>恢复文件并从这里继续</strong><span className="dcl-rewind-option-description">创建一个从这里开始的新会话（当前对话会保留）</span></span>
+                <span className="dcl-rewind-option-content"><strong>{t.modeBothTitle}</strong><span className="dcl-rewind-option-description">{t.modeBothDescription}</span></span>
               </label>
               <label className="dcl-rewind-option" data-selected={mode === 'code'} data-disabled={applying || !hasFileChanges}>
                 <input type="radio" name={radioName} checked={mode === 'code'} disabled={applying || !hasFileChanges} onChange={() => { chooseMode('code') }} />
-                <span className="dcl-rewind-option-content"><strong>只恢复文件</strong><span className="dcl-rewind-option-description">恢复这条消息发送前的文件，当前对话保持不变。</span></span>
+                <span className="dcl-rewind-option-content"><strong>{t.modeCodeTitle}</strong><span className="dcl-rewind-option-description">{t.modeCodeDescription}</span></span>
               </label>
               <label className="dcl-rewind-option" data-selected={mode === 'messages'} data-disabled={applying}>
                 <input type="radio" name={radioName} checked={mode === 'messages'} disabled={applying} onChange={() => { chooseMode('messages') }} />
-                <span className="dcl-rewind-option-content"><strong>只回溯消息（不动文件）</strong><span className="dcl-rewind-option-description">创建一个从这里开始的新会话，项目文件保持当前状态。</span></span>
+                <span className="dcl-rewind-option-content"><strong>{t.modeMessagesTitle}</strong><span className="dcl-rewind-option-description">{t.modeMessagesDescription}</span></span>
               </label>
             </div>
           )}
@@ -635,36 +1202,34 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
               {captureNotice !== null && <p className="dcl-rewind-warning">{captureNotice}</p>}
               <div className="dcl-rewind-summary">
                 {mode === 'messages'
-                  ? <strong>项目文件保持不变</strong>
-                  : <strong>将恢复 {String(ready.totalChanges)} 个文件</strong>}
-                <span>{mode === 'both' ? '恢复后在新对话里继续' : mode === 'code' ? '当前对话保持不变' : '仅创建从这里继续的新对话'}</span>
+                  ? <strong>{t.filesUnchanged}</strong>
+                  : <strong>{t.filesToRestore(ready.totalChanges)}</strong>}
+                <span>{mode === 'both' ? t.summaryBoth : mode === 'code' ? t.summaryCode : t.summaryMessages}</span>
               </div>
               {sharedBlocked && (
-                <p className="dcl-rewind-error">这个项目目录还有别的对话正在运行。恢复文件会影响到它们，因此本次操作已被阻止。请等那些对话结束或停止后，再重新检查。</p>
+                <p className="dcl-rewind-error">{t.sharedBlocked}</p>
               )}
               {ready.headChanged && !ready.operationChanged && (
-                <p className="dcl-rewind-warning">{branchChanged
-                  ? '当前所在的 Git 分支和发送这条消息时不同。恢复不会切换分支，只会把当时的文件内容恢复到当前分支。'
-                  : '这条消息之后有了新的 Git 提交。恢复只会改文件，不会撤销提交；完成后这些文件会显示为未提交修改。'}</p>
+                <p className="dcl-rewind-warning">{branchChanged ? t.branchChanged : t.headAdvanced}</p>
               )}
-              {driftBlocked && <p className="dcl-rewind-warning">Git 正在进行合并、变基或类似操作。请先完成或取消这次 Git 操作，再重新检查。</p>}
-              {planMissing && <p className="dcl-rewind-error">恢复信息已经失效，请重新检查。</p>}
-              {stale && <p className="dcl-rewind-error">项目文件在检查后又发生了变化。为避免覆盖新修改，这次恢复已失效，请重新检查。</p>}
-              {ready.totalChanges === 0 && <p className="dcl-rewind-status">项目文件已经是这条消息发送前的状态，无需恢复文件。可选择「只回溯消息」重新开始这段对话。</p>}
+              {driftBlocked && <p className="dcl-rewind-warning">{t.driftBlocked}</p>}
+              {planMissing && <p className="dcl-rewind-error">{t.planMissing}</p>}
+              {stale && <p className="dcl-rewind-error">{t.stale}</p>}
+              {ready.totalChanges === 0 && <p className="dcl-rewind-status">{t.nothingToRestore}</p>}
               {ready.changes.length > 0 && (
                 <div className="dcl-rewind-files">
                   {ready.changes.map(change => <div className="dcl-rewind-file" key={change.path}><code>{change.path}</code><span className="dcl-rewind-kind">{fileRecoveryLabel(change.kind)}</span></div>)}
                 </div>
               )}
               {ready.truncated && (
-                <div className="dcl-rewind-file-actions"><Button variant="outline" size="sm" onClick={() => { void loadAllChanges() }} disabled={loadingDetails}>{loadingDetails ? '正在读取全部文件…' : `查看全部 ${String(ready.totalChanges)} 个文件`}</Button></div>
+                <div className="dcl-rewind-file-actions"><Button variant="outline" size="sm" onClick={() => { void loadAllChanges() }} disabled={loadingDetails}>{loadingDetails ? t.loadingAllFiles : t.viewAllFiles(ready.totalChanges)}</Button></div>
               )}
             </>
           )}
           {completed !== null && <p className="dcl-rewind-status">{completed}</p>}
           {error !== null && <p className="dcl-rewind-error">{error}</p>}
-          {error !== null && <p className="dcl-rewind-backup">恢复前会自动备份当前文件；若恢复失败会自动还原，项目不会停留在只恢复了一部分的状态。</p>}
-          {!loading && (preview?.status !== 'ready' || stale || planMissing || sharedBlocked || driftBlocked) && <Button className="dcl-rewind-retry" variant="outline" size="sm" onClick={() => { void load() }}>重新检查</Button>}
+          {error !== null && <p className="dcl-rewind-backup">{t.backupNote}</p>}
+          {!loading && (preview?.status !== 'ready' || stale || planMissing || sharedBlocked || driftBlocked) && <Button className="dcl-rewind-retry" variant="outline" size="sm" onClick={() => { void load() }}>{t.recheck}</Button>}
         </div>
       </Modal>
     </div>
@@ -688,38 +1253,21 @@ type NumberSettingsField = keyof Pick<TurnRewindSettingsValue,
   'maxRestorePoints' | 'maxTurnCheckpointsPerSession' | 'maxFiles' | 'maxFileBytes' | 'maxSnapshotBytes'
   | 'planTtlMs' | 'staleLockMs' | 'turnCheckpointTimeoutMs' | 'turnCheckpointMaxNewBytes'>
 
-const NUMBER_FIELDS: readonly { readonly key: NumberSettingsField; readonly label: string; readonly description: string }[] = [
-  { key: 'maxRestorePoints', label: '用户/救援恢复点上限', description: '每个工作区保留的最大手动与救援恢复点数量' },
-  { key: 'maxTurnCheckpointsPerSession', label: '轮次检查点上限', description: '每个会话保留的最大自动轮次检查点数量（最旧的先清理）' },
-  { key: 'maxFiles', label: '单恢复点文件数上限', description: '一个恢复点最多纳入的文件数量' },
-  { key: 'maxFileBytes', label: '单文件大小上限', description: '读取单个普通文件的最大字节数' },
-  { key: 'maxSnapshotBytes', label: '快照总量上限', description: '单个恢复点读取的最大字节总量' },
-  { key: 'planTtlMs', label: '恢复计划有效期（毫秒）', description: '回溯计划从创建到失效的时间' },
-  { key: 'staleLockMs', label: '锁回收时长（毫秒）', description: '锁属主消失多久后允许回收该锁' },
-  { key: 'turnCheckpointTimeoutMs', label: '检查点超时（毫秒）', description: '单次自动检查点最多阻塞消息发送的时间，超时记录跳过' },
-  { key: 'turnCheckpointMaxNewBytes', label: '检查点读取上限', description: '单次 Git 原生检查点最多读取的未缓存字节数' },
+/** Numeric settings fields, in the order the card renders them. */
+const NUMBER_FIELDS: readonly NumberSettingsField[] = [
+  'maxRestorePoints', 'maxTurnCheckpointsPerSession', 'maxFiles', 'maxFileBytes', 'maxSnapshotBytes',
+  'planTtlMs', 'staleLockMs', 'turnCheckpointTimeoutMs', 'turnCheckpointMaxNewBytes',
 ]
 
-const CHECKPOINT_MODE_LABELS: Readonly<Record<TurnRewindSettingsValue['turnCheckpointMode'], string>> = {
-  off: '关闭（不创建文件检查点）',
-  auto: '自动（推荐）',
-  'git-native': 'Git 原生（大仓库）',
-  legacy: '完整快照（兼容模式）',
-}
+/** Checkpoint modes, in the order the select offers them. */
+const CHECKPOINT_MODES: readonly TurnRewindSettingsValue['turnCheckpointMode'][] = ['off', 'auto', 'git-native', 'legacy']
 
-const TRUST_LABELS: Readonly<Record<TurnRewindSettingsValue['turnCheckpointTrust'], string>> = {
-  fast: '快速',
-  strict: '严格',
-}
-
-const POINT_KIND_LABELS: Readonly<Record<string, string>> = {
-  user: '手动',
-  rescue: '救援',
-  turn: '轮次',
-}
+/** Checkpoint trust policies, in the order the select offers them. */
+const TRUST_MODES: readonly TurnRewindSettingsValue['turnCheckpointTrust'][] = ['fast', 'strict']
 
 /** Settings card for the `turn-rewind` namespace: runtime options plus checkpoint management. */
 export function TurnRewindSettingsCard({ scope }: TurnRewindSettingsCardProps): ReactNode {
+  const t = useText()
   const snapshot = useSyncExternalStore(
     useCallback((notify: () => void) => scope?.subscribe(notify) ?? (() => {}), [scope]),
     useCallback(() => scope?.getSnapshot() ?? EMPTY_SETTINGS_SNAPSHOT, [scope]),
@@ -773,7 +1321,7 @@ export function TurnRewindSettingsCard({ scope }: TurnRewindSettingsCardProps): 
     }
     const parsed = Number.parseInt(draft, 10)
     if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-      setFormError(`${field} 必须是正整数。`)
+      setFormError(t.positiveInteger(field))
       return
     }
     if (parsed === value?.[field]) return
@@ -820,8 +1368,8 @@ export function TurnRewindSettingsCard({ scope }: TurnRewindSettingsCardProps): 
         onClick={() => { setCardOpen(value => !value) }}
       >
         <span className="dcl-trs-card-heading">
-          <strong>Turn Rewind 回退设置</strong>
-          <span className="dcl-trs-card-description">自动文件检查点、信任策略与检查点保留上限；回退按钮在各条用户消息上</span>
+          <strong>{t.settingsCardTitle}</strong>
+          <span className="dcl-trs-card-description">{t.settingsCardDescription}</span>
         </span>
         <svg className="dcl-trs-card-chevron" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <path d="M4.5 6.5 8 10l3.5-3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
@@ -831,70 +1379,70 @@ export function TurnRewindSettingsCard({ scope }: TurnRewindSettingsCardProps): 
       <div className="dcl-trs-card-body">
       <section className="dcl-trs-section">
         <div className="dcl-trs-section-title">
-          <strong>自动文件检查点</strong>
+          <strong>{t.autoCheckpointSection}</strong>
         </div>
-        {snapshot.status === 'loading' && <p className="dcl-trs-status">正在加载设置…</p>}
-        {snapshot.status === 'unavailable' && <p className="dcl-trs-status">当前部署未提供设置服务，以下选项不可用。</p>}
-        {snapshot.status === 'ready' && !snapshot.writable && <p className="dcl-trs-status">设置为只读（当前浏览器进程内保存），修改不可用。</p>}
+        {snapshot.status === 'loading' && <p className="dcl-trs-status">{t.settingsLoading}</p>}
+        {snapshot.status === 'unavailable' && <p className="dcl-trs-status">{t.settingsUnavailable}</p>}
+        {snapshot.status === 'ready' && !snapshot.writable && <p className="dcl-trs-status">{t.settingsReadOnly}</p>}
         {value !== undefined && (
           <>
             <div className="dcl-trs-field">
-              <span className="dcl-trs-field-label"><strong>自动文件检查点</strong>
-                <span className="dcl-trs-field-desc">关闭后不再为每条消息保存文件检查点；回退弹窗仍可只回溯消息</span></span>
+              <span className="dcl-trs-field-label"><strong>{t.autoCheckpointLabel}</strong>
+                <span className="dcl-trs-field-desc">{t.autoCheckpointDescription}</span></span>
               <span className="dcl-trs-field-control">
                 <select
                   value={value.turnCheckpointMode}
                   disabled={!writable || busy !== null}
                   onChange={(event) => { commitEnum('turnCheckpointMode', event.target.value) }}
                 >
-                  {(Object.keys(CHECKPOINT_MODE_LABELS) as TurnRewindSettingsValue['turnCheckpointMode'][]).map((option) => (
-                    <option key={option} value={option}>{CHECKPOINT_MODE_LABELS[option]}</option>
+                  {CHECKPOINT_MODES.map((option) => (
+                    <option key={option} value={option}>{t.checkpointModes[option]}</option>
                   ))}
                 </select>
-                {userLayer.turnCheckpointMode !== undefined && <span className="dcl-trs-override">已覆盖</span>}
+                {userLayer.turnCheckpointMode !== undefined && <span className="dcl-trs-override">{t.overridden}</span>}
                 {userLayer.turnCheckpointMode !== undefined && (
                   <Button variant="ghost" size="sm" disabled={!writable || busy !== null}
-                    onClick={() => { setFormError(null); void scope?.unset('turnCheckpointMode').catch((caught: unknown) => { setFormError(messageOf(caught)) }) }}>恢复默认</Button>
+                    onClick={() => { setFormError(null); void scope?.unset('turnCheckpointMode').catch((caught: unknown) => { setFormError(messageOf(caught)) }) }}>{t.resetToDefault}</Button>
                 )}
               </span>
             </div>
             <div className="dcl-trs-field">
-              <span className="dcl-trs-field-label"><strong>检查点信任策略</strong>
-                <span className="dcl-trs-field-desc">快速信任 Git/stat 元数据；严格会逐一重读文件内容</span></span>
+              <span className="dcl-trs-field-label"><strong>{t.trustLabel}</strong>
+                <span className="dcl-trs-field-desc">{t.trustDescription}</span></span>
               <span className="dcl-trs-field-control">
                 <select
                   value={value.turnCheckpointTrust}
                   disabled={!writable || busy !== null}
                   onChange={(event) => { commitEnum('turnCheckpointTrust', event.target.value) }}
                 >
-                  {(Object.keys(TRUST_LABELS) as TurnRewindSettingsValue['turnCheckpointTrust'][]).map((option) => (
-                    <option key={option} value={option}>{TRUST_LABELS[option]}</option>
+                  {TRUST_MODES.map((option) => (
+                    <option key={option} value={option}>{t.trustOptions[option]}</option>
                   ))}
                 </select>
-                {userLayer.turnCheckpointTrust !== undefined && <span className="dcl-trs-override">已覆盖</span>}
+                {userLayer.turnCheckpointTrust !== undefined && <span className="dcl-trs-override">{t.overridden}</span>}
                 {userLayer.turnCheckpointTrust !== undefined && (
                   <Button variant="ghost" size="sm" disabled={!writable || busy !== null}
-                    onClick={() => { setFormError(null); void scope?.unset('turnCheckpointTrust').catch((caught: unknown) => { setFormError(messageOf(caught)) }) }}>恢复默认</Button>
+                    onClick={() => { setFormError(null); void scope?.unset('turnCheckpointTrust').catch((caught: unknown) => { setFormError(messageOf(caught)) }) }}>{t.resetToDefault}</Button>
                 )}
               </span>
             </div>
             {NUMBER_FIELDS.map((field) => (
-              <div className="dcl-trs-field" key={field.key}>
-                <span className="dcl-trs-field-label"><strong>{field.label}</strong>
-                  <span className="dcl-trs-field-desc">{field.description}</span></span>
+              <div className="dcl-trs-field" key={field}>
+                <span className="dcl-trs-field-label"><strong>{t.numberFields[field].label}</strong>
+                  <span className="dcl-trs-field-desc">{t.numberFields[field].description}</span></span>
                 <span className="dcl-trs-field-control">
                   <input
                     type="number" min={1} step={1}
-                    value={drafts[field.key] ?? String(value[field.key])}
+                    value={drafts[field] ?? String(value[field])}
                     disabled={!writable || busy !== null}
-                    onChange={(event) => { setDrafts((current) => ({ ...current, [field.key]: event.target.value })) }}
-                    onBlur={() => { commitNumber(field.key) }}
-                    onKeyDown={(event) => { if (event.key === 'Enter') commitNumber(field.key) }}
+                    onChange={(event) => { setDrafts((current) => ({ ...current, [field]: event.target.value })) }}
+                    onBlur={() => { commitNumber(field) }}
+                    onKeyDown={(event) => { if (event.key === 'Enter') commitNumber(field) }}
                   />
-                  {userLayer[field.key] !== undefined && <span className="dcl-trs-override">已覆盖</span>}
-                  {userLayer[field.key] !== undefined && (
+                  {userLayer[field] !== undefined && <span className="dcl-trs-override">{t.overridden}</span>}
+                  {userLayer[field] !== undefined && (
                     <Button variant="ghost" size="sm" disabled={!writable || busy !== null}
-                      onClick={() => { setFormError(null); void scope?.unset(field.key).catch((caught: unknown) => { setFormError(messageOf(caught)) }) }}>恢复默认</Button>
+                      onClick={() => { setFormError(null); void scope?.unset(field).catch((caught: unknown) => { setFormError(messageOf(caught)) }) }}>{t.resetToDefault}</Button>
                   )}
                 </span>
               </div>
@@ -902,33 +1450,37 @@ export function TurnRewindSettingsCard({ scope }: TurnRewindSettingsCardProps): 
           </>
         )}
         {formError !== null && <p className="dcl-trs-error">{formError}</p>}
-        <p className="dcl-trs-storage">存储目录（在 cordis.patch.yml 中配置，不可在线修改）：{manage?.storageDir ?? '…'}</p>
+        <p className="dcl-trs-storage">{t.storageDir(manage?.storageDir ?? '…')}</p>
       </section>
       <section className="dcl-trs-section">
         <div className="dcl-trs-section-title">
-          <strong>检查点管理</strong>
+          <strong>{t.manageSection}</strong>
           <span className="dcl-trs-section-title-actions">
             <Button variant="outline" size="sm" onClick={() => { void refreshManage() }} disabled={manageLoading}>
-              {manageLoading ? '正在刷新…' : '刷新'}
+              {manageLoading ? t.refreshing : t.refresh}
             </Button>
             {manage !== null && manage.workspaces.length > 0 && (
               confirmClearAll
                 ? (
                   <>
-                    <Button variant="outline" size="sm" onClick={() => { setConfirmClearAll(false) }} disabled={busy !== null}>取消</Button>
+                    <Button variant="outline" size="sm" onClick={() => { setConfirmClearAll(false) }} disabled={busy !== null}>{t.cancel}</Button>
                     <Button variant="primary" size="sm" onClick={() => { void runManageAction({ action: 'clear-all' }, 'clear-all') }} disabled={busy !== null}>
-                      {busy === 'clear-all' ? '正在清理…' : '确认清空全部'}
+                      {busy === 'clear-all' ? t.clearing : t.confirmClearAll}
                     </Button>
                   </>
                 )
-                : <Button variant="outline" size="sm" onClick={() => { setConfirmClearAll(true) }} disabled={busy !== null}>一键清空全部</Button>
+                : <Button variant="outline" size="sm" onClick={() => { setConfirmClearAll(true) }} disabled={busy !== null}>{t.clearAll}</Button>
             )}
           </span>
         </div>
         <p className="dcl-trs-manage-total">
           {manage === null
-            ? '正在读取检查点占用…'
-            : `共 ${String(manage.workspaces.length)} 个工作区，${String(manage.totalBytes >= 0 ? manage.workspaces.reduce((total, workspace) => total + workspace.restorePoints.length, 0) : 0)} 个检查点，约 ${formatBytes(manage.totalBytes)}（Git 原生检查点的实际磁盘占用以 Git 回收为准）。`}
+            ? t.manageLoading
+            : t.manageTotal(
+                manage.workspaces.length,
+                manage.totalBytes >= 0 ? manage.workspaces.reduce((total, workspace) => total + workspace.restorePoints.length, 0) : 0,
+                formatBytes(manage.totalBytes),
+              )}
         </p>
         {manageNotice !== null && <p className="dcl-trs-notice" data-warning={manageNotice.warning}>{manageNotice.message}</p>}
         {manageError !== null && <p className="dcl-trs-error">{manageError}</p>}
@@ -936,15 +1488,15 @@ export function TurnRewindSettingsCard({ scope }: TurnRewindSettingsCardProps): 
           <div className="dcl-trs-workspace" key={workspace.workspace}>
             <div className="dcl-trs-workspace-head">
               <span className="dcl-trs-workspace-path" title={workspace.workspace}>{workspace.workspace}</span>
-              <span className="dcl-trs-workspace-meta">{String(workspace.restorePoints.length)} 个检查点 · {formatBytes(workspace.totalBytes)}</span>
-              {workspace.recoveryCount > 0 && <span className="dcl-trs-badge">{String(workspace.recoveryCount)} 个恢复待处理</span>}
+              <span className="dcl-trs-workspace-meta">{t.workspacePoints(workspace.restorePoints.length)} · {formatBytes(workspace.totalBytes)}</span>
+              {workspace.recoveryCount > 0 && <span className="dcl-trs-badge">{t.pendingRecoveries(workspace.recoveryCount)}</span>}
               <Button variant="ghost" size="sm" onClick={() => { toggleWorkspace(workspace.workspace) }}>
-                {collapsed.has(workspace.workspace) ? '展开' : '收起'}
+                {collapsed.has(workspace.workspace) ? t.expand : t.collapse}
               </Button>
               <Button variant="outline" size="sm"
                 onClick={() => { void runManageAction({ action: 'clear-workspace', workspace: workspace.workspace }, `clear:${workspace.workspace}`) }}
                 disabled={busy !== null || workspace.restorePoints.length === 0}>
-                {busy === `clear:${workspace.workspace}` ? '正在清理…' : '清空此项目'}
+                {busy === `clear:${workspace.workspace}` ? t.clearing : t.clearWorkspace}
               </Button>
             </div>
             {!collapsed.has(workspace.workspace) && workspace.restorePoints.length > 0 && (
@@ -952,14 +1504,14 @@ export function TurnRewindSettingsCard({ scope }: TurnRewindSettingsCardProps): 
                 {workspace.restorePoints.map((point) => (
                   <li className="dcl-trs-point" key={point.id}>
                     <time>{formatTime(point.createdAt)}</time>
-                    <span className="dcl-trs-point-kind">{POINT_KIND_LABELS[point.kind] ?? point.kind}</span>
+                    <span className="dcl-trs-point-kind">{t.pointKinds[point.kind] ?? point.kind}</span>
                     <span className="dcl-trs-point-size">{formatBytes(point.totalBytes)}</span>
-                    <span className="dcl-trs-point-files">{String(point.fileCount)} 个文件</span>
+                    <span className="dcl-trs-point-files">{t.fileCount(point.fileCount)}</span>
                     {point.sessionId !== undefined && <code>{point.sessionId}</code>}
                     <Button variant="ghost" size="sm"
                       onClick={() => { void runManageAction({ action: 'delete', workspace: workspace.workspace, restorePointId: point.id }, `delete:${point.id}`) }}
                       disabled={busy !== null}>
-                      {busy === `delete:${point.id}` ? '正在删除…' : '删除'}
+                      {busy === `delete:${point.id}` ? t.deleting : t.remove}
                     </Button>
                   </li>
                 ))}
@@ -967,7 +1519,7 @@ export function TurnRewindSettingsCard({ scope }: TurnRewindSettingsCardProps): 
             )}
           </div>
         ))}
-        {manage !== null && manage.workspaces.length === 0 && <p className="dcl-trs-status">还没有任何已保存的检查点。</p>}
+        {manage !== null && manage.workspaces.length === 0 && <p className="dcl-trs-status">{t.noCheckpoints}</p>}
       </section>
       </div>
       )}
@@ -978,14 +1530,14 @@ export function TurnRewindSettingsCard({ scope }: TurnRewindSettingsCardProps): 
 function decodeManageOverview(value: unknown): ManageOverview {
   const record = recordOf(value)
   const workspacesValue = record.workspaces
-  if (!Array.isArray(workspacesValue)) throw new Error('管理数据缺少 workspaces')
+  if (!Array.isArray(workspacesValue)) throw new Error(uiText().manageMissingWorkspaces)
   return {
     storageDir: requiredString(record.storageDir, 'storageDir'),
     totalBytes: requiredInteger(record.totalBytes, 'totalBytes'),
     workspaces: workspacesValue.map((entry) => {
       const workspace = recordOf(entry)
       const pointsValue = workspace.restorePoints
-      if (!Array.isArray(pointsValue)) throw new Error('管理数据缺少 restorePoints')
+      if (!Array.isArray(pointsValue)) throw new Error(uiText().manageMissingRestorePoints)
       return {
         workspace: requiredString(workspace.workspace, 'workspace'),
         totalBytes: requiredInteger(workspace.totalBytes, 'totalBytes'),
@@ -1012,7 +1564,7 @@ function decodeManageActionNotice(value: unknown): ManageActionNotice {
   const record = recordOf(value)
   const action = requiredString(record.action, 'action')
   if (action === 'clear-all') {
-    if (!Array.isArray(record.reports)) throw new Error('清理结果缺少 reports')
+    if (!Array.isArray(record.reports)) throw new Error(uiText().clearMissingReports)
     const totals = record.reports.reduce((current, entry) => {
       const report = recordOf(entry)
       return {
@@ -1024,14 +1576,14 @@ function decodeManageActionNotice(value: unknown): ManageActionNotice {
     const warning = record.status === 'partial' || totals.retained > 0 || failures > 0
     return {
       warning,
-      message: `已删除 ${String(totals.deleted)} 个检查点${totals.retained > 0 ? `，${String(totals.retained)} 个受保护检查点未删除` : ''}${failures > 0 ? `，${String(failures)} 个工作区清理失败` : ''}。`,
+      message: uiText().clearedAll(totals.deleted, totals.retained, failures),
     }
   }
   const deleted = requiredInteger(record.deletedRestorePoints, 'deletedRestorePoints')
   const retained = requiredInteger(record.retainedRestorePoints, 'retainedRestorePoints')
   return {
     warning: retained > 0,
-    message: `已删除 ${String(deleted)} 个检查点${retained > 0 ? `，${String(retained)} 个受保护检查点未删除` : ''}。`,
+    message: uiText().cleared(deleted, retained),
   }
 }
 
@@ -1059,16 +1611,16 @@ function decodePreview(value: unknown): Preview {
   if (status === 'pending' || status === 'missing') return { status }
   if (status === 'skipped') return { status, reason: requiredString(record.reason, 'reason') }
   if (status === 'failed') return { status, error: requiredString(record.error, 'error') }
-  if (status !== 'ready') throw new Error(`未知回退状态：${status}`)
+  if (status !== 'ready') throw new Error(uiText().unknownStatus(status))
   const changesValue = record.changes
-  if (!Array.isArray(changesValue)) throw new Error('回退预览缺少 changes')
+  if (!Array.isArray(changesValue)) throw new Error(uiText().previewMissingChanges)
   const changes = changesValue.map((entry) => {
     const change = recordOf(entry)
     return { path: requiredString(change.path, 'path'), kind: requiredString(change.kind, 'kind') as ChangeKind }
   })
   const activeSessionIdsValue = record.activeSessionIds
   if (!Array.isArray(activeSessionIdsValue) || !activeSessionIdsValue.every(value => typeof value === 'string')) {
-    throw new Error('回退预览缺少 activeSessionIds')
+    throw new Error(uiText().previewMissingActiveSessionIds)
   }
   return {
     status,
@@ -1186,7 +1738,7 @@ function samePortalTargets(
 }
 
 async function openSessionWithDraft(ctx: ClientContextLike, sessionId: string, promptText: string): Promise<void> {
-  let lastError: unknown = new Error('新对话还没有准备好')
+  let lastError: unknown = new Error(uiText().sessionNotReady)
   for (let attempt = 0; attempt < 20; attempt += 1) {
     try {
       ctx.sessions.open(sessionId)
@@ -1195,7 +1747,7 @@ async function openSessionWithDraft(ctx: ClientContextLike, sessionId: string, p
         ctx.conversation.input.for(scope).setDraft(promptText)
         return
       }
-      lastError = new Error('新对话还没有准备好')
+      lastError = new Error(uiText().sessionNotReady)
     } catch (error) {
       lastError = error
     }
@@ -1221,7 +1773,7 @@ export async function responseJson(response: Response): Promise<unknown> {
   } catch {
     throw new RewindRequestError(
       response.ok ? 'REWIND_INVALID_RESPONSE' : 'REWIND_ENDPOINT_UNAVAILABLE',
-      `回退服务返回了无法解析的内容（HTTP ${String(response.status)}）。`,
+      uiText().unparsableResponse(String(response.status)),
     )
   }
   const record = value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -1232,11 +1784,11 @@ export async function responseJson(response: Response): Promise<unknown> {
       typeof record?.code === 'string'
         ? record.code
         : response.status === 404 ? 'REWIND_ENDPOINT_UNAVAILABLE' : 'REWIND_FAILED',
-      typeof record?.error === 'string' ? record.error : `请求失败：${String(response.status)}`,
+      typeof record?.error === 'string' ? record.error : uiText().requestFailed(String(response.status)),
     )
   }
   if (value === undefined) {
-    throw new RewindRequestError('REWIND_INVALID_RESPONSE', '回退服务返回了空响应。')
+    throw new RewindRequestError('REWIND_INVALID_RESPONSE', uiText().emptyResponse)
   }
   return value
 }
@@ -1248,22 +1800,22 @@ class RewindRequestError extends Error {
 }
 
 function recordOf(value: unknown): Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('服务器返回了无效对象')
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(uiText().invalidObject)
   return value as Record<string, unknown>
 }
 
 function requiredString(value: unknown, name: string): string {
-  if (typeof value !== 'string' || value === '') throw new Error(`${name} 无效`)
+  if (typeof value !== 'string' || value === '') throw new Error(uiText().invalidField(name))
   return value
 }
 
 function requiredInteger(value: unknown, name: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error(`${name} 无效`)
+  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error(uiText().invalidField(name))
   return value as number
 }
 
 function requiredBoolean(value: unknown, name: string): boolean {
-  if (typeof value !== 'boolean') throw new Error(`${name} 无效`)
+  if (typeof value !== 'boolean') throw new Error(uiText().invalidField(name))
   return value
 }
 
@@ -1275,13 +1827,7 @@ function optionalRecordString(record: Record<string, unknown>, name: string): Re
 
 /** Describe the user-visible result of restoring one changed file. */
 export function fileRecoveryLabel(kind: ChangeKind): string {
-  switch (kind) {
-    case 'added': return '移除后来新增的文件'
-    case 'deleted': return '找回文件'
-    case 'modified': return '恢复之前的版本'
-    case 'mode-changed': return '恢复文件权限'
-    case 'type-changed': return '恢复之前的文件类型'
-  }
+  return uiText().fileKinds[kind]
 }
 
 function RewindIcon({ size }: { readonly size: number }): ReactNode {
@@ -1294,25 +1840,7 @@ function RewindIcon({ size }: { readonly size: number }): ReactNode {
 
 function friendlyError(error: unknown): string {
   if (!(error instanceof RewindRequestError)) return messageOf(error)
-  switch (error.code) {
-    case 'REWIND_ENDPOINT_UNAVAILABLE': return '回退服务没有响应。请确认 @anionex/dsh-turn-rewind 已挂载到当前 DSH，并重启 DSH 后重试。'
-    case 'REWIND_INVALID_RESPONSE': return '回退服务返回了无法解析的内容。请重启 DSH 后重试。'
-    case 'PLAN_STALE': return '项目文件在检查后又发生了变化。为避免覆盖新修改，请重新检查后再恢复。'
-    case 'PLAN_STALE_WORKSPACE': return '项目文件在检查后又发生了变化。为避免覆盖新修改，请重新检查后再恢复。'
-    case 'PLAN_STALE_REPOSITORY': return 'Git 状态在检查后又发生了变化，恢复已失效。请重新检查后再试。'
-    case 'WORKSPACE_IN_USE': return '这个项目目录还有别的对话正在运行。请等那些对话结束或停止后，再重新检查。'
-    case 'WORKSPACE_LOCKED': return '另一个恢复操作正在处理这个项目目录。请等待它完成后重新检查。'
-    case 'WORKSPACE_CHANGED': return '这个项目目录已经不在原来的位置，旧的回退点无法再使用。'
-    case 'WORKSPACE_MODE_CHANGED': return '这个项目目录的工作区类型变了（例如从普通目录变成了 Git 仓库）。旧的回退点不再适用，请重新发送一条消息生成新的回退点。'
-    case 'HEAD_CHANGED': return '项目的提交或分支已发生变化。为避免覆盖新改动，请重新检查后再恢复。'
-    case 'REPOSITORY_CHANGED': return '这个项目目录已不属于原来的 Git 工作区，无法恢复。'
-    case 'GIT_OPERATION_CHANGED': return 'Git 正在执行其他操作。请先完成或取消该操作，再重新检查。'
-    case 'RESTORE_POINT_NOT_FOUND': return '没有找到对应的文件状态，可能已被清理。'
-    case 'NO_CHANGES': return '项目文件已经是这条消息发送前的状态，无需恢复文件。可选择「只回溯消息」重新开始这段对话。'
-    case 'RESTORE_FAILED_ROLLED_BACK': return '恢复未能完成，项目文件已自动还原到操作前的状态。'
-    case 'CONVERSATION_REWIND_FAILED': return '文件已恢复，但无法创建新对话；项目文件已自动还原。'
-    default: return error.message
-  }
+  return uiText().errors[error.code] ?? error.message
 }
 
 /**
@@ -1326,15 +1854,9 @@ function friendlyError(error: unknown): string {
 export function describeCaptureNotice(ready: ReadyPreview | null): string | null {
   if (ready === null) return null
   const example = (ready.skipped ?? [])[0]?.path
-  if (ready.captureTruncated === 'snapshot-limit') {
-    return '本轮要保存的文件总量超过上限，剩下的文件没有纳入检查点。恢复时不会改动它们。'
-  }
-  if (ready.captureTruncated === 'file-limit') {
-    return '本轮文件数量超过上限，多出来的文件没有纳入检查点。恢复时不会改动它们。'
-  }
-  if (ready.skippedCount > 0) {
-    return `有 ${String(ready.skippedCount)} 个文件因为超过单文件大小上限或类型不受支持，没有纳入检查点${example === undefined ? '' : `（例如 ${example}）`}。恢复时不会改动它们。`
-  }
+  if (ready.captureTruncated === 'snapshot-limit') return uiText().captureSnapshotLimit
+  if (ready.captureTruncated === 'file-limit') return uiText().captureFileLimit
+  if (ready.skippedCount > 0) return uiText().captureSkipped(ready.skippedCount, example)
   return null
 }
 
@@ -1349,16 +1871,11 @@ export function describeCaptureNotice(ready: ReadyPreview | null): string | null
  */
 export function explainCheckpointSkip(reason: string): string {
   const code = /^\[([A-Z_]+)\]/.exec(reason)?.[1]
-  if (code === 'TURN_CHECKPOINT_TIMEOUT') {
-    return '这个项目目录太大，在检查点时间上限内没保存完文件快照，所以本轮没有回退点（消息本身没有受影响）。可以在插件设置里调大「检查点时间上限」，或在目录根用 .dsh-rewindignore 排除大目录（例如 node_modules、构建产物、数据集）。仍可只回溯消息。'
-  }
-  if (code === 'TURN_CHECKPOINT_DISABLED') {
-    return '自动文件检查点已在设置里关闭，本轮没有回退点。仍可只回溯消息。'
-  }
-  if (code === 'TURN_CHECKPOINT_NEW_CONTENT_LIMIT') {
-    return '这一轮新增的内容超过检查点预算，没有保存文件快照。仍可只回溯消息。'
-  }
-  return `本轮没有保存文件检查点：${reason}仍可只回溯消息。`
+  const t = uiText()
+  if (code === 'TURN_CHECKPOINT_TIMEOUT') return t.skipTimeout
+  if (code === 'TURN_CHECKPOINT_DISABLED') return t.skipDisabled
+  if (code === 'TURN_CHECKPOINT_NEW_CONTENT_LIMIT') return t.skipNewContentLimit
+  return t.skipOther(reason)
 }
 
 /**
@@ -1372,23 +1889,22 @@ export function explainCheckpointSkip(reason: string): string {
  */
 export function explainCheckpointFailure(message: string): string {
   const code = /^\[([A-Z_]+)\]/.exec(message)?.[1]
+  const t = uiText()
   switch (code) {
     case 'GIT_COMMAND_FAILED':
-      return /not a git repository/i.test(message)
-        ? '这个项目目录不是 Git 仓库，回退功能无法保存文件检查点。仍可只回溯消息。'
-        : `无法读取这个项目目录的 Git 状态：${message}仍可只回溯消息。`
+      return /not a git repository/i.test(message) ? t.failureNotGitRepository : t.failureGitStatus(message)
     case 'FILE_TOO_LARGE':
     case 'SNAPSHOT_TOO_LARGE':
     case 'TOO_MANY_FILES':
-      return '本轮有文件超过检查点的大小或数量上限，没有保存文件检查点。仍可只回溯消息。'
+      return t.failureSizeOrCount
     case 'UNSUPPORTED_FILE_TYPE':
-      return '项目目录里有无法保存的特殊文件（如 socket、设备文件、FIFO），没有保存文件检查点。仍可只回溯消息。'
+      return t.failureUnsupportedType
     case 'IGNORE_FILE_INVALID':
-      return '项目目录里的 .dsh-rewindignore 内容无效，没有保存文件检查点。修正该文件后可重新发送消息。'
+      return t.failureIgnoreFileInvalid
     case 'INVALID_PATH':
-      return '项目目录里有无法安全保存的路径（例如嵌套的独立 Git 仓库），没有保存文件检查点。仍可只回溯消息。'
+      return t.failureInvalidPath
     default:
-      return `没能保存这条消息发送前的文件：${message}仍可只回溯消息。`
+      return t.failureOther(message)
   }
 }
 
