@@ -233,6 +233,14 @@ const styles = `
 .dcl-rewind-backup{box-sizing:border-box;margin:0;padding:10px 12px;border-radius:10px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
 .dcl-rewind-retry{align-self:flex-start}
 .dcl-trs-card{display:flex;flex-direction:column;gap:16px;width:100%;min-width:0}
+.dcl-trs-card-head{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:14px 0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer}
+.dcl-trs-card-heading{display:flex;flex-direction:column;gap:4px;min-width:0}
+.dcl-trs-card-heading strong{color:var(--dsw-alias-label-primary);font-size:14px}
+.dcl-trs-card-head:hover .dcl-trs-card-heading strong{color:var(--dsw-alias-state-business-primary)}
+.dcl-trs-card-description{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
+.dcl-trs-card-chevron{flex:none;color:var(--dsw-alias-label-tertiary);transition:transform .12s}
+.dcl-trs-card[data-open="true"] .dcl-trs-card-chevron{transform:rotate(180deg)}
+.dcl-trs-card-body{display:flex;flex-direction:column;gap:16px;width:100%;min-width:0}
 .dcl-trs-section{display:flex;flex-direction:column;gap:10px;min-width:0}
 .dcl-trs-section-title{display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0}
 .dcl-trs-section-title strong{color:var(--dsw-alias-label-primary);font-size:14px}
@@ -725,6 +733,9 @@ export function TurnRewindSettingsCard({ scope }: TurnRewindSettingsCardProps): 
   const [drafts, setDrafts] = useState<Partial<Record<NumberSettingsField, string>>>({})
   const [confirmClearAll, setConfirmClearAll] = useState(false)
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set())
+  // Official plugin cards collapse behind a disclosure row; this card keeps the
+  // same reading gesture so the settings page stays one row per plugin.
+  const [cardOpen, setCardOpen] = useState(false)
 
   const refreshManage = useCallback(async (): Promise<void> => {
     setManageLoading(true)
@@ -801,10 +812,26 @@ export function TurnRewindSettingsCard({ scope }: TurnRewindSettingsCardProps): 
   }
 
   return (
-    <div className="dcl-trs-card">
+    <div className="dcl-trs-card" data-open={cardOpen}>
+      <button
+        type="button"
+        className="dcl-trs-card-head"
+        aria-expanded={cardOpen}
+        onClick={() => { setCardOpen(value => !value) }}
+      >
+        <span className="dcl-trs-card-heading">
+          <strong>Turn Rewind 回退设置</strong>
+          <span className="dcl-trs-card-description">自动文件检查点、信任策略与检查点保留上限；回退按钮在各条用户消息上</span>
+        </span>
+        <svg className="dcl-trs-card-chevron" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M4.5 6.5 8 10l3.5-3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {cardOpen && (
+      <div className="dcl-trs-card-body">
       <section className="dcl-trs-section">
         <div className="dcl-trs-section-title">
-          <strong>Turn Rewind 回退设置</strong>
+          <strong>自动文件检查点</strong>
         </div>
         {snapshot.status === 'loading' && <p className="dcl-trs-status">正在加载设置…</p>}
         {snapshot.status === 'unavailable' && <p className="dcl-trs-status">当前部署未提供设置服务，以下选项不可用。</p>}
@@ -942,6 +969,8 @@ export function TurnRewindSettingsCard({ scope }: TurnRewindSettingsCardProps): 
         ))}
         {manage !== null && manage.workspaces.length === 0 && <p className="dcl-trs-status">还没有任何已保存的检查点。</p>}
       </section>
+      </div>
+      )}
     </div>
   )
 }

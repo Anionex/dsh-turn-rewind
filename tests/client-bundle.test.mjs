@@ -740,6 +740,10 @@ test('settings card renders the namespace form and manages checkpoints', async (
     hookIndex = 0
     return plugin.TurnRewindSettingsCard({ scope })
   }
+  // The card is a collapsed disclosure, matching the official plugin cards.
+  const head = findNode(render(), node => node.type === 'button' && node.props.className === 'dcl-trs-card-head')
+  assert.equal(head.props['aria-expanded'], false)
+  head.props.onClick()
   const first = render()
   const selects = collectNodes(first, node => node.type === 'select')
   assert.equal(selects.length, 2)
