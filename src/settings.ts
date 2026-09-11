@@ -40,7 +40,7 @@ export interface TurnRewindSettings {
   /** Age after which a lock whose owner is gone may be reclaimed. */
   staleLockMs: number
   /** Automatic turn-checkpoint implementation; `off` records durable skips instead. */
-  turnCheckpointMode: 'off' | 'git-native' | 'legacy'
+  turnCheckpointMode: 'off' | 'auto' | 'git-native' | 'legacy'
   /** Maximum time one automatic checkpoint may block the first Agent step. */
   turnCheckpointTimeoutMs: number
   /** Maximum uncached worktree bytes read by one automatic Git-native checkpoint. */
@@ -60,7 +60,7 @@ export const TurnRewindSettingsSchema: z<TurnRewindSettings> = (() => {
     maxSnapshotBytes: z.number().step(1).min(1).default(defaults.maxSnapshotBytes),
     planTtlMs: z.number().step(1).min(1).default(defaults.planTtlMs),
     staleLockMs: z.number().step(1).min(1).default(defaults.staleLockMs),
-    turnCheckpointMode: z.union(['off', 'git-native', 'legacy']).default(defaults.turnCheckpointMode),
+    turnCheckpointMode: z.union(['off', 'auto', 'git-native', 'legacy']).default(defaults.turnCheckpointMode),
     turnCheckpointTimeoutMs: z.number().step(1).min(1).default(defaults.turnCheckpointTimeoutMs),
     turnCheckpointMaxNewBytes: z.number().step(1).min(1).default(defaults.turnCheckpointMaxNewBytes),
     turnCheckpointTrust: z.union(['fast', 'strict']).default(defaults.turnCheckpointTrust),

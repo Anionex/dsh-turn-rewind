@@ -127,7 +127,7 @@ export interface TurnRewindSettingsValue {
     readonly maxSnapshotBytes: number;
     readonly planTtlMs: number;
     readonly staleLockMs: number;
-    readonly turnCheckpointMode: 'off' | 'git-native' | 'legacy';
+    readonly turnCheckpointMode: 'off' | 'auto' | 'git-native' | 'legacy';
     readonly turnCheckpointTimeoutMs: number;
     readonly turnCheckpointMaxNewBytes: number;
     readonly turnCheckpointTrust: 'fast' | 'strict';

@@ -33,7 +33,7 @@ export interface TurnRewindSettings {
     /** Age after which a lock whose owner is gone may be reclaimed. */
     staleLockMs: number;
     /** Automatic turn-checkpoint implementation; `off` records durable skips instead. */
-    turnCheckpointMode: 'off' | 'git-native' | 'legacy';
+    turnCheckpointMode: 'off' | 'auto' | 'git-native' | 'legacy';
     /** Maximum time one automatic checkpoint may block the first Agent step. */
     turnCheckpointTimeoutMs: number;
     /** Maximum uncached worktree bytes read by one automatic Git-native checkpoint. */

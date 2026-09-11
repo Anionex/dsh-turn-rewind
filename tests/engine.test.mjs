@@ -1913,7 +1913,7 @@ test('default storage follows DSH_HOME', async (t) => {
   try {
     const config = resolveConfig({})
     assert.equal(config.storageDir, join(root, 'change-ledger', 'v1'))
-    assert.equal(config.turnCheckpointMode, 'legacy')
+    assert.equal(config.turnCheckpointMode, 'auto')
     assert.equal(config.turnCheckpointTimeoutMs, 60_000)
   } finally {
     if (previous === undefined) delete process.env.DSH_HOME

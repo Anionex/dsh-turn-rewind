@@ -218,7 +218,7 @@ export interface ChangeLedgerConfig {
     /** Age after which a lock whose owner is gone may be reclaimed. */
     readonly staleLockMs?: number;
     /** Automatic turn-checkpoint implementation. Git-native is bounded and avoids rereading clean tracked content. */
-    readonly turnCheckpointMode?: 'off' | 'git-native' | 'legacy';
+    readonly turnCheckpointMode?: 'off' | 'auto' | 'git-native' | 'legacy';
     /** Maximum time one automatic checkpoint may block the first Agent step. */
     readonly turnCheckpointTimeoutMs?: number;
     /** Maximum uncached worktree bytes read by one automatic Git-native checkpoint. */
@@ -236,7 +236,7 @@ export interface ResolvedChangeLedgerConfig {
     readonly maxSnapshotBytes: number;
     readonly planTtlMs: number;
     readonly staleLockMs: number;
-    readonly turnCheckpointMode: 'off' | 'git-native' | 'legacy';
+    readonly turnCheckpointMode: 'off' | 'auto' | 'git-native' | 'legacy';
     readonly turnCheckpointTimeoutMs: number;
     readonly turnCheckpointMaxNewBytes: number;
     readonly turnCheckpointTrust: 'fast' | 'strict';

@@ -150,7 +150,7 @@ export interface TurnRewindSettingsValue {
   readonly maxSnapshotBytes: number
   readonly planTtlMs: number
   readonly staleLockMs: number
-  readonly turnCheckpointMode: 'off' | 'git-native' | 'legacy'
+  readonly turnCheckpointMode: 'off' | 'auto' | 'git-native' | 'legacy'
   readonly turnCheckpointTimeoutMs: number
   readonly turnCheckpointMaxNewBytes: number
   readonly turnCheckpointTrust: 'fast' | 'strict'
@@ -702,7 +702,8 @@ const NUMBER_FIELDS: readonly { readonly key: NumberSettingsField; readonly labe
 
 const CHECKPOINT_MODE_LABELS: Readonly<Record<TurnRewindSettingsValue['turnCheckpointMode'], string>> = {
   off: '关闭（不创建文件检查点）',
-  'git-native': 'Git 原生（推荐大仓库）',
+  auto: '自动（推荐）',
+  'git-native': 'Git 原生（大仓库）',
   legacy: '完整快照（兼容模式）',
 }
 

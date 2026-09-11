@@ -655,7 +655,7 @@ test('settings card renders the namespace form and manages checkpoints', async (
     status: 'ready',
     value: {
       maxRestorePoints: 50, maxTurnCheckpointsPerSession: 30, maxFiles: 20000, maxFileBytes: 16777216,
-      maxSnapshotBytes: 536870912, planTtlMs: 900000, staleLockMs: 30000, turnCheckpointMode: 'legacy',
+      maxSnapshotBytes: 536870912, planTtlMs: 900000, staleLockMs: 30000, turnCheckpointMode: 'auto',
       turnCheckpointTimeoutMs: 5000, turnCheckpointMaxNewBytes: 33554432, turnCheckpointTrust: 'fast',
     },
     base: {}, user: { turnCheckpointMode: 'off' }, revision: 7, writable: true, mode: 'host',
@@ -747,8 +747,8 @@ test('settings card renders the namespace form and manages checkpoints', async (
   const first = render()
   const selects = collectNodes(first, node => node.type === 'select')
   assert.equal(selects.length, 2)
-  assert.equal(selects[0].props.value, 'legacy')
-  assert.deepEqual(JSON.parse(JSON.stringify(selects[0].props.children.map(option => option.props.value))), ['off', 'git-native', 'legacy'])
+  assert.equal(selects[0].props.value, 'auto')
+  assert.deepEqual(JSON.parse(JSON.stringify(selects[0].props.children.map(option => option.props.value))), ['off', 'auto', 'git-native', 'legacy'])
   assert.ok(collectNodes(first, node => node.type === 'span' && node.props.className === 'dcl-trs-override').length >= 1)
   selects[0].props.onChange({ target: { value: 'off' } })
   await new Promise(resolve => setTimeout(resolve, 0))
