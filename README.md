@@ -26,6 +26,18 @@ create rescue point → restore → verify
 
 It never commits, stashes, resets, switches branches, edits the Git index, or decides automatically that a change should be reverted.
 
+## What's new
+
+Most recent work first:
+
+- **File rewind works in ordinary directories (0.3.0)** — when the working directory is not a Git repository it is snapshotted as an ordinary directory (`.git` and `node_modules` excluded by default, plus an optional `.dsh-rewindignore`), so messages-only rewind is no longer the only option.
+- **The fastest path is now the default (0.3.8)** — the new `auto` mode uses Git-native checkpoints in a Git worktree (reusing the repository object database, so committed content is never stored twice) and the plugin's own store for ordinary directories.
+- **Unchanged files are no longer re-read (0.3.5)** — each workspace keeps a persistent path identity cache; a measured 20 000-file / 351 MB workspace dropped from 237 s to about 7 s per capture.
+- **One oversized file no longer discards a whole checkpoint (0.3.3)** — it is skipped and reported while the rest is still captured, and a restore never touches a path its checkpoint did not record, so a file that was too large then and small now is never deleted.
+- **Checkpoint budget 5 s → 60 s, parallel capture (0.3.4)** — a 5-second budget in a large directory could only ever report a skip.
+- **Rewind button and messages-only fixes (0.2.2 / 0.2.3)** — adapted to the DSH 0.1.2-alpha client hooks and restored the messages-only mode that the Host rejected.
+- **Settings card matches the official cards (0.3.6 / 0.3.7)** — one collapsed row that expands, consistent with every other plugin card.
+
 ## Preview
 
 Rewind appears as an icon-only third action under each user message, after its timestamp and native Copy action:
