@@ -62,6 +62,15 @@ interface SlotsLike {
         readonly inject?: () => I;
     }, component: (props: P) => ReactNode): () => void;
 }
+/** Immutable locale state published by `@deepseek-ai/dsh-client-locale`. */
+interface LocaleSnapshotLike {
+    /** Active locale id, a BCP 47-style tag such as `zh` or `en`. */
+    readonly active: string;
+}
+/** The part of the Host locale service this plugin reads. */
+interface LocaleRuntimeLike {
+    getSnapshot(): LocaleSnapshotLike;
+}
 interface ClientContextLike {
     readonly slots: SlotsLike;
     readonly sessions: {
@@ -81,6 +90,14 @@ interface ClientContextLike {
         }): SettingsScopeLike<T>;
     };
     effect(setup: () => (() => void), label?: string): unknown;
+    /**
+     * Cordis's un-injected service read: the service value, or `undefined` when
+     * the profile mounts none. Optional because older clients and the test
+     * doubles expose no such method.
+     */
+    get?(name: 'locale'): LocaleRuntimeLike | undefined;
+    /** Cordis's event subscription; the result is a disposer when it is one. */
+    on?(name: 'locale/change', listener: (snapshot: LocaleSnapshotLike) => void): unknown;
 }
 type ChangeKind = 'added' | 'deleted' | 'modified' | 'mode-changed' | 'type-changed';
 interface ReadyPreview {
@@ -173,6 +190,20 @@ export interface ManageOverview {
     readonly totalBytes: number;
     readonly workspaces: readonly ManageWorkspace[];
 }
+/** UI languages this plugin ships copy for. */
+type UiLocale = 'zh' | 'en';
+/**
+ * Resolve one Host locale id to a language this plugin ships copy for.
+ *
+ * An absent, empty, or unreadable id means the Host published no UI language —
+ * DSH releases without the locale plugin, and profiles that do not mount it —
+ * and keeps Chinese, so an existing install never changes language on upgrade.
+ * Any other registered language resolves to English, mirroring the Host's own
+ * per-key fallback chain, which terminates at English rather than Chinese.
+ * @param active - the Host's active locale id, when it publishes one.
+ * @returns the language whose copy to render.
+ */
+export declare function resolveUiLocale(active: string | undefined): UiLocale;
 /** Return the rewind anchor and editable text owned by one direct user message. */
 export declare function selectRewindMessage(node: ConversationNodeLike): RewindMatch | null;
 /**

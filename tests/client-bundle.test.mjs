@@ -478,6 +478,7 @@ test('rewind dialog restores files in two modes and allows reviewed Git history 
       stateIndex += 1
       return [index < values.length ? values[index] : initial, () => {}]
     },
+    useSyncExternalStore(_subscribe, getSnapshot) { return getSnapshot() },
   }
   const jsxRuntime = {
     jsx: (type, props) => ({ type, props }),
@@ -800,4 +801,75 @@ test('partial checkpoints explain which files stay untouched', async () => {
   assert.match(describeCaptureNotice({ ...base, captureTruncated: 'snapshot-limit' }), /总量超过上限/)
   assert.match(describeCaptureNotice({ ...base, captureTruncated: 'file-limit' }), /文件数量超过上限/)
   harness.dispose()
+})
+
+test('the rewind UI follows the Host language and stays Chinese without one', async () => {
+  const plugin = await bootPluginEntry()
+  const slots = { inject(name, install) { install() }, register() { return () => {} } }
+  const profile = {
+    slots,
+    sessions: { open() {}, scope: () => undefined },
+    conversation: { input: { for: () => ({ setDraft() {} }) } },
+  }
+  /**
+   * Apply the plugin against one profile and collect its effect teardowns.
+   * @param services - the services this profile provides.
+   * @returns a function unmounting everything `apply()` installed.
+   */
+  const mount = (services) => {
+    const disposers = []
+    plugin.apply(cordisLikeContext(plugin, {
+      ...profile,
+      effect(setup) { const dispose = setup(); disposers.push(dispose); return dispose },
+      ...services,
+    }))
+    return () => { for (const dispose of disposers.reverse()) dispose() }
+  }
+
+  // The zh default is the compatibility guarantee: an absent, empty, or
+  // non-Chinese-tagged language never turns an existing install Chinese-less.
+  assert.deepEqual(
+    [undefined, '', 'zh', 'zh-CN', 'zh_TW', 'en', 'en-GB', 'ja'].map(id => plugin.resolveUiLocale(id)),
+    ['zh', 'zh', 'zh', 'zh', 'zh', 'en', 'en', 'en'],
+  )
+
+  // `locale` is read through `ctx.get`, never declared: an injected service the
+  // profile does not mount holds the fiber inactive and the rewind button with it.
+  assert.equal(plugin.inject.includes('locale'), false)
+
+  // No locale service: the profile keeps the Chinese UI it has always had.
+  const unmountWithout = mount({})
+  assert.equal(plugin.fileRecoveryLabel('deleted'), '找回文件')
+  assert.equal(plugin.explainCheckpointSkip('[TURN_CHECKPOINT_DISABLED] off'), '自动文件检查点已在设置里关闭，本轮没有回退点。仍可只回溯消息。')
+  unmountWithout()
+
+  // A Host reporting English switches the copy, and a later `locale/change`
+  // switches it again without remounting the plugin.
+  let change
+  const unmount = mount({
+    get: name => name === 'locale' ? { getSnapshot: () => ({ active: 'en' }) } : undefined,
+    on(name, listener) { change = { name, listener }; return () => {} },
+  })
+  assert.equal(plugin.fileRecoveryLabel('deleted'), 'Bring the file back')
+  assert.equal(change.name, 'locale/change')
+  change.listener({ active: 'zh-CN' })
+  assert.equal(plugin.fileRecoveryLabel('deleted'), '找回文件')
+  change.listener({ active: 'en-US' })
+  assert.equal(plugin.fileRecoveryLabel('deleted'), 'Bring the file back')
+
+  // Unmounting restores the default, so no language leaks past this plugin.
+  unmount()
+  assert.equal(plugin.fileRecoveryLabel('deleted'), '找回文件')
+
+  // A locale service this plugin cannot read must not fail the effect that
+  // installs the rewind button; it falls back to the Chinese default.
+  const registered = []
+  const unmountBroken = mount({
+    slots: { inject(name, install) { install() }, register(entry) { registered.push(entry.name); return () => {} } },
+    get() { throw new Error('locale service exploded') },
+    on() { throw new Error('locale service exploded') },
+  })
+  assert.deepEqual(registered, ['conversation.session.header.actions', 'settings.plugin.item'])
+  assert.equal(plugin.fileRecoveryLabel('deleted'), '找回文件')
+  unmountBroken()
 })
