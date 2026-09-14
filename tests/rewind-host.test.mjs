@@ -149,6 +149,46 @@ test('tool cancellation while waiting is delegated to the runtime cancellation p
   await Promise.all(coordinator.captures.values())
 })
 
+test('a session without session events never crashes the tool hook', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  // Issue #20: some session lifecycles expose neither `events` nor `snapshotEvents()`.
+  const agent = {
+    id: 'session-no-events',
+    status: 'running',
+    session: { id: 'session-no-events', header: { cwd: f.workspace } },
+  }
+  const warnings = []
+  const { coordinator, listener, toolListener } = installedCoordinator(f.engine, warnings)
+
+  let stepped = false
+  assert.deepEqual(
+    await listener(
+      { agent, turn: 1, step: 1, signal: new AbortController().signal },
+      async () => { stepped = true; return { kind: 'enter' } },
+    ),
+    { kind: 'enter' },
+  )
+  assert.equal(stepped, true)
+
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.deepEqual(coordinator.state(agent.id, 1), {
+    status: 'failed',
+    error: 'turn/start is unavailable before the first step',
+  })
+  assert.ok(warnings.some(warning => warning.includes('checkpoint failed for session-no-events turn 1')))
+
+  let toolRan = false
+  assert.deepEqual(
+    await toolListener(
+      { agent, signal: new AbortController().signal },
+      async () => { toolRan = true; return { ok: true } },
+    ),
+    { ok: true },
+  )
+  assert.equal(toolRan, true)
+})
+
 test('checkpoint capture serializes one worktree and failure never blocks the turn', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)
