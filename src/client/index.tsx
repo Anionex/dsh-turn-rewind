@@ -107,8 +107,8 @@ interface ClientContextLike {
       for(scope: unknown): { setDraft(text: string): void }
     }
   }
-  readonly settingsScope?: {
-    bind<T>(spec: { readonly namespace: string }): SettingsScopeLike<T>
+  readonly configForms?: {
+    get<T>(namespace: string): SettingsScopeLike<T>
   }
   effect(setup: () => (() => void), label?: string): unknown
   /**
@@ -175,7 +175,7 @@ export interface TurnRewindSettingsValue {
   readonly turnCheckpointTrust: 'fast' | 'strict'
 }
 
-/** Browser mirror of one settings namespace, as bound by `ctx.settingsScope`. */
+/** Browser mirror of one settings namespace, as returned by `ctx.configForms.get`. */
 export interface SettingsScopeLike<T> {
   getSnapshot(): SettingsScopeSnapshotLike<T>
   subscribe(listener: () => void): () => void
@@ -851,10 +851,10 @@ export function selectRewindMessage(node: ConversationNodeLike): RewindMatch | n
  *
  * Every service read on `ctx` must be declared here: Cordis throws while reading an
  * undeclared service off the context proxy, before optional chaining can apply.
- * `settingsScope` is provided by `@deepseek-ai/dsh-client-ui-settings` and may be
- * absent, which is what `ctx.settingsScope?.bind(…)` below relies on.
+ * `configForms` is provided by `@deepseek-ai/dsh-client-ui-settings` and may be
+ * absent, which is what `ctx.configForms?.get(…)` below relies on.
  */
-export const inject = ['slots', 'sessions', 'conversation', 'settingsScope']
+export const inject = ['slots', 'sessions', 'conversation', 'configForms']
 export function apply(ctx: ClientContextLike): void {
   ctx.effect(() => followHostLocale(ctx), 'turn-rewind: locale')
   ctx.effect(() => {
@@ -880,7 +880,7 @@ export function apply(ctx: ClientContextLike): void {
     name: 'settings.plugin.item',
     key: 'turn-rewind',
     inject: () => ({
-      scope: ctx.settingsScope?.bind<TurnRewindSettingsValue>({ namespace: 'turn-rewind' }),
+      scope: ctx.configForms?.get<TurnRewindSettingsValue>('turn-rewind'),
     }),
   }, TurnRewindSettingsCard))
 }

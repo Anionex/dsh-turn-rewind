@@ -13,6 +13,42 @@ declare module '@deepseek-ai/cordis' {
 }
 /** Cordis service exposed as `ctx.changeLedger` for other DSH plugins. */
 export declare class ChangeLedgerService {
+    /**
+     * Plugin configuration schema. Since DSH 0.1.7 dropped the separate settings
+     * namespace API, this is both the cordis config validator and the settings form
+     * source: every `.volatile()` field is projected into an editable form keyed by
+     * the profile entry id (`turn-rewind`), and a volatile edit restarts the plugin
+     * through cordis `update()`. `storageDir` is deliberately NOT in this schema —
+     * it stays a composition-only pin (see `resolveConfig`), never editable online.
+     *
+     * Declared `static` because cordis reads `Config` off the resolved plugin value
+     * (here the default-exported service class), not off the module namespace.
+     */
+    static Config: import("@deepseek-ai/schemastery").default<Schemastery.ObjectS<NoInfer<{
+        maxRestorePoints: import("@deepseek-ai/schemastery").default<number, number, "volatile-defined">;
+        maxTurnCheckpointsPerSession: import("@deepseek-ai/schemastery").default<number, number, "volatile-defined">;
+        maxFiles: import("@deepseek-ai/schemastery").default<number, number, "volatile-defined">;
+        maxFileBytes: import("@deepseek-ai/schemastery").default<number, number, "volatile-defined">;
+        maxSnapshotBytes: import("@deepseek-ai/schemastery").default<number, number, "volatile-defined">;
+        planTtlMs: import("@deepseek-ai/schemastery").default<number, number, "volatile-defined">;
+        staleLockMs: import("@deepseek-ai/schemastery").default<number, number, "volatile-defined">;
+        turnCheckpointMode: import("@deepseek-ai/schemastery").default<"off" | "auto" | "git-native" | "legacy", "off" | "auto" | "git-native" | "legacy", "volatile-defined">;
+        turnCheckpointTimeoutMs: import("@deepseek-ai/schemastery").default<number, number, "volatile-defined">;
+        turnCheckpointMaxNewBytes: import("@deepseek-ai/schemastery").default<number, number, "volatile-defined">;
+        turnCheckpointTrust: import("@deepseek-ai/schemastery").default<"fast" | "strict", "fast" | "strict", "volatile-defined">;
+    }>>, Schemastery.ObjectT<NoInfer<{
+        maxRestorePoints: import("@deepseek-ai/schemastery").default<number, number, "volatile-defined">;
+        maxTurnCheckpointsPerSession: import("@deepseek-ai/schemastery").default<number, number, "volatile-defined">;
+        maxFiles: import("@deepseek-ai/schemastery").default<number, number, "volatile-defined">;
+        maxFileBytes: import("@deepseek-ai/schemastery").default<number, number, "volatile-defined">;
+        maxSnapshotBytes: import("@deepseek-ai/schemastery").default<number, number, "volatile-defined">;
+        planTtlMs: import("@deepseek-ai/schemastery").default<number, number, "volatile-defined">;
+        staleLockMs: import("@deepseek-ai/schemastery").default<number, number, "volatile-defined">;
+        turnCheckpointMode: import("@deepseek-ai/schemastery").default<"off" | "auto" | "git-native" | "legacy", "off" | "auto" | "git-native" | "legacy", "volatile-defined">;
+        turnCheckpointTimeoutMs: import("@deepseek-ai/schemastery").default<number, number, "volatile-defined">;
+        turnCheckpointMaxNewBytes: import("@deepseek-ai/schemastery").default<number, number, "volatile-defined">;
+        turnCheckpointTrust: import("@deepseek-ai/schemastery").default<"fast" | "strict", "fast" | "strict", "volatile-defined">;
+    }>>, "plain">;
     readonly engine: ChangeLedgerEngine;
     /** Register the service and startup reconciliation. */
     constructor(ctx: Context, config?: ChangeLedgerConfig);

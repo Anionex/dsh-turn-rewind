@@ -28,10 +28,11 @@ test('bundle registers its service and waits for the released Web host service',
   }, { storageDir })
 
   assert.deepEqual(provided, { name: 'changeLedger', value: service })
+  // `installTurnRewindSettings` is a no-op on 0.1.7 (settings derive from the
+  // Config schema), so the service injects only its agents and web-host deps.
   assert.deepEqual(injections, [
     ['agents'],
     ['webServer', 'sessions', 'sessionQuery', 'agents'],
-    ['settings'],
   ])
   await service.initialize()
 })

@@ -42,15 +42,29 @@ export interface TurnRewindSettings {
     turnCheckpointTrust: 'fast' | 'strict';
 }
 /** Schemastery schema for the `turn-rewind` settings namespace. */
-export declare const TurnRewindSettingsSchema: z<TurnRewindSettings>;
-/**
- * Register the `turn-rewind` settings namespace and apply its resolved value to the
- * running engine. The composition entry (from `cordis.patch.yml`) is the base layer;
- * the user layer persists through the DSH settings provider. `storageDir` is never
- * carried by the namespace: the storage root must not move while the engine runs.
- *
- * `settings` is an optional service, so the whole wiring stays behind
- * `ctx.inject(['settings'], …)`: a host without a provider keeps running on the
- * composition entry alone.
- */
+export declare const TurnRewindSettingsSchema: z<Schemastery.ObjectS<NoInfer<{
+    maxRestorePoints: z<number, number, "volatile-defined">;
+    maxTurnCheckpointsPerSession: z<number, number, "volatile-defined">;
+    maxFiles: z<number, number, "volatile-defined">;
+    maxFileBytes: z<number, number, "volatile-defined">;
+    maxSnapshotBytes: z<number, number, "volatile-defined">;
+    planTtlMs: z<number, number, "volatile-defined">;
+    staleLockMs: z<number, number, "volatile-defined">;
+    turnCheckpointMode: z<"off" | "auto" | "git-native" | "legacy", "off" | "auto" | "git-native" | "legacy", "volatile-defined">;
+    turnCheckpointTimeoutMs: z<number, number, "volatile-defined">;
+    turnCheckpointMaxNewBytes: z<number, number, "volatile-defined">;
+    turnCheckpointTrust: z<"fast" | "strict", "fast" | "strict", "volatile-defined">;
+}>>, Schemastery.ObjectT<NoInfer<{
+    maxRestorePoints: z<number, number, "volatile-defined">;
+    maxTurnCheckpointsPerSession: z<number, number, "volatile-defined">;
+    maxFiles: z<number, number, "volatile-defined">;
+    maxFileBytes: z<number, number, "volatile-defined">;
+    maxSnapshotBytes: z<number, number, "volatile-defined">;
+    planTtlMs: z<number, number, "volatile-defined">;
+    staleLockMs: z<number, number, "volatile-defined">;
+    turnCheckpointMode: z<"off" | "auto" | "git-native" | "legacy", "off" | "auto" | "git-native" | "legacy", "volatile-defined">;
+    turnCheckpointTimeoutMs: z<number, number, "volatile-defined">;
+    turnCheckpointMaxNewBytes: z<number, number, "volatile-defined">;
+    turnCheckpointTrust: z<"fast" | "strict", "fast" | "strict", "volatile-defined">;
+}>>, "plain">;
 export declare function installTurnRewindSettings(ctx: Context, config: ChangeLedgerConfig, engine: ChangeLedgerEngine): void;

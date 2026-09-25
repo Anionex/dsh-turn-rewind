@@ -33,7 +33,7 @@ test('browser bundle anchors rewind to direct user messages and restores their d
   }
   vm.runInNewContext(source, context)
   assert.ok(plugin)
-  assert.deepEqual(JSON.parse(JSON.stringify(plugin.inject)), ['slots', 'sessions', 'conversation', 'settingsScope'])
+  assert.deepEqual(JSON.parse(JSON.stringify(plugin.inject)), ['slots', 'sessions', 'conversation', 'configForms'])
   assert.deepEqual(
     JSON.parse(JSON.stringify(plugin.selectRewindMessage({
       kind: 'user', seq: 7,
@@ -180,9 +180,9 @@ function cordisLikeContext(plugin, services) {
   })
 }
 
-test('the client declares every service it reads, and survives an absent settingsScope', async () => {
+test('the client declares every service it reads, and survives an absent configForms', async () => {
   const plugin = await bootPluginEntry()
-  const bound = []
+  const got = []
   const registered = []
   const slots = {
     inject(name, install) { install() },
@@ -192,26 +192,27 @@ test('the client declares every service it reads, and survives an absent setting
     slots,
     sessions: { open() {}, scope: () => undefined },
     conversation: { input: { for: () => ({ setDraft() {} }) } },
-    settingsScope: { bind(spec) { bound.push(spec); return { namespace: spec.namespace } } },
+    configForms: { get(namespace) { got.push(namespace); return { namespace } } },
   }
 
-  // `settingsScope` was the undeclared read that crashed the 0.1.5 settings card.
+  // `settingsScope` was the undeclared read that crashed the 0.1.5 settings card;
+  // 0.1.7 replaces it with `configForms`, resolved against the `turn-rewind` entry id.
   plugin.apply(cordisLikeContext(plugin, profile))
   const card = registered.find(entry => entry.name === 'settings.plugin.item')
   assert.deepEqual(JSON.parse(JSON.stringify(card.inject())), { scope: { namespace: 'turn-rewind' } })
-  // The card binds the same namespace literal the host section registers.
-  assert.deepEqual(JSON.parse(JSON.stringify(bound)), [{ namespace: 'turn-rewind' }])
+  // The card resolves the same namespace literal the host Config schema lives under.
+  assert.deepEqual(JSON.parse(JSON.stringify(got)), ['turn-rewind'])
 
   // The service is optional: declared, so reading it must not throw; absent, so the
   // card registers without a scope instead of taking the profile down.
   registered.length = 0
-  bound.length = 0
+  got.length = 0
   plugin.apply(cordisLikeContext(plugin, {
     slots,
     sessions: profile.sessions,
     conversation: profile.conversation,
   }))
-  assert.deepEqual(bound, [])
+  assert.deepEqual(got, [])
   assert.deepEqual(JSON.parse(JSON.stringify(
     registered.find(entry => entry.name === 'settings.plugin.item').inject(),
   )), {})

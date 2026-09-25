@@ -62,21 +62,13 @@
       ]
     },
     "compatibility": {
-      "dsh": ">=0.1.0-rc.8 <0.2.0",
+      "dsh": ">=0.1.7-rc.1 <0.2.0",
       "dshReleases": {
-        "0.1.0-rc.8": "compatible",
-        "0.1.1-rc.1": "compatible",
-        "0.1.1-rc.2": "compatible",
-        "0.1.2-alpha.1": "compatible",
-        "0.1.2-alpha.3": "compatible",
-        "0.1.2-alpha.4": "compatible",
-        "0.1.2-alpha.5": "compatible",
-        "0.1.5-alpha.1": "compatible",
-        "0.1.5-alpha.2": "compatible",
-        "0.1.5-rc.1": "compatible"
+        "0.1.7-rc.1": "compatible"
       },
       "profiles": [
-        "web"
+        "web",
+        "dev"
       ]
     }
   },
@@ -99,13 +91,11 @@
   "license": "BSD-3-Clause",
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-settings": ">=0.1.0-rc.8 <0.2.0 || ^0.1.1-rc.1 || ^0.1.2-alpha.1 || ^0.1.5-rc.1",
-    "@deepseek-ai/schemastery": "^3.18.1"
+    "@deepseek-ai/schemastery": "^3.18.4"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-settings": ">=0.1.0-rc.8 <0.2.0 || ^0.1.1-rc.1 || ^0.1.2-alpha.1 || ^0.1.5-rc.1",
-    "@deepseek-ai/schemastery": "^3.18.1",
+    "@deepseek-ai/schemastery": "^3.18.4",
     "@types/node": "^24.0.0",
     "@types/react": "18.3.28",
     "react": "18.3.1",

@@ -84,10 +84,8 @@ interface ClientContextLike {
             };
         };
     };
-    readonly settingsScope?: {
-        bind<T>(spec: {
-            readonly namespace: string;
-        }): SettingsScopeLike<T>;
+    readonly configForms?: {
+        get<T>(namespace: string): SettingsScopeLike<T>;
     };
     effect(setup: () => (() => void), label?: string): unknown;
     /**
@@ -149,7 +147,7 @@ export interface TurnRewindSettingsValue {
     readonly turnCheckpointMaxNewBytes: number;
     readonly turnCheckpointTrust: 'fast' | 'strict';
 }
-/** Browser mirror of one settings namespace, as bound by `ctx.settingsScope`. */
+/** Browser mirror of one settings namespace, as returned by `ctx.configForms.get`. */
 export interface SettingsScopeLike<T> {
     getSnapshot(): SettingsScopeSnapshotLike<T>;
     subscribe(listener: () => void): () => void;
@@ -211,8 +209,8 @@ export declare function selectRewindMessage(node: ConversationNodeLike): RewindM
  *
  * Every service read on `ctx` must be declared here: Cordis throws while reading an
  * undeclared service off the context proxy, before optional chaining can apply.
- * `settingsScope` is provided by `@deepseek-ai/dsh-client-ui-settings` and may be
- * absent, which is what `ctx.settingsScope?.bind(…)` below relies on.
+ * `configForms` is provided by `@deepseek-ai/dsh-client-ui-settings` and may be
+ * absent, which is what `ctx.configForms?.get(…)` below relies on.
  */
 export declare const inject: string[];
 export declare function apply(ctx: ClientContextLike): void;

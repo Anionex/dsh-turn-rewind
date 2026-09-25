@@ -18,7 +18,7 @@ test('package is a portable, prebuilt DSH Profile Bundle', async () => {
     // Informational prefetch metadata (dsh-package-manifest: "not Cordis service
     // injection"): the packages that provide this client's services and slot —
     // slots ← dsh-client-ui-renderer, sessions ← dsh-api-session-controller,
-    // conversation ← dsh-client-ui-conversation, settingsScope ←
+    // conversation ← dsh-client-ui-conversation, configForms ←
     // dsh-client-ui-settings, settings.plugin.item ← dsh-client-ui-settings-plugins.
     // `@deepseek-ai/dsh-client-runtime` was last published as 0.1.1-rc.2 and appears
     // nowhere in DSH 0.1.5.
@@ -35,20 +35,11 @@ test('package is a portable, prebuilt DSH Profile Bundle', async () => {
   // the client declares no extra module request.
   assert.equal(pkg.dsh?.client?.external, undefined)
   assert.deepEqual(pkg.dsh?.compatibility, {
-    dsh: '>=0.1.0-rc.8 <0.2.0',
+    dsh: '>=0.1.7-rc.1 <0.2.0',
     dshReleases: {
-      '0.1.0-rc.8': 'compatible',
-      '0.1.1-rc.1': 'compatible',
-      '0.1.1-rc.2': 'compatible',
-      '0.1.2-alpha.1': 'compatible',
-      '0.1.2-alpha.3': 'compatible',
-      '0.1.2-alpha.4': 'compatible',
-      '0.1.2-alpha.5': 'compatible',
-      '0.1.5-alpha.1': 'compatible',
-      '0.1.5-alpha.2': 'compatible',
-      '0.1.5-rc.1': 'compatible',
+      '0.1.7-rc.1': 'compatible',
     },
-    profiles: ['web'],
+    profiles: ['web', 'dev'],
   })
   assert.equal(pkg.dshClient, undefined)
   assert.equal(pkg.main, 'lib/index.js')
@@ -60,14 +51,12 @@ test('package is a portable, prebuilt DSH Profile Bundle', async () => {
   assert.equal(typeof pkg.scripts?.build, 'string')
   assert.equal(typeof pkg.scripts?.prepack, 'string')
   assert.equal(pkg.peerDependencies?.['@deepseek-ai/cordis'], '^4.0.1')
-  // One clause per release line: semver only admits a prerelease when a comparator
-  // with the same major.minor.patch also carries one, so `>=0.1.0-rc.8 <0.2.0` alone
-  // silently refuses every later prerelease — 0.1.5-rc.1 included.
-  const settingsRange = '>=0.1.0-rc.8 <0.2.0 || ^0.1.1-rc.1 || ^0.1.2-alpha.1 || ^0.1.5-rc.1'
-  assert.equal(pkg.peerDependencies?.['@deepseek-ai/dsh-settings'], settingsRange)
-  assert.equal(pkg.devDependencies?.['@deepseek-ai/dsh-settings'], settingsRange)
+  // dsh-settings is gone entirely: 0.1.7 derives settings from the Config schema,
+  // so this plugin no longer imports or depends on the removed settings API.
+  assert.equal(pkg.peerDependencies?.['@deepseek-ai/dsh-settings'], undefined)
+  assert.equal(pkg.devDependencies?.['@deepseek-ai/dsh-settings'], undefined)
   assert.equal(pkg.peerDependencies?.['@deepseek-ai/dsh-client-runtime'], undefined)
-  assert.equal(pkg.peerDependencies?.['@deepseek-ai/schemastery'], '^3.18.1')
+  assert.equal(pkg.peerDependencies?.['@deepseek-ai/schemastery'], '^3.18.4')
   assert.equal(pkg.peerDependencies?.cordis, undefined)
   assert.match(workspace, /^packages:\n  - \.\n/mu)
   assert.match(workspace, /^nodeLinker: hoisted$/mu)

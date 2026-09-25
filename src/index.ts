@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { ChangeLedgerEngine } from './engine.js'
 import { installManageHttp, installRewindHttp, TurnCheckpointCoordinator } from './rewind-host.js'
-import { installTurnRewindSettings } from './settings.js'
+import { installTurnRewindSettings, TurnRewindSettingsSchema } from './settings.js'
 import type { ChangeLedgerConfig } from './types.js'
 
 export * from './engine.js'
@@ -32,6 +32,22 @@ function pluginVersion(): string {
   }
 }
 
+/**
+ * Unwrap `.volatile()` Config fields (which cordis hands the plugin as `Volatile`
+ * wrappers exposing a `.get()` method) back into plain values before the engine
+ * validates them. A raw Volatile wrapper would fail `Number.isSafeInteger` and
+ * throw `INVALID_CONFIG`.
+ */
+function unwrapVolatileConfig(config: ChangeLedgerConfig): ChangeLedgerConfig {
+  const result: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(config ?? {})) {
+    result[key] = value !== undefined && value !== null && typeof (value as { get?: unknown }).get === 'function'
+      ? (value as { get(): unknown }).get()
+      : value
+  }
+  return result as ChangeLedgerConfig
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     changeLedger: ChangeLedgerService
@@ -40,12 +56,25 @@ declare module '@deepseek-ai/cordis' {
 
 /** Cordis service exposed as `ctx.changeLedger` for other DSH plugins. */
 export class ChangeLedgerService {
+  /**
+   * Plugin configuration schema. Since DSH 0.1.7 dropped the separate settings
+   * namespace API, this is both the cordis config validator and the settings form
+   * source: every `.volatile()` field is projected into an editable form keyed by
+   * the profile entry id (`turn-rewind`), and a volatile edit restarts the plugin
+   * through cordis `update()`. `storageDir` is deliberately NOT in this schema —
+   * it stays a composition-only pin (see `resolveConfig`), never editable online.
+   *
+   * Declared `static` because cordis reads `Config` off the resolved plugin value
+   * (here the default-exported service class), not off the module namespace.
+   */
+  static Config = TurnRewindSettingsSchema
+
   readonly engine: ChangeLedgerEngine
 
   /** Register the service and startup reconciliation. */
   constructor(ctx: Context, config: ChangeLedgerConfig = {}) {
     ctx.provide('changeLedger', this)
-    this.engine = new ChangeLedgerEngine(config)
+    this.engine = new ChangeLedgerEngine(unwrapVolatileConfig(config))
     const checkpoints = new TurnCheckpointCoordinator(this.engine)
     ctx.logger.info(`[turn-rewind] v${pluginVersion()} active; workspace modes: git worktree, ordinary directory`)
     ctx.inject(['agents'], (scope: Context) => { checkpoints.install(scope) })
