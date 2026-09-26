@@ -804,6 +804,22 @@ function useText(): RewindText {
  */
 function followHostLocale(ctx: ClientContextLike): () => void {
   adoptLocale(hostLocale(ctx))
+  // Client plugin apply() order is not guaranteed, and `locale` is read
+  // un-injected (see the doc comment above) so this plugin never forces it
+  // to load first. When `dsh-client-locale` mounts after this plugin, the
+  // read above returns `undefined` and the surface falls back to Chinese;
+  // nothing then corrects it, because a stored preference that was already
+  // settled before this plugin mounted never fires another `locale/change`
+  // event. Re-checking once on the next microtask and once on the next
+  // macrotask catches both same-tick and deferred registration without
+  // adding a hard dependency; `adoptLocale` is a no-op when the language
+  // has not actually changed, so the extra calls are always safe.
+  const recheck = (): void => adoptLocale(hostLocale(ctx))
+  // `Promise` is an ECMAScript built-in present in every realm, unlike the
+  // host-provided `queueMicrotask`, which a constrained embedding (this
+  // plugin's own test sandbox included) need not supply.
+  void Promise.resolve().then(recheck)
+  const timeoutId = setTimeout(recheck, 0)
   let off: unknown
   try {
     off = ctx.on?.('locale/change', (snapshot: LocaleSnapshotLike) => {
@@ -813,6 +829,7 @@ function followHostLocale(ctx: ClientContextLike): () => void {
     off = undefined
   }
   return () => {
+    clearTimeout(timeoutId)
     if (typeof off === 'function') off()
     adoptLocale(undefined)
   }

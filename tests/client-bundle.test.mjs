@@ -124,6 +124,11 @@ async function bootPluginEntry() {
   let plugin
   const context = {
     AbortController,
+    // followHostLocale schedules a microtask and a macrotask re-check of the
+    // Host's locale (see src/client/index.tsx); every module realm that runs
+    // apply() needs both, same as bootPortalBridge's context already grants.
+    setTimeout,
+    clearTimeout,
     document: {
       querySelector: () => null,
       createElement: () => ({ dataset: {}, remove() {} }),
