@@ -19,7 +19,7 @@ import type { ChangeLedgerConfig, ResolvedChangeLedgerConfig } from './types.js'
  * a compile-time-only brand, so a plain lowercase literal is the entire runtime
  * value — the upstream convention (`const CHAT_SETTINGS_NAMESPACE = 'ui-chat'`).
  * The literal satisfies 0.1.5's registration grammar `/^[a-z][a-z0-9-]*$/` and is
- * the exact key the browser card binds through `ctx.settingsScope.bind`.
+ * the exact key both browser settings transports use.
  */
 export const TURN_REWIND_SETTINGS_NAMESPACE = 'turn-rewind'
 
@@ -49,21 +49,27 @@ export interface TurnRewindSettings {
   turnCheckpointTrust: 'fast' | 'strict'
 }
 
-/** Schemastery schema for the `turn-rewind` settings namespace. */
+/** Older Schemastery releases have no volatile marker; their settings provider owns updates. */
+function volatileWhenSupported<T>(schema: z<T>): z<T> {
+  const compatible = schema as z<T> & { volatile?: () => z<T> }
+  return typeof compatible.volatile === 'function' ? compatible.volatile() : schema
+}
+
+/** Shared schema for the legacy settings namespace and DSH 0.1.7 Config form. */
 export const TurnRewindSettingsSchema: z<TurnRewindSettings> = (() => {
   const defaults = tunableSettings(resolveConfig({}))
   return z.object({
-    maxRestorePoints: z.number().step(1).min(1).default(defaults.maxRestorePoints),
-    maxTurnCheckpointsPerSession: z.number().step(1).min(1).default(defaults.maxTurnCheckpointsPerSession),
-    maxFiles: z.number().step(1).min(1).default(defaults.maxFiles),
-    maxFileBytes: z.number().step(1).min(1).default(defaults.maxFileBytes),
-    maxSnapshotBytes: z.number().step(1).min(1).default(defaults.maxSnapshotBytes),
-    planTtlMs: z.number().step(1).min(1).default(defaults.planTtlMs),
-    staleLockMs: z.number().step(1).min(1).default(defaults.staleLockMs),
-    turnCheckpointMode: z.union(['off', 'auto', 'git-native', 'legacy']).default(defaults.turnCheckpointMode),
-    turnCheckpointTimeoutMs: z.number().step(1).min(1).default(defaults.turnCheckpointTimeoutMs),
-    turnCheckpointMaxNewBytes: z.number().step(1).min(1).default(defaults.turnCheckpointMaxNewBytes),
-    turnCheckpointTrust: z.union(['fast', 'strict']).default(defaults.turnCheckpointTrust),
+    maxRestorePoints: volatileWhenSupported(z.number().step(1).min(1).default(defaults.maxRestorePoints)),
+    maxTurnCheckpointsPerSession: volatileWhenSupported(z.number().step(1).min(1).default(defaults.maxTurnCheckpointsPerSession)),
+    maxFiles: volatileWhenSupported(z.number().step(1).min(1).default(defaults.maxFiles)),
+    maxFileBytes: volatileWhenSupported(z.number().step(1).min(1).default(defaults.maxFileBytes)),
+    maxSnapshotBytes: volatileWhenSupported(z.number().step(1).min(1).default(defaults.maxSnapshotBytes)),
+    planTtlMs: volatileWhenSupported(z.number().step(1).min(1).default(defaults.planTtlMs)),
+    staleLockMs: volatileWhenSupported(z.number().step(1).min(1).default(defaults.staleLockMs)),
+    turnCheckpointMode: volatileWhenSupported(z.union(['off', 'auto', 'git-native', 'legacy']).default(defaults.turnCheckpointMode)),
+    turnCheckpointTimeoutMs: volatileWhenSupported(z.number().step(1).min(1).default(defaults.turnCheckpointTimeoutMs)),
+    turnCheckpointMaxNewBytes: volatileWhenSupported(z.number().step(1).min(1).default(defaults.turnCheckpointMaxNewBytes)),
+    turnCheckpointTrust: volatileWhenSupported(z.union(['fast', 'strict']).default(defaults.turnCheckpointTrust)),
   })
 })()
 
@@ -106,7 +112,7 @@ interface SettingsSectionHooksLike<T> {
  * {@link SettingsProvider} type at the single boundary where it is used.
  */
 interface SettingsProviderLike {
-  register<T>(ns: string, schema: z<T>, options?: { readonly base?: Partial<T> }): SettingsScopeLike<T>
+  register?<T>(ns: string, schema: z<T>, options?: { readonly base?: Partial<T> }): SettingsScopeLike<T>
   installSection?<T>(owner: Context, ns: string, schema: z<T>, entry: T, hooks: SettingsSectionHooksLike<T>): void
 }
 
@@ -142,6 +148,9 @@ export function installTurnRewindSettings(ctx: Context, config: ChangeLedgerConf
       provider.installSection(ctx, TURN_REWIND_SETTINGS_NAMESPACE, TurnRewindSettingsSchema, entry, hooks)
       return
     }
+    // DSH 0.1.7 projects the plugin's Config schema instead of registering a
+    // separate namespace. Its settings service exposes neither old method.
+    if (typeof provider.register !== 'function') return
     // Older hosts shipped that wiring only as the free `installSettingsSection`,
     // which 0.1.5 removed, so reproduce its body against `register` + `scope.get()`
     // + `scope.watch()` — present in every supported version.

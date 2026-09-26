@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { ChangeLedgerEngine } from './engine.js'
 import { installManageHttp, installRewindHttp, TurnCheckpointCoordinator } from './rewind-host.js'
-import { installTurnRewindSettings } from './settings.js'
+import { installTurnRewindSettings, TurnRewindSettingsSchema } from './settings.js'
 import type { ChangeLedgerConfig } from './types.js'
 
 export * from './engine.js'
@@ -32,6 +32,17 @@ function pluginVersion(): string {
   }
 }
 
+/** Volatile config values are wrappers in DSH 0.1.7 and plain values on older hosts. */
+function unwrapVolatileConfig(config: ChangeLedgerConfig): ChangeLedgerConfig {
+  const result: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(config)) {
+    result[key] = value !== null && typeof value === 'object' && typeof (value as { get?: unknown }).get === 'function'
+      ? (value as { get(): unknown }).get()
+      : value
+  }
+  return result as ChangeLedgerConfig
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     changeLedger: ChangeLedgerService
@@ -40,12 +51,15 @@ declare module '@deepseek-ai/cordis' {
 
 /** Cordis service exposed as `ctx.changeLedger` for other DSH plugins. */
 export class ChangeLedgerService {
+  /** DSH 0.1.7 projects volatile Config fields into its settings form. */
+  static Config = TurnRewindSettingsSchema
   readonly engine: ChangeLedgerEngine
 
   /** Register the service and startup reconciliation. */
   constructor(ctx: Context, config: ChangeLedgerConfig = {}) {
+    const normalized = unwrapVolatileConfig(config)
     ctx.provide('changeLedger', this)
-    this.engine = new ChangeLedgerEngine(config)
+    this.engine = new ChangeLedgerEngine(normalized)
     const checkpoints = new TurnCheckpointCoordinator(this.engine)
     ctx.logger.info(`[turn-rewind] v${pluginVersion()} active; workspace modes: git worktree, ordinary directory`)
     ctx.inject(['agents'], (scope: Context) => { checkpoints.install(scope) })
@@ -55,7 +69,7 @@ export class ChangeLedgerService {
       installRewindHttp(scope, this.engine, checkpoints)
       installManageHttp(scope, this.engine)
     })
-    installTurnRewindSettings(ctx, config, this.engine)
+    installTurnRewindSettings(ctx, normalized, this.engine)
     void this.engine.initialize().then((reconciled) => {
       if (reconciled > 0) {
         ctx.logger.warn(`[change-ledger] reconciled ${reconciled} interrupted durable operation(s)`)

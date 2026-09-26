@@ -78,6 +78,7 @@ interface SlotsLike {
       readonly id?: string
       readonly key?: string
       readonly order?: number
+      readonly label?: string | (() => string)
       readonly locale?: string
       readonly inject?: () => I
     },
@@ -107,9 +108,7 @@ interface ClientContextLike {
       for(scope: unknown): { setDraft(text: string): void }
     }
   }
-  readonly settingsScope?: {
-    bind<T>(spec: { readonly namespace: string }): SettingsScopeLike<T>
-  }
+  get?(name: string): unknown
   effect(setup: () => (() => void), label?: string): unknown
   /**
    * Cordis's un-injected service read: the service value, or `undefined` when
@@ -175,7 +174,7 @@ export interface TurnRewindSettingsValue {
   readonly turnCheckpointTrust: 'fast' | 'strict'
 }
 
-/** Browser mirror of one settings namespace, as bound by `ctx.settingsScope`. */
+/** Browser settings transport shared by the old namespace and new Config form. */
 export interface SettingsScopeLike<T> {
   getSnapshot(): SettingsScopeSnapshotLike<T>
   subscribe(listener: () => void): () => void
@@ -851,10 +850,10 @@ export function selectRewindMessage(node: ConversationNodeLike): RewindMatch | n
  *
  * Every service read on `ctx` must be declared here: Cordis throws while reading an
  * undeclared service off the context proxy, before optional chaining can apply.
- * `settingsScope` is provided by `@deepseek-ai/dsh-client-ui-settings` and may be
- * absent, which is what `ctx.settingsScope?.bind(…)` below relies on.
+ * The settings transport is read through `ctx.get`: older Hosts expose
+ * `settingsScope`, while DSH 0.1.7 exposes `configForms`.
  */
-export const inject = ['slots', 'sessions', 'conversation', 'settingsScope']
+export const inject = ['slots', 'sessions', 'conversation']
 export function apply(ctx: ClientContextLike): void {
   ctx.effect(() => followHostLocale(ctx), 'turn-rewind: locale')
   ctx.effect(() => {
@@ -880,9 +879,25 @@ export function apply(ctx: ClientContextLike): void {
     name: 'settings.plugin.item',
     key: 'turn-rewind',
     inject: () => ({
-      scope: ctx.settingsScope?.bind<TurnRewindSettingsValue>({ namespace: 'turn-rewind' }),
+      scope: settingsFormScope(ctx),
     }),
   }, TurnRewindSettingsCard))
+  // DSH 0.1.7 replaced the per-plugin item seat with feature-owned Settings tabs.
+  ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
+    name: 'settings.plugins.tab',
+    id: 'turn-rewind',
+    order: 80,
+    label: () => uiText().settingsCardTitle,
+    inject: () => ({ scope: settingsFormScope(ctx) }),
+  }, TurnRewindSettingsCard))
+}
+
+/** Read whichever settings transport this Host supplies without requiring both services. */
+function settingsFormScope(ctx: ClientContextLike): SettingsScopeLike<TurnRewindSettingsValue> | undefined {
+  const forms = ctx.get?.('configForms') as { get<T>(entryId: string): SettingsScopeLike<T> } | undefined
+  if (forms !== undefined) return forms.get<TurnRewindSettingsValue>('turn-rewind')
+  const legacy = ctx.get?.('settingsScope') as { bind<T>(spec: { readonly namespace: string }): SettingsScopeLike<T> } | undefined
+  return legacy?.bind<TurnRewindSettingsValue>({ namespace: 'turn-rewind' })
 }
 
 /** Narrow a chat node source to the keyed store form. */

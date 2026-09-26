@@ -13,7 +13,7 @@ import type { ChangeLedgerConfig } from './types.js';
  * a compile-time-only brand, so a plain lowercase literal is the entire runtime
  * value — the upstream convention (`const CHAT_SETTINGS_NAMESPACE = 'ui-chat'`).
  * The literal satisfies 0.1.5's registration grammar `/^[a-z][a-z0-9-]*$/` and is
- * the exact key the browser card binds through `ctx.settingsScope.bind`.
+ * the exact key both browser settings transports use.
  */
 export declare const TURN_REWIND_SETTINGS_NAMESPACE = "turn-rewind";
 /** Every runtime-tunable field of {@link ChangeLedgerConfig}; `storageDir` stays config-layer only. */
@@ -41,7 +41,7 @@ export interface TurnRewindSettings {
     /** Fast trusts fenced Git/stat metadata; strict rereads every eligible path. */
     turnCheckpointTrust: 'fast' | 'strict';
 }
-/** Schemastery schema for the `turn-rewind` settings namespace. */
+/** Shared schema for the legacy settings namespace and DSH 0.1.7 Config form. */
 export declare const TurnRewindSettingsSchema: z<TurnRewindSettings>;
 /**
  * Register the `turn-rewind` settings namespace and apply its resolved value to the

@@ -13,6 +13,8 @@ declare module '@deepseek-ai/cordis' {
 }
 /** Cordis service exposed as `ctx.changeLedger` for other DSH plugins. */
 export declare class ChangeLedgerService {
+    /** DSH 0.1.7 projects volatile Config fields into its settings form. */
+    static Config: import("@deepseek-ai/schemastery").default<import("./settings.js").TurnRewindSettings>;
     readonly engine: ChangeLedgerEngine;
     /** Register the service and startup reconciliation. */
     constructor(ctx: Context, config?: ChangeLedgerConfig);

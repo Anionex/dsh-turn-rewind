@@ -58,6 +58,7 @@ interface SlotsLike {
         readonly id?: string;
         readonly key?: string;
         readonly order?: number;
+        readonly label?: string | (() => string);
         readonly locale?: string;
         readonly inject?: () => I;
     }, component: (props: P) => ReactNode): () => void;
@@ -84,11 +85,7 @@ interface ClientContextLike {
             };
         };
     };
-    readonly settingsScope?: {
-        bind<T>(spec: {
-            readonly namespace: string;
-        }): SettingsScopeLike<T>;
-    };
+    get?(name: string): unknown;
     effect(setup: () => (() => void), label?: string): unknown;
     /**
      * Cordis's un-injected service read: the service value, or `undefined` when
@@ -149,7 +146,7 @@ export interface TurnRewindSettingsValue {
     readonly turnCheckpointMaxNewBytes: number;
     readonly turnCheckpointTrust: 'fast' | 'strict';
 }
-/** Browser mirror of one settings namespace, as bound by `ctx.settingsScope`. */
+/** Browser settings transport shared by the old namespace and new Config form. */
 export interface SettingsScopeLike<T> {
     getSnapshot(): SettingsScopeSnapshotLike<T>;
     subscribe(listener: () => void): () => void;
@@ -211,8 +208,8 @@ export declare function selectRewindMessage(node: ConversationNodeLike): RewindM
  *
  * Every service read on `ctx` must be declared here: Cordis throws while reading an
  * undeclared service off the context proxy, before optional chaining can apply.
- * `settingsScope` is provided by `@deepseek-ai/dsh-client-ui-settings` and may be
- * absent, which is what `ctx.settingsScope?.bind(…)` below relies on.
+ * The settings transport is read through `ctx.get`: older Hosts expose
+ * `settingsScope`, while DSH 0.1.7 exposes `configForms`.
  */
 export declare const inject: string[];
 export declare function apply(ctx: ClientContextLike): void;
