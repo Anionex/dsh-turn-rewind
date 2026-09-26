@@ -33,7 +33,7 @@ test('browser bundle anchors rewind to direct user messages and restores their d
   }
   vm.runInNewContext(source, context)
   assert.ok(plugin)
-  assert.deepEqual(JSON.parse(JSON.stringify(plugin.inject)), ['slots', 'sessions', 'conversation', 'settingsScope'])
+  assert.deepEqual(JSON.parse(JSON.stringify(plugin.inject)), ['slots', 'sessions', 'conversation'])
   assert.deepEqual(
     JSON.parse(JSON.stringify(plugin.selectRewindMessage({
       kind: 'user', seq: 7,
@@ -69,6 +69,7 @@ test('browser bundle anchors rewind to direct user messages and restores their d
 
   let conversationRegistration
   let settingsRegistration
+  let settingsTabRegistration
   const style = { dataset: {}, remove() {} }
   context.document = {
     querySelector: () => null,
@@ -91,12 +92,13 @@ test('browser bundle anchors rewind to direct user messages and restores their d
       register(entry, component) {
         if (entry.name === 'conversation.session.header.actions') conversationRegistration = { entry, component }
         else if (entry.name === 'settings.plugin.item') settingsRegistration = { entry, component }
+        else if (entry.name === 'settings.plugins.tab') settingsTabRegistration = { entry, component }
         else throw new Error(`unexpected slot registration ${entry.name}`)
         return () => {}
       },
     },
   })
-  assert.deepEqual(injectedNames, ['conversation.session.header.actions', 'settings.plugin.item'])
+  assert.deepEqual(injectedNames, ['conversation.session.header.actions', 'settings.plugin.item', 'settings.plugins.tab'])
   assert.equal(conversationRegistration.entry.name, 'conversation.session.header.actions')
   assert.equal(conversationRegistration.entry.id, 'turn-rewind-portals')
   assert.match(style.textContent, /\.dcl-rewind-dialog\{[^}]*width:min\(560px,100%\)/)
@@ -112,6 +114,9 @@ test('browser bundle anchors rewind to direct user messages and restores their d
   assert.equal(settingsRegistration.entry.key, 'turn-rewind')
   assert.equal(typeof settingsRegistration.component, 'function')
   assert.deepEqual(JSON.parse(JSON.stringify(settingsRegistration.entry.inject())), {})
+  assert.equal(settingsTabRegistration.entry.id, 'turn-rewind')
+  assert.equal(typeof settingsTabRegistration.entry.label(), 'string')
+  assert.equal(typeof settingsTabRegistration.component, 'function')
 })
 
 /**
@@ -174,7 +179,7 @@ async function bootPluginEntry() {
 function cordisLikeContext(plugin, services) {
   const core = new Set(['effect', 'inject', 'on', 'emit', 'get', 'set', 'provide', 'logger', 'fiber'])
   const declared = new Set(plugin.inject)
-  const target = { effect(setup) { return setup() }, ...services }
+  const target = { effect(setup) { return setup() }, get(name) { return services[name] }, ...services }
   return new Proxy(target, {
     get(object, property) {
       if (typeof property === 'string' && !core.has(property) && !declared.has(property)) {
@@ -185,7 +190,7 @@ function cordisLikeContext(plugin, services) {
   })
 }
 
-test('the client declares every service it reads, and survives an absent settingsScope', async () => {
+test('the client uses the new config form, falls back to the old scope, and survives neither', async () => {
   const plugin = await bootPluginEntry()
   const bound = []
   const registered = []
@@ -206,6 +211,20 @@ test('the client declares every service it reads, and survives an absent setting
   assert.deepEqual(JSON.parse(JSON.stringify(card.inject())), { scope: { namespace: 'turn-rewind' } })
   // The card binds the same namespace literal the host section registers.
   assert.deepEqual(JSON.parse(JSON.stringify(bound)), [{ namespace: 'turn-rewind' }])
+
+  registered.length = 0
+  bound.length = 0
+  plugin.apply(cordisLikeContext(plugin, {
+    ...profile,
+    configForms: { get(entryId) { assert.equal(entryId, 'turn-rewind'); return { namespace: entryId, transport: 'configForms' } } },
+  }))
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    registered.find(entry => entry.name === 'settings.plugin.item').inject(),
+  )), { scope: { namespace: 'turn-rewind', transport: 'configForms' } })
+  assert.deepEqual(JSON.parse(JSON.stringify(
+    registered.find(entry => entry.name === 'settings.plugins.tab').inject(),
+  )), { scope: { namespace: 'turn-rewind', transport: 'configForms' } })
+  assert.deepEqual(bound, [])
 
   // The service is optional: declared, so reading it must not throw; absent, so the
   // card registers without a scope instead of taking the profile down.
@@ -874,7 +893,7 @@ test('the rewind UI follows the Host language and stays Chinese without one', as
     get() { throw new Error('locale service exploded') },
     on() { throw new Error('locale service exploded') },
   })
-  assert.deepEqual(registered, ['conversation.session.header.actions', 'settings.plugin.item'])
+  assert.deepEqual(registered, ['conversation.session.header.actions', 'settings.plugin.item', 'settings.plugins.tab'])
   assert.equal(plugin.fileRecoveryLabel('deleted'), '找回文件')
   unmountBroken()
 })

@@ -18,8 +18,8 @@ test('package is a portable, prebuilt DSH Profile Bundle', async () => {
     // Informational prefetch metadata (dsh-package-manifest: "not Cordis service
     // injection"): the packages that provide this client's services and slot —
     // slots ← dsh-client-ui-renderer, sessions ← dsh-api-session-controller,
-    // conversation ← dsh-client-ui-conversation, settingsScope ←
-    // dsh-client-ui-settings, settings.plugin.item ← dsh-client-ui-settings-plugins.
+    // conversation ← dsh-client-ui-conversation, both settings transports ←
+    // dsh-client-ui-settings, both settings tab seats ← dsh-client-ui-settings-plugins.
     // `@deepseek-ai/dsh-client-runtime` was last published as 0.1.1-rc.2 and appears
     // nowhere in DSH 0.1.5.
     inject: [
@@ -35,7 +35,7 @@ test('package is a portable, prebuilt DSH Profile Bundle', async () => {
   // the client declares no extra module request.
   assert.equal(pkg.dsh?.client?.external, undefined)
   assert.deepEqual(pkg.dsh?.compatibility, {
-    dsh: '>=0.1.0-rc.8 <0.2.0',
+    dsh: '>=0.1.0-rc.8 <0.2.0 || ^0.1.7-rc.1',
     dshReleases: {
       '0.1.0-rc.8': 'compatible',
       '0.1.1-rc.1': 'compatible',
@@ -47,6 +47,7 @@ test('package is a portable, prebuilt DSH Profile Bundle', async () => {
       '0.1.5-alpha.1': 'compatible',
       '0.1.5-alpha.2': 'compatible',
       '0.1.5-rc.1': 'compatible',
+      '0.1.7-rc.2': 'compatible',
     },
     profiles: ['web'],
   })
@@ -65,6 +66,7 @@ test('package is a portable, prebuilt DSH Profile Bundle', async () => {
   // silently refuses every later prerelease — 0.1.5-rc.1 included.
   const settingsRange = '>=0.1.0-rc.8 <0.2.0 || ^0.1.1-rc.1 || ^0.1.2-alpha.1 || ^0.1.5-rc.1'
   assert.equal(pkg.peerDependencies?.['@deepseek-ai/dsh-settings'], settingsRange)
+  assert.equal(pkg.peerDependenciesMeta?.['@deepseek-ai/dsh-settings']?.optional, true)
   assert.equal(pkg.devDependencies?.['@deepseek-ai/dsh-settings'], settingsRange)
   assert.equal(pkg.peerDependencies?.['@deepseek-ai/dsh-client-runtime'], undefined)
   assert.equal(pkg.peerDependencies?.['@deepseek-ai/schemastery'], '^3.18.1')
