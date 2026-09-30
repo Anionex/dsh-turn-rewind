@@ -35,7 +35,7 @@ test('package is a portable, prebuilt DSH Profile Bundle', async () => {
   // the client declares no extra module request.
   assert.equal(pkg.dsh?.client?.external, undefined)
   assert.deepEqual(pkg.dsh?.compatibility, {
-    dsh: '>=0.1.0-rc.8 <0.2.0 || ^0.1.7-rc.1',
+    dsh: '>=0.1.0-rc.8 <0.2.0 || ^0.1.7-rc.1 || 0.2.0-rc.2',
     dshReleases: {
       '0.1.0-rc.8': 'compatible',
       '0.1.1-rc.1': 'compatible',
@@ -48,6 +48,7 @@ test('package is a portable, prebuilt DSH Profile Bundle', async () => {
       '0.1.5-alpha.2': 'compatible',
       '0.1.5-rc.1': 'compatible',
       '0.1.7-rc.2': 'compatible',
+      '0.2.0-rc.2': 'compatible',
     },
     profiles: ['web'],
   })
@@ -65,7 +66,7 @@ test('package is a portable, prebuilt DSH Profile Bundle', async () => {
   // with the same major.minor.patch also carries one, so `>=0.1.0-rc.8 <0.2.0` alone
   // silently refuses every later prerelease — 0.1.5-rc.1 included.
   const settingsRange = '>=0.1.0-rc.8 <0.2.0 || ^0.1.1-rc.1 || ^0.1.2-alpha.1 || ^0.1.5-rc.1'
-  assert.equal(pkg.peerDependencies?.['@deepseek-ai/dsh-settings'], settingsRange)
+  assert.equal(pkg.peerDependencies?.['@deepseek-ai/dsh-settings'], `${settingsRange} || 0.2.0-rc.2`)
   assert.equal(pkg.peerDependenciesMeta?.['@deepseek-ai/dsh-settings']?.optional, true)
   assert.equal(pkg.devDependencies?.['@deepseek-ai/dsh-settings'], settingsRange)
   assert.equal(pkg.peerDependencies?.['@deepseek-ai/dsh-client-runtime'], undefined)

@@ -110,6 +110,15 @@ test('browser bundle anchors rewind to direct user messages and restores their d
   await injected.openRestoredSession('session-child', '原来的问题')
   assert.equal(openedSession, 'session-child')
   assert.equal(restoredDraft, '原来的问题')
+  // DSH 0.2 moved navigation out of ClientSessions; the scope still owns input.
+  openedSession = undefined
+  await plugin.openSessionWithDraft({
+    sessions: { scope(id) { return id === openedSession ? scope : undefined } },
+    get(name) { assert.equal(name, 'uiWorkspace'); return { openSession(id) { openedSession = id } } },
+    conversation: { input: { for(value) { assert.equal(value, scope); return { setDraft(text) { restoredDraft = text } } } } },
+  }, 'modern-child', 'modern draft')
+  assert.equal(openedSession, 'modern-child')
+  assert.equal(restoredDraft, 'modern draft')
   assert.equal(typeof conversationRegistration.component, 'function')
   assert.equal(settingsRegistration.entry.key, 'turn-rewind')
   assert.equal(typeof settingsRegistration.component, 'function')

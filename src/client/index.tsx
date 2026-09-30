@@ -100,7 +100,7 @@ interface LocaleRuntimeLike {
 interface ClientContextLike {
   readonly slots: SlotsLike
   readonly sessions: {
-    open(sessionId: string): void
+    open?(sessionId: string): void
     scope(sessionId: string): unknown | undefined
   }
   readonly conversation: {
@@ -1769,11 +1769,16 @@ function samePortalTargets(
   })
 }
 
-async function openSessionWithDraft(ctx: ClientContextLike, sessionId: string, promptText: string): Promise<void> {
+export async function openSessionWithDraft(ctx: ClientContextLike, sessionId: string, promptText: string): Promise<void> {
+  if (typeof ctx.sessions.open === 'function') ctx.sessions.open(sessionId)
+  else {
+    const navigation = ctx.get?.('uiWorkspace') as { openSession(id: string): void } | undefined
+    if (navigation === undefined) throw new Error(uiText().sessionNotReady)
+    navigation.openSession(sessionId)
+  }
   let lastError: unknown = new Error(uiText().sessionNotReady)
   for (let attempt = 0; attempt < 20; attempt += 1) {
     try {
-      ctx.sessions.open(sessionId)
       const scope = ctx.sessions.scope(sessionId)
       if (scope !== undefined) {
         ctx.conversation.input.for(scope).setDraft(promptText)
