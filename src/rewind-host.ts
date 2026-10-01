@@ -678,8 +678,14 @@ async function createConversationRestart(
   // that returns undefined instead of failing the request.
   const controller = ctx.get('sessionController') as SessionControllerLike | undefined
   if (controller !== undefined) {
+    // Modern hosts require workspace membership independently of Session cwd.
+    // Preserve the source association; never guess a workspace from its path.
+    const registry = ctx.get('workspaceRegistry') as {
+      list(): readonly { readonly id: string; readonly sessionIds: readonly string[] }[]
+    } | undefined
+    const workspace = registry?.list().find(candidate => candidate.sessionIds.includes(sourceId))
     const created = checkpoint.previousTurnEndSeq === undefined
-      ? await controller.create({ cwd: checkpoint.cwd })
+      ? await controller.create(workspace === undefined ? { cwd: checkpoint.cwd } : { workspaceId: workspace.id })
       : await controller.fork({ sessionId: sourceId, atSeq: checkpoint.previousTurnEndSeq })
     return { sessionId: requiredText(created.sessionId, 'sessionController sessionId') }
   }

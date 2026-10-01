@@ -75,7 +75,7 @@ interface LocaleRuntimeLike {
 interface ClientContextLike {
     readonly slots: SlotsLike;
     readonly sessions: {
-        open(sessionId: string): void;
+        open?(sessionId: string): void;
         scope(sessionId: string): unknown | undefined;
     };
     readonly conversation: {
@@ -241,6 +241,7 @@ export declare function selectRewindMessageTarget(value: RewindNodeLike): {
     readonly matched: RewindMatch;
     readonly rowKey: string;
 } | null;
+export declare function openSessionWithDraft(ctx: ClientContextLike, sessionId: string, promptText: string): Promise<void>;
 /**
  * Read one rewind response body without ever leaking a raw parse error.
  *

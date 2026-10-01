@@ -640,6 +640,31 @@ test('sessionController creates the blank Session for a first-message rewind', a
   assert.deepEqual(calls, [['create', { cwd: f.workspace }]])
 })
 
+test('first-message restart retains the source workspace association on modern hosts', async (t) => {
+  const f = await fixture()
+  t.after(f.cleanup)
+  const calls = []
+  const handler = handlerFor(f, new Map([
+    ['session-web', liveSession('session-web', f.workspace, oneTurnEvents())],
+  ]), {
+    apiProxy: undefined,
+    workspaceRegistry: { list: () => [
+      { id: 'unrelated', sessionIds: ['other-session'] },
+      { id: 'source-workspace', sessionIds: ['session-web'] },
+    ] },
+    sessionController: {
+      async create(value) { calls.push(value); return { sessionId: 'session-created' } },
+      async fork() { throw new Error('first message must create') },
+    },
+  })
+  const result = await request(handler, 'POST', '/turn-rewind', {
+    mode: 'messages', sessionId: 'session-web', messageSeq: 2,
+  })
+  assert.equal(result.status, 200)
+  assert.equal(result.body.sessionId, 'session-created')
+  assert.deepEqual(calls, [{ workspaceId: 'source-workspace' }])
+})
+
 test('a host exposing neither restart service fails closed with an explained error', async (t) => {
   const f = await fixture()
   t.after(f.cleanup)
