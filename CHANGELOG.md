@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Support exact DSH `0.2.1-rc.3` through the settings peer and compatibility declarations; keep earlier supported versions and reject unverified future prereleases.
+- 通过 settings peer 和兼容性声明支持 DSH `0.2.1-rc.3`，保留此前支持的版本，不放行未验证的未来预发布版。
+
 ## 0.3.10 — 2026-10-18
 
 - Support DSH `0.2.1-rc.2` through explicit peer ranges and compatibility declarations.
