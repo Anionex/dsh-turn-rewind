@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { createDeadline } from './deadline.js'
 import { ChangeLedgerError, errorMessage } from './errors.js'
@@ -837,6 +838,78 @@ async function readBody(request: HttpRequestLike): Promise<unknown> {
 function json(response: HttpResponseLike, status: number, value: unknown): void {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
   response.end(`${JSON.stringify(value)}\n`)
+}
+
+/** Same-origin route that replays one stored attachment's bytes to the browser. */
+export const ATTACHMENT_HTTP_PATH = '/turn-rewind/attachment-bytes'
+
+/** Shape of a durable attachment reference as stored on a user message. */
+interface AttachmentRefLike {
+  readonly attachmentId: string
+  readonly name?: string
+  readonly mediaType?: string
+}
+
+/**
+ * Attachment store capability needed to turn a durable reference back into bytes.
+ *
+ * Both readers are provider-owned: a deployment without a local store rejects
+ * them, which this route reports as an unavailable attachment rather than a
+ * crash.
+ */
+interface AttachmentStoreLike {
+  fileHostPath(ref: { readonly attachmentId: string }): string
+  imageHostPath(ref: { readonly attachmentId: string }): string
+}
+
+/** Register the attachment-bytes route consumed by the rewound composer draft. */
+export function installAttachmentHttp(ctx: Context): void {
+  ctx.effect(() => (ctx as unknown as { webServer: HttpServerLike }).webServer.register({
+    kind: 'exact',
+    path: ATTACHMENT_HTTP_PATH,
+    handler: createAttachmentHttpHandler(ctx),
+  }), 'change-ledger.attachmentHttp')
+}
+
+/**
+ * Build the attachment-bytes route as a testable unit.
+ *
+ * The Host response type carries a string body only, so bytes travel as base64
+ * inside the usual JSON envelope; the browser rebuilds a `File` from them.
+ */
+export function createAttachmentHttpHandler(
+  ctx: { get(name: string): unknown },
+): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void> {
+  return async (request, response) => {
+    if (request.method !== 'GET') {
+      json(response, 405, { ok: false, error: 'method not allowed' })
+      return
+    }
+    try {
+      const url = new URL(request.url ?? ATTACHMENT_HTTP_PATH, 'http://dsh.local')
+      const attachmentId = requiredText(url.searchParams.get('attachmentId'), 'attachmentId')
+      const kind = url.searchParams.get('kind') === 'image' ? 'image' : 'file'
+      const mediaType = optionalText(url.searchParams.get('mediaType') ?? undefined, 'mediaType')
+      const store = ctx.get('attachments') as AttachmentStoreLike | undefined
+      if (store === undefined) {
+        json(response, 503, { ok: false, error: 'attachment store is unavailable' })
+        return
+      }
+      const ref: AttachmentRefLike = { attachmentId }
+      const hostPath = kind === 'image' ? store.imageHostPath(ref) : store.fileHostPath(ref)
+      const bytes = await readFile(hostPath)
+      json(response, 200, {
+        ok: true,
+        attachmentId,
+        kind,
+        ...(mediaType === undefined ? {} : { mediaType }),
+        data: bytes.toString('base64'),
+      })
+    } catch (error) {
+      const message = errorMessage(error)
+      json(response, message.includes('ENOENT') ? 404 : 400, { ok: false, error: message })
+    }
+  }
 }
 
 export const MANAGE_HTTP_PATH = '/turn-rewind/manage'

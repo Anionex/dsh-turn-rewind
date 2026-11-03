@@ -41,6 +41,26 @@ test('browser bundle anchors rewind to direct user messages and restores their d
     }))),
     { messageSeq: 7, promptText: '先改 A\n再改 B' },
   )
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(plugin.selectRewindMessage({
+      kind: 'user', seq: 9,
+      content: [
+        { type: 'text', text: '看一下这个' },
+        { type: 'image', attachment: { attachmentId: 'sha256:aaa', mediaType: 'image/png', name: 'shot.png' } },
+        { type: 'file', attachment: { attachmentId: 'sha256:bbb', name: 'spec.pdf', mediaType: 'application/pdf' } },
+        // A reference without an id cannot be replayed and must not fail the restart.
+        { type: 'file', attachment: {} },
+      ],
+    }))),
+    {
+      messageSeq: 9,
+      promptText: '看一下这个',
+      attachments: [
+        { kind: 'image', attachmentId: 'sha256:aaa', name: 'shot.png', mediaType: 'image/png' },
+        { kind: 'file', attachmentId: 'sha256:bbb', name: 'spec.pdf', mediaType: 'application/pdf' },
+      ],
+    },
+  )
   assert.equal(plugin.selectRewindMessage({ kind: 'assistant', seq: 8, turn: 3 }), null)
   assert.deepEqual(
     JSON.parse(JSON.stringify(plugin.selectRewindMessageTarget({
@@ -133,10 +153,11 @@ test('browser bundle anchors rewind to direct user messages and restores their d
  * small enough for the style effect.
  * @returns the registered client plugin.
  */
-async function bootPluginEntry() {
+async function bootPluginEntry(extras = {}) {
   const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
   let plugin
   const context = {
+    ...extras,
     AbortController,
     // followHostLocale schedules a microtask and a macrotask re-check of the
     // Host's locale (see src/client/index.tsx); every module realm that runs
@@ -905,4 +926,94 @@ test('the rewind UI follows the Host language and stays Chinese without one', as
   assert.deepEqual(registered, ['conversation.session.header.actions', 'settings.plugin.item', 'settings.plugins.tab'])
   assert.equal(plugin.fileRecoveryLabel('deleted'), '找回文件')
   unmountBroken()
+})
+
+test('a restart hands the message attachments back to the composer', async () => {
+  // Each stored object answers with the same JSON envelope the Host route writes.
+  const objects = new Map([
+    ['sha256:aaa', Buffer.from('image-bytes')],
+    ['sha256:bbb', Buffer.from('file-bytes')],
+  ])
+  const requested = []
+  const plugin = await bootPluginEntry({
+    // Browser globals the bundle uses to rebuild a File from stored bytes.
+    URL,
+    URLSearchParams,
+    atob: value => Buffer.from(value, 'base64').toString('binary'),
+    File: class FileDouble {
+      constructor(parts, name, options) {
+        this.parts = parts
+        this.name = name
+        this.type = options?.type
+      }
+    },
+    fetch: async url => {
+      const query = new URL(url, 'http://dsh.local').searchParams
+      const attachmentId = query.get('attachmentId')
+      requested.push({ attachmentId, kind: query.get('kind') })
+      const bytes = objects.get(attachmentId)
+      if (bytes === undefined) {
+        return { ok: false, status: 404, text: async () => JSON.stringify({ ok: false, error: 'not stored' }) }
+      }
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ok: true, attachmentId, data: bytes.toString('base64') }),
+      }
+    },
+  })
+
+  const created = []
+  const adopted = []
+  const released = []
+  let refuse = false
+  const conversation = {
+    input: { shell: sessionId => sessionId === 'session-child' ? { addFiles(references, ids) { adopted.push({ references, ids }); return !refuse } } : undefined },
+    createDrafts(sessionId, files) {
+      assert.equal(sessionId, 'session-child')
+      const drafts = files.map((file, index) => ({ kind: index === 0 ? 'image' : 'file', id: `draft-${index}` }))
+      created.push(...drafts)
+      return drafts
+    },
+    releaseDraftAttachments(drafts) { released.push(...drafts) },
+  }
+
+  let draft
+  await plugin.openSessionWithDraft({
+    sessions: { open() {}, scope: () => ({}) },
+    conversation: { ...conversation, input: { ...conversation.input, for: () => ({ setDraft(text) { draft = text } }) } },
+  }, 'session-child', '看一下这个', [
+    { kind: 'image', attachmentId: 'sha256:aaa', name: 'shot.png', mediaType: 'image/png' },
+    { kind: 'file', attachmentId: 'sha256:bbb', name: 'spec.pdf', mediaType: 'application/pdf' },
+  ])
+
+  assert.equal(draft, '看一下这个')
+  // The draft is written first; attachments arrive behind it.
+  for (let attempt = 0; attempt < 50 && adopted.length === 0; attempt += 1) {
+    await new Promise(resolve => { setTimeout(resolve, 5) })
+  }
+  assert.deepEqual(requested, [
+    { attachmentId: 'sha256:aaa', kind: 'image' },
+    { attachmentId: 'sha256:bbb', kind: 'file' },
+  ])
+  assert.deepEqual(JSON.parse(JSON.stringify(created.map(entry => entry.id))), ['draft-0', 'draft-1'])
+  // Attachments are adopted by id only: no `@path` reference sneaks in.
+  assert.deepEqual(JSON.parse(JSON.stringify(adopted)), [{ references: [], ids: ['draft-0', 'draft-1'] }])
+
+  // A composer that refuses the insert releases the uploads instead of leaking them.
+  refuse = true
+  const second = await plugin.restoreComposerAttachments({
+    conversation: conversation,
+  }, 'session-child', [
+    { kind: 'file', attachmentId: 'sha256:bbb', name: 'spec.pdf', mediaType: 'application/pdf' },
+  ])
+  assert.equal(second, 0)
+  assert.deepEqual(JSON.parse(JSON.stringify(released.map(entry => entry.id))), ['draft-0'])
+
+  // No mounted composer (the Session is still opening) keeps the text path only.
+  assert.equal(await plugin.restoreComposerAttachments({
+    conversation: { ...conversation, input: { shell: () => undefined } },
+  }, 'session-child', [
+    { kind: 'file', attachmentId: 'sha256:bbb', name: 'spec.pdf', mediaType: 'application/pdf' },
+  ]), 0)
 })

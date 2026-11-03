@@ -6,10 +6,22 @@ import {
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 
+/** Durable reference carried by one `image` / `file` content block. */
+interface AttachmentRefLike {
+  readonly attachmentId?: string
+  readonly name?: string
+  readonly mediaType?: string
+  readonly bytes?: number
+}
+
 interface ConversationNodeLike {
   readonly kind: string
   readonly seq: number
-  readonly content?: readonly { readonly type: string; readonly text?: string }[]
+  readonly content?: readonly {
+    readonly type: string
+    readonly text?: string
+    readonly attachment?: AttachmentRefLike
+  }[]
 }
 
 interface ConversationChatNodeLike {
@@ -47,20 +59,38 @@ type SnapshotSelectorHook = <T>(selector: (snapshot: ConversationSnapshotLike) =
 
 type RewindNodeLike = ConversationNodeLike | ConversationChatNodeLike
 
+/** One durable attachment that the restart has to hand back to the composer. */
+interface RewindAttachment {
+  readonly kind: 'image' | 'file'
+  readonly attachmentId: string
+  readonly name: string
+  readonly mediaType: string
+}
+
 interface RewindMatch {
   readonly messageSeq: number
   readonly promptText: string
+  /** Present only when the message carried attachments; absent keeps older doubles valid. */
+  readonly attachments?: readonly RewindAttachment[]
 }
 
 interface RewindMessageActionProps {
   readonly matched: RewindMatch
   readonly sessionId: string
-  readonly openRestoredSession: (sessionId: string, promptText: string) => Promise<void>
+  readonly openRestoredSession: (
+    sessionId: string,
+    promptText: string,
+    attachments?: readonly RewindAttachment[],
+  ) => Promise<void>
 }
 
 interface RewindPortalBridgeProps {
   readonly sessionId: string
-  readonly openRestoredSession: (sessionId: string, promptText: string) => Promise<void>
+  readonly openRestoredSession: (
+    sessionId: string,
+    promptText: string,
+    attachments?: readonly RewindAttachment[],
+  ) => Promise<void>
   readonly useSession: SnapshotSelectorHook
   readonly useChat?: SnapshotSelectorHook
 }
@@ -222,6 +252,20 @@ export interface ManageOverview {
 
 const PATH = '/turn-rewind'
 const MANAGE_PATH = '/turn-rewind/manage'
+/** Same-origin route that replays one stored attachment's bytes. */
+const ATTACHMENT_BYTES_PATH = '/turn-rewind/attachment-bytes'
+
+/** One draft descriptor returned by the conversation service. */
+interface DraftAttachmentLike {
+  readonly kind?: string
+  readonly id: string
+}
+
+/** Composer shell surface needed to adopt freshly created draft attachments. */
+interface ComposerShellLike {
+  addFiles(references: readonly unknown[], ids: readonly string[]): boolean
+}
+
 const STYLE_ID = '@anionex/dsh-turn-rewind'
 const styles = `
 .dcl-rewind-tail{display:inline-flex;align-items:center;align-self:center;order:0;height:24px;margin-left:2px}
@@ -852,14 +896,45 @@ function hostLocale(ctx: ClientContextLike): string | undefined {
   }
 }
 
-/** Return the rewind anchor and editable text owned by one direct user message. */
+/** Return the rewind anchor, editable text, and durable attachments owned by one direct user message. */
 export function selectRewindMessage(node: ConversationNodeLike): RewindMatch | null {
   if (node.kind !== 'user' || !Number.isSafeInteger(node.seq) || node.seq < 0) return null
   const promptText = (node.content ?? [])
     .filter((block): block is { readonly type: string; readonly text: string } => block.type === 'text' && typeof block.text === 'string')
     .map(block => block.text)
     .join('\n')
-  return { messageSeq: node.seq, promptText }
+  const attachments = selectRewindAttachments(node)
+  return attachments.length === 0
+    ? { messageSeq: node.seq, promptText }
+    : { messageSeq: node.seq, promptText, attachments }
+}
+
+/**
+ * Collect the durable `image` / `file` references carried by one user message.
+ *
+ * A reference that carries no `attachmentId` cannot be replayed, so it is
+ * dropped instead of failing the whole restart: the text still comes back.
+ * @param node - the direct user-message node the rewind anchors on.
+ * @returns attachments in message order; empty when the message has none.
+ */
+export function selectRewindAttachments(node: ConversationNodeLike): readonly RewindAttachment[] {
+  const attachments: RewindAttachment[] = []
+  for (const block of node.content ?? []) {
+    if (block.type !== 'image' && block.type !== 'file') continue
+    const attachment = block.attachment
+    if (attachment === undefined || typeof attachment.attachmentId !== 'string') continue
+    const fallbackName = block.type === 'image' ? 'image' : 'file'
+    const mediaType = typeof attachment.mediaType === 'string' && attachment.mediaType !== ''
+      ? attachment.mediaType
+      : 'application/octet-stream'
+    attachments.push({
+      kind: block.type,
+      attachmentId: attachment.attachmentId,
+      name: typeof attachment.name === 'string' && attachment.name !== '' ? attachment.name : fallbackName,
+      mediaType,
+    })
+  }
+  return attachments
 }
 
 /**
@@ -887,8 +962,12 @@ export function apply(ctx: ClientContextLike): void {
     id: 'turn-rewind-portals',
     order: 100,
     inject: () => ({
-      openRestoredSession: async (sessionId: string, promptText: string) => {
-        await openSessionWithDraft(ctx, sessionId, promptText)
+      openRestoredSession: async (
+        sessionId: string,
+        promptText: string,
+        attachments?: readonly RewindAttachment[],
+      ) => {
+        await openSessionWithDraft(ctx, sessionId, promptText, attachments)
       },
     }),
   }, RewindMessagePortals))
@@ -1146,7 +1225,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
         const childSessionId = requiredString(result.sessionId, 'sessionId')
         setCompleted(t.completedMessages)
         try {
-          await openRestoredSession(childSessionId, matched.promptText)
+          await openRestoredSession(childSessionId, matched.promptText, matched.attachments)
           setOpen(false)
         } catch (navigationError) {
           setError(t.openFailed(messageOf(navigationError)))
@@ -1162,7 +1241,7 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
       requiredString(result.rescuePointId, 'rescuePointId')
       setCompleted(t.completedBoth)
       try {
-        await openRestoredSession(childSessionId, matched.promptText)
+        await openRestoredSession(childSessionId, matched.promptText, matched.attachments)
         setOpen(false)
       } catch (navigationError) {
         setError(t.restoredButOpenFailed(messageOf(navigationError)))
@@ -1756,6 +1835,23 @@ function collectPortalTargets(nodes: readonly RewindNodeLike[]): readonly Rewind
   return targets
 }
 
+/** Compare two attachment lists by identity: order and durable id both matter. */
+function sameAttachments(
+  left: readonly RewindAttachment[] | undefined,
+  right: readonly RewindAttachment[] | undefined,
+): boolean {
+  const leftList = left ?? []
+  const rightList = right ?? []
+  return leftList.length === rightList.length && leftList.every((attachment, index) => {
+    const other = rightList[index]
+    return other !== undefined
+      && attachment.kind === other.kind
+      && attachment.attachmentId === other.attachmentId
+      && attachment.name === other.name
+      && attachment.mediaType === other.mediaType
+  })
+}
+
 function samePortalTargets(
   left: readonly RewindPortalTarget[],
   right: readonly RewindPortalTarget[],
@@ -1766,10 +1862,109 @@ function samePortalTargets(
       && target.container === other.container
       && target.matched.messageSeq === other.matched.messageSeq
       && target.matched.promptText === other.matched.promptText
+      && sameAttachments(target.matched.attachments, other.matched.attachments)
   })
 }
 
-export async function openSessionWithDraft(ctx: ClientContextLike, sessionId: string, promptText: string): Promise<void> {
+/**
+ * Re-upload one durable attachment as a fresh draft attachment.
+ *
+ * The stored bytes are read back from the Host, wrapped in a `File`, and handed
+ * to the composer bridge, because the composer only understands browser files.
+ * @param attachment - durable reference taken from the rewound message.
+ * @returns the rebuilt file, or `undefined` when the Host cannot serve it.
+ */
+export async function readAttachmentFile(attachment: RewindAttachment): Promise<File | undefined> {
+  const query = new URLSearchParams({
+    attachmentId: attachment.attachmentId,
+    kind: attachment.kind,
+    mediaType: attachment.mediaType,
+  })
+  const response = await fetch(`${ATTACHMENT_BYTES_PATH}?${query.toString()}`, {
+    headers: { accept: 'application/json' },
+  })
+  const value = await responseJson(response) as { readonly data?: unknown }
+  if (typeof value.data !== 'string' || value.data === '') return undefined
+  const binary = atob(value.data)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  return new File([bytes], attachment.name, { type: attachment.mediaType })
+}
+
+/**
+ * Hand a rewound message's attachments back to the composer.
+ *
+ * Draft attachments are browser-owned `File`s with upload receipts, so the
+ * durable references are read back from the Host and registered exactly the way
+ * the composer's own picker does it: `createDrafts` allocates the drafts,
+ * `shell.addFiles` adopts them into the editor.
+ *
+ * Best effort by design: the text draft is the part the user cannot retype, so a
+ * failed attachment never undoes a successful restart. A composer that is not
+ * mounted yet keeps the text only, exactly as before this feature.
+ * @param ctx - client context carrying the conversation service.
+ * @param sessionId - Session whose composer receives the files.
+ * @param attachments - durable references carried by the rewound message.
+ * @returns number of attachments actually restored.
+ */
+export async function restoreComposerAttachments(
+  ctx: ClientContextLike,
+  sessionId: string,
+  attachments: readonly RewindAttachment[],
+): Promise<number> {
+  if (attachments.length === 0) return 0
+  const conversation = ctx.conversation as unknown as {
+    createDrafts?(sessionId: string, files: readonly File[]): readonly DraftAttachmentLike[]
+    releaseDraftAttachments?(drafts: readonly DraftAttachmentLike[]): void
+    input?: { shell?(sessionId: string): ComposerShellLike | undefined }
+  }
+  const shell = conversation.input?.shell?.(sessionId)
+  if (shell === undefined || typeof conversation.createDrafts !== 'function') return 0
+  const files: File[] = []
+  for (const attachment of attachments) {
+    try {
+      const file = await readAttachmentFile(attachment)
+      if (file !== undefined) files.push(file)
+    } catch {
+      // A missing object or an older Host stays silent; the rest still restore.
+    }
+  }
+  if (files.length === 0) return 0
+  let drafts: readonly DraftAttachmentLike[]
+  try {
+    drafts = conversation.createDrafts(sessionId, files)
+  } catch {
+    return 0
+  }
+  if (drafts.length === 0) return 0
+  let adopted = false
+  try {
+    adopted = shell.addFiles([], drafts.map(draft => draft.id))
+  } catch {
+    adopted = false
+  }
+  if (!adopted) {
+    // The composer refused the insertion (busy or locked); release the uploads
+    // instead of leaving orphaned drafts behind.
+    conversation.releaseDraftAttachments?.(drafts)
+    return 0
+  }
+  return drafts.length
+}
+
+/**
+ * Open the rewound Session and put the message back into its composer.
+ * @param ctx - client context carrying the Session navigation service.
+ * @param sessionId - target Session.
+ * @param promptText - message text to restore.
+ * @param attachments - attachments carried by that message.
+ */
+export async function openSessionWithDraft(
+  ctx: ClientContextLike,
+  sessionId: string,
+  promptText: string,
+  attachments: readonly RewindAttachment[] = [],
+): Promise<void> {
   if (typeof ctx.sessions.open === 'function') ctx.sessions.open(sessionId)
   else {
     const navigation = ctx.get?.('uiWorkspace') as { openSession(id: string): void } | undefined
@@ -1782,6 +1977,9 @@ export async function openSessionWithDraft(ctx: ClientContextLike, sessionId: st
       const scope = ctx.sessions.scope(sessionId)
       if (scope !== undefined) {
         ctx.conversation.input.for(scope).setDraft(promptText)
+        // The draft is already visible; attachments stream in behind it so a
+        // slow or oversized file never blocks the text the user asked for.
+        void restoreComposerAttachments(ctx, sessionId, attachments)
         return
       }
       lastError = new Error(uiText().sessionNotReady)

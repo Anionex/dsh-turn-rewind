@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { ChangeLedgerEngine } from './engine.js'
-import { installManageHttp, installRewindHttp, TurnCheckpointCoordinator } from './rewind-host.js'
+import { installAttachmentHttp, installManageHttp, installRewindHttp, TurnCheckpointCoordinator } from './rewind-host.js'
 import { installTurnRewindSettings, TurnRewindSettingsSchema } from './settings.js'
 import type { ChangeLedgerConfig } from './types.js'
 
@@ -68,6 +68,7 @@ export class ChangeLedgerService {
     ctx.inject(['webServer', 'sessions', 'sessionQuery', 'agents'], (scope: Context) => {
       installRewindHttp(scope, this.engine, checkpoints)
       installManageHttp(scope, this.engine)
+      installAttachmentHttp(scope)
     })
     installTurnRewindSettings(ctx, normalized, this.engine)
     void this.engine.initialize().then((reconciled) => {

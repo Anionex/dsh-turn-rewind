@@ -184,6 +184,19 @@ export declare function installRewindHttp(ctx: Context, engine: ChangeLedgerEngi
 export declare function createRewindHttpHandler(ctx: ConversationRestartContext & {
     readonly agents?: AgentsLike;
 }, engine: ChangeLedgerEngine, coordinator: TurnCheckpointCoordinator): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void>;
+/** Same-origin route that replays one stored attachment's bytes to the browser. */
+export declare const ATTACHMENT_HTTP_PATH = "/turn-rewind/attachment-bytes";
+/** Register the attachment-bytes route consumed by the rewound composer draft. */
+export declare function installAttachmentHttp(ctx: Context): void;
+/**
+ * Build the attachment-bytes route as a testable unit.
+ *
+ * The Host response type carries a string body only, so bytes travel as base64
+ * inside the usual JSON envelope; the browser rebuilds a `File` from them.
+ */
+export declare function createAttachmentHttpHandler(ctx: {
+    get(name: string): unknown;
+}): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void>;
 export declare const MANAGE_HTTP_PATH = "/turn-rewind/manage";
 /** Register the same-origin storage-management endpoint consumed by the settings card. */
 export declare function installManageHttp(ctx: Context, engine: ChangeLedgerEngine): void;
