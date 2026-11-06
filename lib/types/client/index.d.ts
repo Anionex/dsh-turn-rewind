@@ -102,6 +102,7 @@ interface ClientContextLike {
             for(scope: unknown): {
                 setDraft(text: string): void;
                 addAttachments?(ids: readonly string[]): boolean;
+                notify?(level: 'info' | 'error', text: string): void;
             };
         };
     };
