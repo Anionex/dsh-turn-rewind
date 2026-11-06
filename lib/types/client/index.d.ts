@@ -50,6 +50,8 @@ interface RewindAttachment {
     readonly attachmentId: string;
     readonly name: string;
     readonly mediaType: string;
+    readonly sourceSessionId?: string;
+    readonly messageSeq?: number;
 }
 interface RewindMatch {
     readonly messageSeq: number;
@@ -99,6 +101,7 @@ interface ClientContextLike {
         readonly input: {
             for(scope: unknown): {
                 setDraft(text: string): void;
+                addAttachments?(ids: readonly string[]): boolean;
             };
         };
     };
@@ -223,8 +226,7 @@ export declare function selectRewindMessage(node: ConversationNodeLike): RewindM
 /**
  * Collect the durable `image` / `file` references carried by one user message.
  *
- * A reference that carries no `attachmentId` cannot be replayed, so it is
- * dropped instead of failing the whole restart: the text still comes back.
+ * Keep missing references so restoration can report unavailable attachments.
  * @param node - the direct user-message node the rewind anchors on.
  * @returns attachments in message order; empty when the message has none.
  */
@@ -275,24 +277,23 @@ export declare function selectRewindMessageTarget(value: RewindNodeLike): {
  * @param attachment - durable reference taken from the rewound message.
  * @returns the rebuilt file, or `undefined` when the Host cannot serve it.
  */
-export declare function readAttachmentFile(attachment: RewindAttachment): Promise<File | undefined>;
+export declare function readAttachmentFile(attachment: RewindAttachment): Promise<File>;
 /**
  * Hand a rewound message's attachments back to the composer.
  *
  * Draft attachments are browser-owned `File`s with upload receipts, so the
  * durable references are read back from the Host and registered exactly the way
  * the composer's own picker does it: `createDrafts` allocates the drafts,
- * `shell.addFiles` adopts them into the editor.
+ * `input.for(scope).addAttachments` adopts their draft IDs.
  *
- * Best effort by design: the text draft is the part the user cannot retype, so a
- * failed attachment never undoes a successful restart. A composer that is not
- * mounted yet keeps the text only, exactly as before this feature.
+ * Use the public session input facade, which exists before the visual editor
+ * mounts. Failures are surfaced to the rewind dialog and refused drafts are released.
  * @param ctx - client context carrying the conversation service.
  * @param sessionId - Session whose composer receives the files.
  * @param attachments - durable references carried by the rewound message.
  * @returns number of attachments actually restored.
  */
-export declare function restoreComposerAttachments(ctx: ClientContextLike, sessionId: string, attachments: readonly RewindAttachment[]): Promise<number>;
+export declare function restoreComposerAttachments(ctx: ClientContextLike, sessionId: string, attachments: readonly RewindAttachment[], prepared?: readonly PromiseSettledResult<File>[]): Promise<number>;
 /**
  * Open the rewound Session and put the message back into its composer.
  * @param ctx - client context carrying the Session navigation service.

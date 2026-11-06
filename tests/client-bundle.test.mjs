@@ -8,6 +8,7 @@ test('browser bundle anchors rewind to direct user messages and restores their d
   let plugin
   const context = {
     AbortController,
+    AbortSignal,
     setTimeout,
     window: {
       __ModuleLoader__: {
@@ -39,7 +40,7 @@ test('browser bundle anchors rewind to direct user messages and restores their d
       kind: 'user', seq: 7,
       content: [{ type: 'text', text: '先改 A' }, { type: 'image', url: 'ignored' }, { type: 'text', text: '再改 B' }],
     }))),
-    { messageSeq: 7, promptText: '先改 A\n再改 B' },
+    { messageSeq: 7, promptText: '先改 A\n再改 B', attachments: [{ kind: 'image', attachmentId: '', name: 'image', mediaType: 'application/octet-stream' }] },
   )
   assert.deepEqual(
     JSON.parse(JSON.stringify(plugin.selectRewindMessage({
@@ -48,7 +49,7 @@ test('browser bundle anchors rewind to direct user messages and restores their d
         { type: 'text', text: '看一下这个' },
         { type: 'image', attachment: { attachmentId: 'sha256:aaa', mediaType: 'image/png', name: 'shot.png' } },
         { type: 'file', attachment: { attachmentId: 'sha256:bbb', name: 'spec.pdf', mediaType: 'application/pdf' } },
-        // A reference without an id cannot be replayed and must not fail the restart.
+        // Missing references remain visible so restoration reports them.
         { type: 'file', attachment: {} },
       ],
     }))),
@@ -58,6 +59,7 @@ test('browser bundle anchors rewind to direct user messages and restores their d
       attachments: [
         { kind: 'image', attachmentId: 'sha256:aaa', name: 'shot.png', mediaType: 'image/png' },
         { kind: 'file', attachmentId: 'sha256:bbb', name: 'spec.pdf', mediaType: 'application/pdf' },
+        { kind: 'file', attachmentId: '', name: 'file', mediaType: 'application/octet-stream' },
       ],
     },
   )
@@ -159,6 +161,7 @@ async function bootPluginEntry(extras = {}) {
   const context = {
     ...extras,
     AbortController,
+    AbortSignal,
     // followHostLocale schedules a microtask and a macrotask re-check of the
     // Host's locale (see src/client/index.tsx); every module realm that runs
     // apply() needs both, same as bootPortalBridge's context already grants.
@@ -302,6 +305,7 @@ async function bootPortalBridge(shape = 'current') {
   })
   const context = {
     AbortController,
+    AbortSignal,
     HTMLElement: Element,
     MutationObserver: class MutationObserver {
       constructor(callback) { this.callback = callback }
@@ -542,6 +546,7 @@ test('rewind dialog restores files in two modes and allows reviewed Git history 
   let plugin
   const context = {
     AbortController,
+    AbortSignal,
     setTimeout,
     window: {
       __ModuleLoader__: {
@@ -738,6 +743,7 @@ test('settings card renders the namespace form and manages checkpoints', async (
   }
   const context = {
     AbortController,
+    AbortSignal,
     setTimeout,
     fetch: async (url, options) => {
       requests.push({ url, options })
@@ -968,7 +974,7 @@ test('a restart hands the message attachments back to the composer', async () =>
   const released = []
   let refuse = false
   const conversation = {
-    input: { shell: sessionId => sessionId === 'session-child' ? { addFiles(references, ids) { adopted.push({ references, ids }); return !refuse } } : undefined },
+    input: { for: () => ({ addAttachments(ids) { adopted.push({ ids }); return !refuse } }) },
     createDrafts(sessionId, files) {
       assert.equal(sessionId, 'session-child')
       const drafts = files.map((file, index) => ({ kind: index === 0 ? 'image' : 'file', id: `draft-${index}` }))
@@ -981,14 +987,14 @@ test('a restart hands the message attachments back to the composer', async () =>
   let draft
   await plugin.openSessionWithDraft({
     sessions: { open() {}, scope: () => ({}) },
-    conversation: { ...conversation, input: { ...conversation.input, for: () => ({ setDraft(text) { draft = text } }) } },
+    conversation: { ...conversation, input: { ...conversation.input, for: scope => ({ ...conversation.input.for(scope), setDraft(text) { draft = text } }) } },
   }, 'session-child', '看一下这个', [
     { kind: 'image', attachmentId: 'sha256:aaa', name: 'shot.png', mediaType: 'image/png' },
     { kind: 'file', attachmentId: 'sha256:bbb', name: 'spec.pdf', mediaType: 'application/pdf' },
   ])
 
   assert.equal(draft, '看一下这个')
-  // The draft is written first; attachments arrive behind it.
+  // Both text and attachments are present when restoration completes.
   for (let attempt = 0; attempt < 50 && adopted.length === 0; attempt += 1) {
     await new Promise(resolve => { setTimeout(resolve, 5) })
   }
@@ -998,22 +1004,62 @@ test('a restart hands the message attachments back to the composer', async () =>
   ])
   assert.deepEqual(JSON.parse(JSON.stringify(created.map(entry => entry.id))), ['draft-0', 'draft-1'])
   // Attachments are adopted by id only: no `@path` reference sneaks in.
-  assert.deepEqual(JSON.parse(JSON.stringify(adopted)), [{ references: [], ids: ['draft-0', 'draft-1'] }])
+  assert.deepEqual(JSON.parse(JSON.stringify(adopted)), [{ ids: ['draft-0', 'draft-1'] }])
 
   // A composer that refuses the insert releases the uploads instead of leaking them.
   refuse = true
-  const second = await plugin.restoreComposerAttachments({
-    conversation: conversation,
+  await assert.rejects(plugin.restoreComposerAttachments({
+    sessions: { scope: () => ({}) }, conversation,
   }, 'session-child', [
     { kind: 'file', attachmentId: 'sha256:bbb', name: 'spec.pdf', mediaType: 'application/pdf' },
-  ])
-  assert.equal(second, 0)
+  ]), /spec.pdf/)
   assert.deepEqual(JSON.parse(JSON.stringify(released.map(entry => entry.id))), ['draft-0'])
 
-  // No mounted composer (the Session is still opening) keeps the text path only.
-  assert.equal(await plugin.restoreComposerAttachments({
-    conversation: { ...conversation, input: { shell: () => undefined } },
+  // Missing host capabilities explain which files must be added again.
+  await assert.rejects(plugin.restoreComposerAttachments({
+    sessions: { scope: () => ({}) },
+    conversation: { ...conversation, input: { for: () => ({}) } },
   }, 'session-child', [
     { kind: 'file', attachmentId: 'sha256:bbb', name: 'spec.pdf', mediaType: 'application/pdf' },
-  ]), 0)
+  ]), /spec.pdf/)
+})
+
+test('attachment reads finish before draft navigation; missing files are reported and empty files survive', async () => {
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const requests = []
+  const plugin = await bootPluginEntry({
+    URL, URLSearchParams, AbortSignal,
+    atob: value => Buffer.from(value, 'base64').toString('binary'),
+    File: class { constructor(parts, name) { this.parts = parts; this.name = name } },
+    fetch: async url => {
+      const query = new URL(url, 'http://test.local').searchParams
+      requests.push(Object.fromEntries(query))
+      await gate
+      const ok = query.get('attachmentId') === 'empty'
+      return { ok, status: ok ? 200 : 404, text: async () => JSON.stringify(ok ? { ok: true, data: '' } : { ok: false, error: 'missing' }) }
+    },
+  })
+  const events = []
+  const ctx = {
+    sessions: { open: id => events.push(['open', id]), scope: () => ({}) },
+    conversation: {
+      input: { for: () => ({ setDraft: text => events.push(['text', text]), addAttachments: ids => { events.push(['attachments', ...ids]); return true } }) },
+      createDrafts: (_id, files) => {
+        assert.deepEqual(Array.from(files, file => file.name), ['empty.txt'])
+        assert.equal(files[0].parts[0].byteLength, 0)
+        return [{ id: 'empty-draft', kind: 'file' }]
+      },
+    },
+  }
+  const pending = plugin.openSessionWithDraft(ctx, 'child', 'restored text', [
+    { kind: 'file', attachmentId: 'empty', name: 'empty.txt', mediaType: 'text/plain', sourceSessionId: 'source', messageSeq: 7 },
+    { kind: 'file', attachmentId: 'missing', name: 'missing.pdf', mediaType: 'application/pdf', sourceSessionId: 'source', messageSeq: 7 },
+  ])
+  assert.deepEqual(events, [])
+  assert.equal(requests[0].sessionId, 'source')
+  assert.equal(requests[0].messageSeq, '7')
+  release()
+  await assert.rejects(pending, /missing.pdf/)
+  assert.deepEqual(events, [['open', 'child'], ['text', 'restored text'], ['attachments', 'empty-draft']])
 })

@@ -1207,6 +1207,18 @@ test('the attachment route replays stored bytes and refuses what it cannot serve
 
   const call = async (url, options = {}) => {
     const ctx = 'attachments' in options ? { get: name => (name === 'attachments' ? options.attachments : undefined) } : { get: () => store }
+    ctx.sessions = { get: id => id === 'source' ? {
+      id, events: [{ type: 'user/message', seq: 7, data: { source: { kind: 'user' }, content: [
+        { type: 'image', attachment: { attachmentId: 'sha256:image', mediaType: 'image/png' } },
+        { type: 'file', attachment: { attachmentId: 'sha256:file', mediaType: 'application/pdf' } },
+        { type: 'file', attachment: { attachmentId: 'sha256:missing' } },
+      ] } }],
+    } : undefined }
+    ctx.sessionQuery = { readSession: async () => { throw new Error('private filesystem path') } }
+    const query = new URL(url, 'http://test.local')
+    if (!query.searchParams.has('sessionId')) query.searchParams.set('sessionId', 'source')
+    if (!query.searchParams.has('messageSeq')) query.searchParams.set('messageSeq', '7')
+    url = query.pathname + query.search
     const handler = createAttachmentHttpHandler(ctx)
     const response = {
       status: undefined,
@@ -1239,10 +1251,24 @@ test('the attachment route replays stored bytes and refuses what it cannot serve
   // An undocumented id is rejected before it reaches the filesystem.
   const invalid = await call(`${ATTACHMENT_HTTP_PATH}?kind=file`)
   assert.equal(invalid.status, 400)
-  assert.match(invalid.value.error, /attachmentId/)
+  assert.match(invalid.value.error, /unable to restore/)
 
   const wrongMethod = await call(ATTACHMENT_HTTP_PATH, { method: 'POST' })
   assert.equal(wrongMethod.status, 405)
+
+  const unreferenced = await call(`${ATTACHMENT_HTTP_PATH}?attachmentId=sha256%3Aother&kind=file`)
+  assert.equal(unreferenced.status, 404)
+  const wrongMessage = await call(`${ATTACHMENT_HTTP_PATH}?attachmentId=sha256%3Afile&kind=file&messageSeq=8`)
+  assert.equal(wrongMessage.status, 404)
+  const wrongKind = await call(`${ATTACHMENT_HTTP_PATH}?attachmentId=sha256%3Aimage&kind=file`)
+  assert.equal(wrongKind.status, 404)
+  const otherSession = await call(`${ATTACHMENT_HTTP_PATH}?attachmentId=sha256%3Afile&kind=file&sessionId=other`)
+  assert.equal(otherSession.status, 400)
+  assert.doesNotMatch(otherSession.value.error, /private filesystem/)
+  await writeFile(filePath, '')
+  const empty = await call(`${ATTACHMENT_HTTP_PATH}?attachmentId=sha256%3Afile&kind=file`)
+  assert.equal(empty.status, 200)
+  assert.equal(empty.value.data, '')
 
   // A deployment without a local attachment store says so instead of throwing.
   const unavailable = await call(`${ATTACHMENT_HTTP_PATH}?attachmentId=sha256%3Afile&kind=file`, { attachments: undefined })

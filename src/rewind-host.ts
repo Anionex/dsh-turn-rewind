@@ -858,8 +858,8 @@ interface AttachmentRefLike {
  * crash.
  */
 interface AttachmentStoreLike {
-  fileHostPath(ref: { readonly attachmentId: string }): string
-  imageHostPath(ref: { readonly attachmentId: string }): string
+  fileHostPath(ref: { readonly attachmentId: string }): string | undefined
+  imageHostPath(ref: { readonly attachmentId: string }): string | undefined
 }
 
 /** Register the attachment-bytes route consumed by the rewound composer draft. */
@@ -874,11 +874,11 @@ export function installAttachmentHttp(ctx: Context): void {
 /**
  * Build the attachment-bytes route as a testable unit.
  *
- * The Host response type carries a string body only, so bytes travel as base64
- * inside the usual JSON envelope; the browser rebuilds a `File` from them.
+ * Bytes travel in a JSON envelope shared by Web and Desktop carriers;
+ * the browser rebuilds a `File` from the verified message reference.
  */
 export function createAttachmentHttpHandler(
-  ctx: { get(name: string): unknown },
+  ctx: Pick<Context, 'get' | 'sessions' | 'sessionQuery'>,
 ): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void> {
   return async (request, response) => {
     if (request.method !== 'GET') {
@@ -888,26 +888,41 @@ export function createAttachmentHttpHandler(
     try {
       const url = new URL(request.url ?? ATTACHMENT_HTTP_PATH, 'http://dsh.local')
       const attachmentId = requiredText(url.searchParams.get('attachmentId'), 'attachmentId')
-      const kind = url.searchParams.get('kind') === 'image' ? 'image' : 'file'
-      const mediaType = optionalText(url.searchParams.get('mediaType') ?? undefined, 'mediaType')
+      const sessionId = requiredText(url.searchParams.get('sessionId'), 'sessionId')
+      const messageSeq = Number(url.searchParams.get('messageSeq'))
+      if (!url.searchParams.has('messageSeq') || !Number.isSafeInteger(messageSeq) || messageSeq < 0) throw new Error('invalid messageSeq')
+      const kind = url.searchParams.get('kind')
+      if (kind !== 'image' && kind !== 'file') throw new Error('invalid attachment kind')
+      const session = await readSession(ctx, sessionId)
+      const message = getSessionEvents(session).find(event => event.seq === messageSeq && event.type === 'user/message' && isDirectUserMessage(event))
+      const blocks = Array.isArray(message?.data.content) ? message.data.content : []
+      const block = blocks.find(value => value?.type === kind && value.attachment?.attachmentId === attachmentId)
+      if (block === undefined) {
+        json(response, 404, { ok: false, error: 'attachment is not referenced by the selected message' })
+        return
+      }
       const store = ctx.get('attachments') as AttachmentStoreLike | undefined
       if (store === undefined) {
         json(response, 503, { ok: false, error: 'attachment store is unavailable' })
         return
       }
-      const ref: AttachmentRefLike = { attachmentId }
+      const ref = block.attachment as AttachmentRefLike
       const hostPath = kind === 'image' ? store.imageHostPath(ref) : store.fileHostPath(ref)
+      if (hostPath === undefined) {
+        json(response, 503, { ok: false, error: 'attachment is not available from the local store' })
+        return
+      }
       const bytes = await readFile(hostPath)
       json(response, 200, {
         ok: true,
         attachmentId,
         kind,
-        ...(mediaType === undefined ? {} : { mediaType }),
+        ...(ref.mediaType === undefined ? {} : { mediaType: ref.mediaType }),
         data: bytes.toString('base64'),
       })
     } catch (error) {
       const message = errorMessage(error)
-      json(response, message.includes('ENOENT') ? 404 : 400, { ok: false, error: message })
+      json(response, message.includes('ENOENT') ? 404 : 400, { ok: false, error: 'unable to restore the selected attachment' })
     }
   }
 }

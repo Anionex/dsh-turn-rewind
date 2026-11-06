@@ -191,12 +191,10 @@ export declare function installAttachmentHttp(ctx: Context): void;
 /**
  * Build the attachment-bytes route as a testable unit.
  *
- * The Host response type carries a string body only, so bytes travel as base64
- * inside the usual JSON envelope; the browser rebuilds a `File` from them.
+ * Bytes travel in a JSON envelope shared by Web and Desktop carriers;
+ * the browser rebuilds a `File` from the verified message reference.
  */
-export declare function createAttachmentHttpHandler(ctx: {
-    get(name: string): unknown;
-}): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void>;
+export declare function createAttachmentHttpHandler(ctx: Pick<Context, 'get' | 'sessions' | 'sessionQuery'>): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void>;
 export declare const MANAGE_HTTP_PATH = "/turn-rewind/manage";
 /** Register the same-origin storage-management endpoint consumed by the settings card. */
 export declare function installManageHttp(ctx: Context, engine: ChangeLedgerEngine): void;
