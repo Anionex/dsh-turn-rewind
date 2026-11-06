@@ -132,9 +132,11 @@ In the Web profile, each direct user message gains a compact, icon-only **Rewind
 
 | Mode | Code | Conversation |
 | --- | --- | --- |
-| **Restore files and restart** (default when files changed) | Restores the project files after automatically backing up their current state. | Creates and opens a Session ending before the selected message, then puts that message's text back in the composer. |
+| **Restore files and restart** (default when files changed) | Restores the project files after automatically backing up their current state. | Creates and opens a Session ending before the selected message, then puts that message's text and attachments back in the composer. |
 | **Restore files only** | Restores the project files after automatically backing up their current state. | Leaves the current Session open and unchanged. |
-| **Rewind messages only** (default when no checkpoint or no file changes) | Leaves the project files exactly as they are. | Creates and opens a Session ending before the selected message, then puts that message's text back in the composer. |
+| **Rewind messages only** (default when no checkpoint or no file changes) | Leaves the project files exactly as they are. | Creates and opens a Session ending before the selected message, then puts that message's text and attachments back in the composer. |
+
+Unavailable attachments are reported by name so you can add them again; restored text and available attachments remain in the draft.
 
 The dialog itself is the confirmation: there is no duplicate checkbox. It describes each file as restoring an earlier version, finding a deleted file, removing a later-added file, or restoring permissions/type. **Rewind messages only** is always available — including when the checkpoint for that message is missing, was skipped (for example after disabling automatic checkpoints), or the project files already match the saved state — because it never touches the worktree. It is not blocked by other running Agents in the same worktree.
 

@@ -1,10 +1,18 @@
 import { type ReactNode } from 'react';
+/** Durable reference carried by one `image` / `file` content block. */
+interface AttachmentRefLike {
+    readonly attachmentId?: string;
+    readonly name?: string;
+    readonly mediaType?: string;
+    readonly bytes?: number;
+}
 interface ConversationNodeLike {
     readonly kind: string;
     readonly seq: number;
     readonly content?: readonly {
         readonly type: string;
         readonly text?: string;
+        readonly attachment?: AttachmentRefLike;
     }[];
 }
 interface ConversationChatNodeLike {
@@ -36,18 +44,29 @@ interface ConversationSnapshotLike extends ChatSnapshotLike {
 /** Selector hook shape shared by `useSession` and `useChat`. */
 type SnapshotSelectorHook = <T>(selector: (snapshot: ConversationSnapshotLike) => T) => T;
 type RewindNodeLike = ConversationNodeLike | ConversationChatNodeLike;
+/** One durable attachment that the restart has to hand back to the composer. */
+interface RewindAttachment {
+    readonly kind: 'image' | 'file';
+    readonly attachmentId: string;
+    readonly name: string;
+    readonly mediaType: string;
+    readonly sourceSessionId?: string;
+    readonly messageSeq?: number;
+}
 interface RewindMatch {
     readonly messageSeq: number;
     readonly promptText: string;
+    /** Present only when the message carried attachments; absent keeps older doubles valid. */
+    readonly attachments?: readonly RewindAttachment[];
 }
 interface RewindMessageActionProps {
     readonly matched: RewindMatch;
     readonly sessionId: string;
-    readonly openRestoredSession: (sessionId: string, promptText: string) => Promise<void>;
+    readonly openRestoredSession: (sessionId: string, promptText: string, attachments?: readonly RewindAttachment[]) => Promise<void>;
 }
 interface RewindPortalBridgeProps {
     readonly sessionId: string;
-    readonly openRestoredSession: (sessionId: string, promptText: string) => Promise<void>;
+    readonly openRestoredSession: (sessionId: string, promptText: string, attachments?: readonly RewindAttachment[]) => Promise<void>;
     readonly useSession: SnapshotSelectorHook;
     readonly useChat?: SnapshotSelectorHook;
 }
@@ -82,6 +101,7 @@ interface ClientContextLike {
         readonly input: {
             for(scope: unknown): {
                 setDraft(text: string): void;
+                addAttachments?(ids: readonly string[]): boolean;
             };
         };
     };
@@ -201,8 +221,16 @@ type UiLocale = 'zh' | 'en';
  * @returns the language whose copy to render.
  */
 export declare function resolveUiLocale(active: string | undefined): UiLocale;
-/** Return the rewind anchor and editable text owned by one direct user message. */
+/** Return the rewind anchor, editable text, and durable attachments owned by one direct user message. */
 export declare function selectRewindMessage(node: ConversationNodeLike): RewindMatch | null;
+/**
+ * Collect the durable `image` / `file` references carried by one user message.
+ *
+ * Keep missing references so restoration can report unavailable attachments.
+ * @param node - the direct user-message node the rewind anchors on.
+ * @returns attachments in message order; empty when the message has none.
+ */
+export declare function selectRewindAttachments(node: ConversationNodeLike): readonly RewindAttachment[];
 /**
  * Browser plugin entry: bridge every direct user-message action row to the rewind UI.
  *
@@ -241,7 +269,39 @@ export declare function selectRewindMessageTarget(value: RewindNodeLike): {
     readonly matched: RewindMatch;
     readonly rowKey: string;
 } | null;
-export declare function openSessionWithDraft(ctx: ClientContextLike, sessionId: string, promptText: string): Promise<void>;
+/**
+ * Re-upload one durable attachment as a fresh draft attachment.
+ *
+ * The stored bytes are read back from the Host, wrapped in a `File`, and handed
+ * to the composer bridge, because the composer only understands browser files.
+ * @param attachment - durable reference taken from the rewound message.
+ * @returns the rebuilt file, or `undefined` when the Host cannot serve it.
+ */
+export declare function readAttachmentFile(attachment: RewindAttachment): Promise<File>;
+/**
+ * Hand a rewound message's attachments back to the composer.
+ *
+ * Draft attachments are browser-owned `File`s with upload receipts, so the
+ * durable references are read back from the Host and registered exactly the way
+ * the composer's own picker does it: `createDrafts` allocates the drafts,
+ * `input.for(scope).addAttachments` adopts their draft IDs.
+ *
+ * Use the public session input facade, which exists before the visual editor
+ * mounts. Failures are surfaced to the rewind dialog and refused drafts are released.
+ * @param ctx - client context carrying the conversation service.
+ * @param sessionId - Session whose composer receives the files.
+ * @param attachments - durable references carried by the rewound message.
+ * @returns number of attachments actually restored.
+ */
+export declare function restoreComposerAttachments(ctx: ClientContextLike, sessionId: string, attachments: readonly RewindAttachment[], prepared?: readonly PromiseSettledResult<File>[]): Promise<number>;
+/**
+ * Open the rewound Session and put the message back into its composer.
+ * @param ctx - client context carrying the Session navigation service.
+ * @param sessionId - target Session.
+ * @param promptText - message text to restore.
+ * @param attachments - attachments carried by that message.
+ */
+export declare function openSessionWithDraft(ctx: ClientContextLike, sessionId: string, promptText: string, attachments?: readonly RewindAttachment[]): Promise<void>;
 /**
  * Read one rewind response body without ever leaking a raw parse error.
  *

@@ -1182,3 +1182,95 @@ test('conversation restart reads optional services through ctx.get, never throug
   assert.equal(applied.body.sessionId, 'session-child')
   assert.equal(await readFile(join(f.workspace, 'code.txt'), 'utf8'), 'checkpoint\n')
 })
+
+test('the attachment route replays stored bytes and refuses what it cannot serve', async (t) => {
+  const outer = await mkdtemp(join(tmpdir(), 'dsh-turn-rewind-attachments-'))
+  t.after(() => rm(outer, { recursive: true, force: true }))
+  const imagePath = join(outer, 'sha256-image')
+  const filePath = join(outer, 'sha256-file')
+  await writeFile(imagePath, Buffer.from('image-bytes'))
+  await writeFile(filePath, Buffer.from('file-bytes'))
+
+  const store = {
+    imageHostPath: ref => {
+      assert.equal(ref.attachmentId, 'sha256:image')
+      return imagePath
+    },
+    fileHostPath: ref => {
+      if (ref.attachmentId === 'sha256:missing') return join(outer, 'absent')
+      assert.equal(ref.attachmentId, 'sha256:file')
+      return filePath
+    },
+  }
+  const { createAttachmentHttpHandler, ATTACHMENT_HTTP_PATH } = await import('../lib/index.js')
+  assert.equal(ATTACHMENT_HTTP_PATH, '/turn-rewind/attachment-bytes')
+
+  const call = async (url, options = {}) => {
+    const ctx = 'attachments' in options ? { get: name => (name === 'attachments' ? options.attachments : undefined) } : { get: () => store }
+    ctx.sessions = { get: id => id === 'source' ? {
+      id, events: [{ type: 'user/message', seq: 7, data: { source: { kind: 'user' }, content: [
+        { type: 'image', attachment: { attachmentId: 'sha256:image', mediaType: 'image/png' } },
+        { type: 'file', attachment: { attachmentId: 'sha256:file', mediaType: 'application/pdf' } },
+        { type: 'file', attachment: { attachmentId: 'sha256:missing' } },
+      ] } }],
+    } : undefined }
+    ctx.sessionQuery = { readSession: async () => { throw new Error('private filesystem path') } }
+    const query = new URL(url, 'http://test.local')
+    if (!query.searchParams.has('sessionId')) query.searchParams.set('sessionId', 'source')
+    if (!query.searchParams.has('messageSeq')) query.searchParams.set('messageSeq', '7')
+    url = query.pathname + query.search
+    const handler = createAttachmentHttpHandler(ctx)
+    const response = {
+      status: undefined,
+      headers: undefined,
+      body: '',
+      writeHead(status, headers) { this.status = status; this.headers = headers; return this },
+      end(body) { this.body = body ?? '' },
+    }
+    await handler({ method: options.method ?? 'GET', url }, response)
+    return { status: response.status, headers: response.headers, value: JSON.parse(response.body) }
+  }
+
+  const image = await call(`${ATTACHMENT_HTTP_PATH}?attachmentId=sha256%3Aimage&kind=image&mediaType=image%2Fpng`)
+  assert.equal(image.status, 200)
+  assert.equal(image.value.data, Buffer.from('image-bytes').toString('base64'))
+  assert.equal(image.value.kind, 'image')
+  assert.equal(image.value.mediaType, 'image/png')
+  assert.equal(image.headers['cache-control'], 'no-store')
+
+  const file = await call(`${ATTACHMENT_HTTP_PATH}?attachmentId=sha256%3Afile&kind=file&mediaType=application%2Fpdf`)
+  assert.equal(file.status, 200)
+  assert.equal(Buffer.from(file.value.data, 'base64').toString('utf8'), 'file-bytes')
+  assert.equal(file.value.kind, 'file')
+
+  // A reference the store no longer holds is a explained miss, not a crash.
+  const missing = await call(`${ATTACHMENT_HTTP_PATH}?attachmentId=sha256%3Amissing&kind=file`)
+  assert.equal(missing.status, 404)
+  assert.equal(missing.value.ok, false)
+
+  // An undocumented id is rejected before it reaches the filesystem.
+  const invalid = await call(`${ATTACHMENT_HTTP_PATH}?kind=file`)
+  assert.equal(invalid.status, 400)
+  assert.match(invalid.value.error, /unable to restore/)
+
+  const wrongMethod = await call(ATTACHMENT_HTTP_PATH, { method: 'POST' })
+  assert.equal(wrongMethod.status, 405)
+
+  const unreferenced = await call(`${ATTACHMENT_HTTP_PATH}?attachmentId=sha256%3Aother&kind=file`)
+  assert.equal(unreferenced.status, 404)
+  const wrongMessage = await call(`${ATTACHMENT_HTTP_PATH}?attachmentId=sha256%3Afile&kind=file&messageSeq=8`)
+  assert.equal(wrongMessage.status, 404)
+  const wrongKind = await call(`${ATTACHMENT_HTTP_PATH}?attachmentId=sha256%3Aimage&kind=file`)
+  assert.equal(wrongKind.status, 404)
+  const otherSession = await call(`${ATTACHMENT_HTTP_PATH}?attachmentId=sha256%3Afile&kind=file&sessionId=other`)
+  assert.equal(otherSession.status, 400)
+  assert.doesNotMatch(otherSession.value.error, /private filesystem/)
+  await writeFile(filePath, '')
+  const empty = await call(`${ATTACHMENT_HTTP_PATH}?attachmentId=sha256%3Afile&kind=file`)
+  assert.equal(empty.status, 200)
+  assert.equal(empty.value.data, '')
+
+  // A deployment without a local attachment store says so instead of throwing.
+  const unavailable = await call(`${ATTACHMENT_HTTP_PATH}?attachmentId=sha256%3Afile&kind=file`, { attachments: undefined })
+  assert.equal(unavailable.status, 503)
+})

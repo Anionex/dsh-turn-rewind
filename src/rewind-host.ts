@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { createDeadline } from './deadline.js'
 import { ChangeLedgerError, errorMessage } from './errors.js'
@@ -837,6 +838,93 @@ async function readBody(request: HttpRequestLike): Promise<unknown> {
 function json(response: HttpResponseLike, status: number, value: unknown): void {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
   response.end(`${JSON.stringify(value)}\n`)
+}
+
+/** Same-origin route that replays one stored attachment's bytes to the browser. */
+export const ATTACHMENT_HTTP_PATH = '/turn-rewind/attachment-bytes'
+
+/** Shape of a durable attachment reference as stored on a user message. */
+interface AttachmentRefLike {
+  readonly attachmentId: string
+  readonly name?: string
+  readonly mediaType?: string
+}
+
+/**
+ * Attachment store capability needed to turn a durable reference back into bytes.
+ *
+ * Both readers are provider-owned: a deployment without a local store rejects
+ * them, which this route reports as an unavailable attachment rather than a
+ * crash.
+ */
+interface AttachmentStoreLike {
+  fileHostPath(ref: { readonly attachmentId: string }): string | undefined
+  imageHostPath(ref: { readonly attachmentId: string }): string | undefined
+}
+
+/** Register the attachment-bytes route consumed by the rewound composer draft. */
+export function installAttachmentHttp(ctx: Context): void {
+  ctx.effect(() => (ctx as unknown as { webServer: HttpServerLike }).webServer.register({
+    kind: 'exact',
+    path: ATTACHMENT_HTTP_PATH,
+    handler: createAttachmentHttpHandler(ctx),
+  }), 'change-ledger.attachmentHttp')
+}
+
+/**
+ * Build the attachment-bytes route as a testable unit.
+ *
+ * Bytes travel in a JSON envelope shared by Web and Desktop carriers;
+ * the browser rebuilds a `File` from the verified message reference.
+ */
+export function createAttachmentHttpHandler(
+  ctx: Pick<Context, 'get' | 'sessions' | 'sessionQuery'>,
+): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void> {
+  return async (request, response) => {
+    if (request.method !== 'GET') {
+      json(response, 405, { ok: false, error: 'method not allowed' })
+      return
+    }
+    try {
+      const url = new URL(request.url ?? ATTACHMENT_HTTP_PATH, 'http://dsh.local')
+      const attachmentId = requiredText(url.searchParams.get('attachmentId'), 'attachmentId')
+      const sessionId = requiredText(url.searchParams.get('sessionId'), 'sessionId')
+      const messageSeq = Number(url.searchParams.get('messageSeq'))
+      if (!url.searchParams.has('messageSeq') || !Number.isSafeInteger(messageSeq) || messageSeq < 0) throw new Error('invalid messageSeq')
+      const kind = url.searchParams.get('kind')
+      if (kind !== 'image' && kind !== 'file') throw new Error('invalid attachment kind')
+      const session = await readSession(ctx, sessionId)
+      const message = getSessionEvents(session).find(event => event.seq === messageSeq && event.type === 'user/message' && isDirectUserMessage(event))
+      const blocks = Array.isArray(message?.data.content) ? message.data.content : []
+      const block = blocks.find(value => value?.type === kind && value.attachment?.attachmentId === attachmentId)
+      if (block === undefined) {
+        json(response, 404, { ok: false, error: 'attachment is not referenced by the selected message' })
+        return
+      }
+      const store = ctx.get('attachments') as AttachmentStoreLike | undefined
+      if (store === undefined) {
+        json(response, 503, { ok: false, error: 'attachment store is unavailable' })
+        return
+      }
+      const ref = block.attachment as AttachmentRefLike
+      const hostPath = kind === 'image' ? store.imageHostPath(ref) : store.fileHostPath(ref)
+      if (hostPath === undefined) {
+        json(response, 503, { ok: false, error: 'attachment is not available from the local store' })
+        return
+      }
+      const bytes = await readFile(hostPath)
+      json(response, 200, {
+        ok: true,
+        attachmentId,
+        kind,
+        ...(ref.mediaType === undefined ? {} : { mediaType: ref.mediaType }),
+        data: bytes.toString('base64'),
+      })
+    } catch (error) {
+      const message = errorMessage(error)
+      json(response, message.includes('ENOENT') ? 404 : 400, { ok: false, error: 'unable to restore the selected attachment' })
+    }
+  }
 }
 
 export const MANAGE_HTTP_PATH = '/turn-rewind/manage'
