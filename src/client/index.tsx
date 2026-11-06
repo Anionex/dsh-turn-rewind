@@ -137,7 +137,7 @@ interface ClientContextLike {
   }
   readonly conversation: {
     readonly input: {
-      for(scope: unknown): { setDraft(text: string): void; addAttachments?(ids: readonly string[]): boolean }
+      for(scope: unknown): { setDraft(text: string): void; addAttachments?(ids: readonly string[]): boolean; notify?(level: 'info' | 'error', text: string): void }
     }
   }
   get?(name: string): unknown
@@ -1920,13 +1920,20 @@ export async function restoreComposerAttachments(
   }
   const scope = ctx.sessions.scope(sessionId)
   const input = scope === undefined ? undefined : ctx.conversation.input.for(scope)
-  const failed = (items: readonly RewindAttachment[]) => new Error(uiText().attachmentsFailed(items.map(item => item.name).join(', ')))
+  const failed = (items: readonly RewindAttachment[]) => {
+    const error = new Error(uiText().attachmentsFailed(items.map(item => item.name).join(', ')))
+    // Navigation can unmount the originating dialog; retain the warning in the
+    // destination session's composer instead of relying on that dialog alone.
+    input?.notify?.('error', error.message)
+    return error
+  }
   if (typeof input?.addAttachments !== 'function' || typeof conversation.createDrafts !== 'function') throw failed(attachments)
   const results = prepared ?? await Promise.allSettled(attachments.map(readAttachmentFile))
   const files = results.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])
   const missing = attachments.filter((_attachment, index) => results[index]?.status !== 'fulfilled')
   if (files.length === 0) throw failed(attachments)
-  const drafts = conversation.createDrafts(sessionId, files)
+  let drafts: readonly DraftAttachmentLike[]
+  try { drafts = conversation.createDrafts(sessionId, files) } catch { throw failed(attachments) }
   let adopted = false
   try {
     adopted = drafts.length === files.length && input.addAttachments(drafts.map(draft => draft.id))

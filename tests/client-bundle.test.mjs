@@ -1044,7 +1044,7 @@ test('attachment reads finish before draft navigation; missing files are reporte
   const ctx = {
     sessions: { open: id => events.push(['open', id]), scope: () => ({}) },
     conversation: {
-      input: { for: () => ({ setDraft: text => events.push(['text', text]), addAttachments: ids => { events.push(['attachments', ...ids]); return true } }) },
+      input: { for: () => ({ setDraft: text => events.push(['text', text]), notify: (level, text) => events.push(['notice', level, text]), addAttachments: ids => { events.push(['attachments', ...ids]); return true } }) },
       createDrafts: (_id, files) => {
         assert.deepEqual(Array.from(files, file => file.name), ['empty.txt'])
         assert.equal(files[0].parts[0].byteLength, 0)
@@ -1061,5 +1061,8 @@ test('attachment reads finish before draft navigation; missing files are reporte
   assert.equal(requests[0].messageSeq, '7')
   release()
   await assert.rejects(pending, /missing.pdf/)
-  assert.deepEqual(events, [['open', 'child'], ['text', 'restored text'], ['attachments', 'empty-draft']])
+  assert.deepEqual(events.slice(0, 3), [['open', 'child'], ['text', 'restored text'], ['attachments', 'empty-draft']])
+  assert.equal(events[3][0], 'notice')
+  assert.equal(events[3][1], 'error')
+  assert.match(events[3][2], /missing.pdf/)
 })

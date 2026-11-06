@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.12 — 2026-11-07
+
+- Restore message images and files into the draft when rewinding or restarting, using the public session-input API. Validate original message references before reading attachment bytes; retain empty files and explain missing or refused attachments.
+- 回溯或重新开始会话时，通过公开草稿接口恢复原消息的图片和文件；读取前核对原消息引用，保留空文件，并提示无法恢复的附件。
+- Finish attachment reads before opening the restored draft, preventing late uploads from entering a later message.
+- 打开恢复后的草稿前完成附件读取，避免延迟返回的附件进入后续消息。
+- Support exact DSH `0.2.1-rc.5`, preserving earlier supported releases. Verified with 146 tests and clean rc.5 tarball Profile installation and startup.
+- 支持 DSH `0.2.1-rc.5`，保留此前支持版本；通过 146 项测试及 rc.5 压缩包干净 Profile 安装、启动验收。
+
 ## 0.3.11 — 2026-10-26
 
 - Support exact DSH `0.2.1-rc.3` through the settings peer and compatibility declarations; keep earlier supported versions and reject unverified future prereleases.
