@@ -14,7 +14,10 @@ test('browser bundle anchors rewind to direct user messages and restores their d
       __ModuleLoader__: {
         load(record) {
           plugin = record.factory((id) => {
-            if (id === 'react/jsx-runtime') return { jsx() {}, jsxs() {}, Fragment: Symbol('fragment') }
+            if (id === 'react/jsx-runtime') {
+              const render = (type, props) => typeof type === 'function' ? type(props) : { type, props }
+              return { jsx: render, jsxs: render, Fragment: Symbol('fragment') }
+            }
             if (id === 'react') {
               return {
                 useCallback: value => value,
@@ -176,7 +179,10 @@ async function bootPluginEntry(extras = {}) {
       __ModuleLoader__: {
         load(record) {
           plugin = record.factory(id => {
-            if (id === 'react/jsx-runtime') return { jsx() {}, jsxs() {}, Fragment: Symbol('fragment') }
+            if (id === 'react/jsx-runtime') {
+              const render = (type, props) => typeof type === 'function' ? type(props) : { type, props }
+              return { jsx: render, jsxs: render, Fragment: Symbol('fragment') }
+            }
             if (id === 'react') {
               return {
                 useCallback: value => value,
@@ -286,6 +292,8 @@ async function bootPortalBridge(shape = 'current') {
   let plugin
   let capturedTargets
   let cleanup
+  let mutation
+  let fetchCount = 0
   class Element {}
   const actions = new Element()
   // DSH 0.1.5 renders the icon-actions row (class `<hash>_actions`) as a direct child
@@ -303,20 +311,64 @@ async function bootPortalBridge(shape = 'current') {
       throw new Error(`unexpected row query ${selector}`)
     },
   })
+  // DSH 0.2.x flow rows expose `data-chat-flow-kind` and `data-chat-turn`, but no
+  // chat snapshot hook; the bridge reads the turn -> userSeq mapping from the Host.
+  const domRows = shape === 'dom'
+    ? ['1', '2'].map(turn => Object.assign(new Element(), {
+      dataset: { chatFlowKind: 'user', chatTurn: turn },
+      querySelector(selector) {
+        if (selector === '[class*="actions"]') return actions
+        throw new Error(`unexpected row query ${selector}`)
+      },
+    }))
+    : []
   const context = {
     AbortController,
     AbortSignal,
     HTMLElement: Element,
+    URLSearchParams,
+    ...(shape === 'dom'
+      ? {
+        fetch: async (input) => {
+          fetchCount += 1
+          assert.equal(input, '/turn-rewind/turns?sessionId=session-source')
+          return {
+            ok: true,
+            async json() {
+              return {
+                turns: [
+                  { turn: 1, userSeq: 11, promptText: '第一轮' },
+                  {
+                    turn: 2,
+                    userSeq: 22,
+                    promptText: '第二轮',
+                    attachments: [{ kind: 'file', attachmentId: 'att-9', name: 'spec.pdf', mediaType: 'application/pdf' }],
+                  },
+                ],
+              }
+            },
+          }
+        },
+      }
+      : {}),
     MutationObserver: class MutationObserver {
-      constructor(callback) { this.callback = callback }
+      constructor(callback) { this.callback = callback; mutation = callback }
       observe() {}
       disconnect() {}
     },
     queueMicrotask,
     setTimeout,
+    clearTimeout,
     document: {
       body: {},
       querySelectorAll(selector) {
+        if (shape === 'dom') {
+          assert.equal(selector, '[data-conversation-session]')
+          return [
+            { dataset: { conversationSession: 'other-session' }, querySelectorAll: () => { throw new Error('must not inspect another session') } },
+            { dataset: { conversationSession: 'session-source' }, querySelectorAll: () => domRows },
+          ]
+        }
         assert.equal(selector, '[data-chat-flow-kind="user"][data-chat-anchor-key]')
         return [row]
       },
@@ -325,7 +377,10 @@ async function bootPortalBridge(shape = 'current') {
       __ModuleLoader__: {
         load(record) {
           plugin = record.factory((id) => {
-            if (id === 'react/jsx-runtime') return { jsx() {}, jsxs() {}, Fragment: Symbol('fragment') }
+            if (id === 'react/jsx-runtime') {
+              const render = (type, props) => typeof type === 'function' ? type(props) : { type, props }
+              return { jsx: render, jsxs: render, Fragment: Symbol('fragment') }
+            }
             if (id === 'react') {
               return {
                 useCallback: value => value,
@@ -353,6 +408,10 @@ async function bootPortalBridge(shape = 'current') {
     plugin,
     actions,
     shape,
+    context,
+    domRows,
+    mutate: () => mutation(),
+    fetchCount: () => fetchCount,
     targets: () => capturedTargets,
     dispose: () => { if (typeof cleanup === 'function') cleanup() },
   }
@@ -452,6 +511,53 @@ test('browser bundle stays inert when neither snapshot exposes chat nodes', asyn
   assert.equal(rendered.length, 0)
   assert.deepEqual(JSON.parse(JSON.stringify(harness.targets())), [])
   harness.dispose()
+})
+
+test('browser bundle keys 0.2.x DOM rows through the Host turn anchors', async () => {
+  const harness = await bootPortalBridge('dom')
+  const rendered = harness.plugin.RewindMessagePortals({
+    sessionId: 'session-source',
+    async openRestoredSession() {},
+  })
+
+  assert.equal(rendered.length, 0)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const targets = harness.targets()
+  assert.equal(targets.length, 2)
+  assert.deepEqual(JSON.parse(JSON.stringify(targets.map(target => target.matched))), [
+    { messageSeq: 11, promptText: '第一轮' },
+    {
+      messageSeq: 22,
+      promptText: '第二轮',
+      attachments: [{ kind: 'file', attachmentId: 'att-9', name: 'spec.pdf', mediaType: 'application/pdf' }],
+    },
+  ])
+  assert.equal(targets[0].container, harness.actions)
+  harness.dispose()
+})
+
+test('newly rendered turns load anchors without polling completed turns or leaking attachments', async () => {
+  const harness = await bootPortalBridge('dom')
+  harness.plugin.RewindMessagePortals({ sessionId: 'session-source', async openRestoredSession() {} })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(harness.fetchCount(), 1)
+  for (let i = 0; i < 20; i++) harness.mutate()
+  await new Promise(resolve => setTimeout(resolve, 1050))
+  assert.equal(harness.fetchCount(), 1)
+  const row = Object.create(Object.getPrototypeOf(harness.domRows[0]))
+  Object.assign(row, harness.domRows[0], { dataset: { chatTurn: '3' } })
+  harness.domRows.push(row)
+  let signal
+  harness.context.fetch = async (_url, init) => {
+    signal = init.signal
+    return { ok: true, json: async () => ({ turns: [{ turn: 3, userSeq: 33, promptText: 'new', attachments: [{ kind: 'file', attachmentId: '', name: 'missing.pdf' }] }] }) }
+  }
+  harness.mutate()
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(harness.targets().at(-1).matched.messageSeq, 33)
+  assert.equal(harness.targets().at(-1).matched.attachments[0].attachmentId, '')
+  harness.dispose()
+  assert.equal(signal.aborted, true)
 })
 
 test('chat node collection accepts keyed stores, legacy arrays, and absent projections', async () => {

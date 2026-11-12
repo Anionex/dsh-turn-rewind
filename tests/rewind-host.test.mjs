@@ -12,6 +12,7 @@ import {
   ChangeLedgerService,
   TurnCheckpointCoordinator,
   createRewindHttpHandler,
+  createTurnsHttpHandler,
 } from '../lib/index.js'
 
 const execFileAsync = promisify(execFile)
@@ -996,6 +997,48 @@ test('persisted multi-level lineage validates every inherited message boundary a
   })
   const stale = await request(handler, 'GET', '/turn-rewind?sessionId=leaf&messageSeq=2')
   assert.equal(stale.body.code, 'PLAN_STALE')
+})
+
+test('the turn anchor route maps rendered turns to their opening user message', async () => {
+  const events = [
+    { type: 'request/header', seq: 0, data: {} },
+    { type: 'turn/start', seq: 1, data: { turn: 1 } },
+    {
+      type: 'user/message',
+      seq: 2,
+      data: {
+        source: { kind: 'user' },
+        content: [
+          { type: 'text', text: '第一轮' },
+          { type: 'image', attachment: { attachmentId: 'att-1', mediaType: 'image/png' } },
+        ],
+      },
+    },
+    // Steering messages inside a turn are not rewind anchors.
+    { type: 'user/message', seq: 3, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '补充' }] } },
+    { type: 'turn/end', seq: 4, data: { turn: 1 } },
+    { type: 'turn/start', seq: 5, data: { turn: 2 } },
+    { type: 'user/message', seq: 6, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '第二轮' }] } },
+  ]
+  const handler = createTurnsHttpHandler({
+    sessions: { get: () => undefined },
+    sessionQuery: { readSession: async () => ({ session: { cwd: 'C:\\work' }, events }) },
+  })
+
+  const response = await request(handler, 'GET', '/turn-rewind/turns?sessionId=session-x')
+  assert.equal(response.status, 200)
+  assert.deepEqual(response.body.turns, [
+    {
+      turn: 1,
+      userSeq: 2,
+      turnStartSeq: 1,
+      promptText: '第一轮',
+      attachments: [{ kind: 'image', attachmentId: 'att-1', name: 'image', mediaType: 'image/png' }],
+    },
+    { turn: 2, userSeq: 6, turnStartSeq: 5, previousTurnEndSeq: 4, promptText: '第二轮' },
+  ])
+  assert.equal((await request(handler, 'GET', '/turn-rewind/turns')).status, 409)
+  assert.equal((await request(handler, 'POST', '/turn-rewind/turns')).status, 405)
 })
 
 async function request(handler, method, url, body) {

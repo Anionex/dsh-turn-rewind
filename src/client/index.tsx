@@ -93,7 +93,12 @@ interface RewindPortalBridgeProps {
     promptText: string,
     attachments?: readonly RewindAttachment[],
   ) => Promise<void>
-  readonly useSession: SnapshotSelectorHook
+  /**
+   * Legacy 0.1.x chat snapshot hooks kept optional for older test doubles and
+   * hosts; DSH 0.2.0 stopped injecting them, so the bridge reads the Host turn
+   * anchor endpoint instead.
+   */
+  readonly useSession?: SnapshotSelectorHook
   readonly useChat?: SnapshotSelectorHook
 }
 
@@ -254,6 +259,8 @@ export interface ManageOverview {
 
 const PATH = '/turn-rewind'
 const MANAGE_PATH = '/turn-rewind/manage'
+/** Same-origin route mapping each rendered turn number to its Session user-message seq. */
+const TURNS_PATH = '/turn-rewind/turns'
 /** Same-origin route that replays one stored attachment's bytes. */
 const ATTACHMENT_BYTES_PATH = '/turn-rewind/attachment-bytes'
 
@@ -1027,11 +1034,162 @@ export function collectChatNodes(
   return typeof store.values === 'function' ? Array.from(store.values() as Iterable<RewindNodeLike>) : []
 }
 
-/** Session-scoped bridge that portals rewind controls into direct user-message action rows. */
-export function RewindMessagePortals({ sessionId, openRestoredSession, useSession, useChat }: RewindPortalBridgeProps): ReactNode {
-  // DSH 0.1.2+ moved the Chat projection out of the Session snapshot into its own
-  // session-scoped `useChat` hook; `snapshot.chat` remains the 0.1.1 shape.
-  const readSnapshot = useChat ?? useSession
+/** Read the Host turn anchors that map a rendered `data-chat-turn` row to an event seq. */
+async function fetchTurnAnchors(sessionId: string, signal: AbortSignal): Promise<ReadonlyMap<number, RewindMatch>> {
+  const query = new URLSearchParams({ sessionId })
+  const response = await fetch(`${TURNS_PATH}?${query.toString()}`, {
+    headers: { accept: 'application/json' },
+    cache: 'no-store',
+    signal,
+  })
+  if (!response.ok) return new Map()
+  return parseTurnAnchors(await response.json() as unknown)
+}
+
+/** Narrow the turn-anchor payload into per-turn {@link RewindMatch} entries. */
+function parseTurnAnchors(body: unknown): ReadonlyMap<number, RewindMatch> {
+  const anchors = new Map<number, RewindMatch>()
+  if (body === null || typeof body !== 'object') return anchors
+  const turns = (body as { turns?: unknown }).turns
+  if (!Array.isArray(turns)) return anchors
+  for (const value of turns) {
+    if (value === null || typeof value !== 'object') continue
+    const record = value as Record<string, unknown>
+    const turn = record.turn
+    const userSeq = record.userSeq
+    if (!Number.isSafeInteger(turn) || !Number.isSafeInteger(userSeq)) continue
+    const promptText = typeof record.promptText === 'string' ? record.promptText : ''
+    const attachments = parseTurnAttachments(record.attachments)
+    anchors.set(turn as number, {
+      messageSeq: userSeq as number,
+      promptText,
+      ...(attachments.length === 0 ? {} : { attachments }),
+    })
+  }
+  return anchors
+}
+
+/** Narrow one Host attachment reference; malformed entries are dropped. */
+function parseTurnAttachments(value: unknown): readonly RewindAttachment[] {
+  if (!Array.isArray(value)) return []
+  const attachments: RewindAttachment[] = []
+  for (const item of value) {
+    if (item === null || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    if (record.kind !== 'image' && record.kind !== 'file') continue
+    const kind = record.kind
+    attachments.push({
+      kind,
+      attachmentId: typeof record.attachmentId === 'string' ? record.attachmentId : '',
+      name: typeof record.name === 'string' && record.name !== '' ? record.name : kind,
+      mediaType: typeof record.mediaType === 'string' && record.mediaType !== '' ? record.mediaType : 'application/octet-stream',
+    })
+  }
+  return attachments
+}
+
+/**
+ * Map every rendered user-message row onto its Host turn anchor.
+ *
+ * DSH 0.2.x flow rows carry `data-chat-flow-kind="user"` and `data-chat-turn` but
+ * no event seq; the Host endpoint supplies the seq and the message text the
+ * restart dialog needs. Duplicate grouped rows keep the first portal target.
+ * @param anchors - per-turn rewind matches loaded from the Host.
+ * @returns one portal target per direct user message, in document order.
+ */
+function sessionRows(sessionId: string): HTMLElement[] {
+  return Array.from(document.querySelectorAll<HTMLElement>('[data-conversation-session]'))
+    .filter(root => root.dataset.conversationSession === sessionId)
+    .flatMap(root => Array.from(root.querySelectorAll<HTMLElement>('[data-chat-flow-kind="user"][data-chat-turn]')))
+}
+
+function collectDomPortalTargets(anchors: ReadonlyMap<number, RewindMatch>, sessionId: string): readonly RewindPortalTarget[] {
+  if (anchors.size === 0) return []
+  const targets: RewindPortalTarget[] = []
+  const seen = new Set<number>()
+  for (const row of sessionRows(sessionId)) {
+    const turn = Number(row.dataset.chatTurn)
+    if (!Number.isSafeInteger(turn)) continue
+    const matched = anchors.get(turn)
+    if (matched === undefined || seen.has(matched.messageSeq)) continue
+    const actions = findActionsContainer(row)
+    if (!(actions instanceof HTMLElement)) continue
+    seen.add(matched.messageSeq)
+    targets.push({ container: actions, matched })
+  }
+  return targets
+}
+
+/** 0.2.x bridge: rendered DOM rows matched through Host-provided turn anchors. */
+function DomRewindMessagePortals({ sessionId, openRestoredSession }: RewindPortalBridgeProps): ReactNode {
+  const [targets, setTargets] = useState<readonly RewindPortalTarget[]>([])
+  const anchors = useRef<ReadonlyMap<number, RewindMatch>>(new Map())
+
+  useLayoutEffect(() => {
+    let active = true
+    let queued = false
+    let loading = false
+    let retry: ReturnType<typeof setTimeout> | undefined
+    const controller = new AbortController()
+    anchors.current = new Map()
+    const refresh = (): void => {
+      if (!active) return
+      const next = collectDomPortalTargets(anchors.current, sessionId)
+      setTargets(current => samePortalTargets(current, next) ? current : next)
+      const missing = sessionRows(sessionId).some(row => Number.isSafeInteger(Number(row.dataset.chatTurn)) && !anchors.current.has(Number(row.dataset.chatTurn)))
+      if (missing && !loading && retry === undefined) void load()
+    }
+    const queueRefresh = (): void => {
+      if (queued || !active) return
+      queued = true
+      queueMicrotask(() => {
+        queued = false
+        refresh()
+      })
+    }
+    const load = async (): Promise<void> => {
+      if (!active || loading) return
+      loading = true
+      try {
+        const loaded = await fetchTurnAnchors(sessionId, controller.signal)
+        if (!active) return
+        anchors.current = loaded
+      } catch {
+        // A transient failure is retried only while a rendered turn lacks an anchor.
+      } finally {
+        loading = false
+        if (active) {
+          // Bound retries when the DOM precedes persistence, and avoid fetching
+          // again for every streamed token or portal insertion.
+          retry = setTimeout(() => {
+            retry = undefined
+            queueRefresh()
+          }, 1000)
+          queueRefresh()
+        }
+      }
+    }
+    void load()
+    refresh()
+    const observer = new MutationObserver(queueRefresh)
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-chat-turn'] })
+    return () => {
+      active = false
+      controller.abort()
+      clearTimeout(retry)
+      observer.disconnect()
+    }
+  }, [sessionId])
+
+  return targets.map(target => createPortal(
+    <RewindMessageAction matched={target.matched} sessionId={sessionId} openRestoredSession={openRestoredSession} />,
+    target.container,
+    `${sessionId}:${String(target.matched.messageSeq)}`,
+  ))
+}
+
+/** Legacy bridge for 0.1.x hosts that still inject a chat snapshot hook. */
+function LegacyRewindMessagePortals({ sessionId, openRestoredSession, readSnapshot }: RewindPortalBridgeProps & { readonly readSnapshot: SnapshotSelectorHook }): ReactNode {
   const chatOf = (snapshot: ConversationSnapshotLike): ChatSnapshotLike => snapshot.chat ?? snapshot
   const chatOrder = readSnapshot<readonly string[] | null>(snapshot => chatOf(snapshot).order ?? null)
   const chatStore = readSnapshot<ChatNodeStoreLike | readonly RewindNodeLike[] | null>(
@@ -1070,6 +1228,20 @@ export function RewindMessagePortals({ sessionId, openRestoredSession, useSessio
     target.container,
     `${sessionId}:${String(target.matched.messageSeq)}`,
   ))
+}
+
+/**
+ * Session-scoped bridge that portals rewind controls into direct user-message action rows.
+ *
+ * DSH 0.1.x passes chat snapshot hooks; DSH 0.2.0 stopped injecting them, so the
+ * bridge falls back to DOM rows plus the Host turn-anchor endpoint.
+ */
+export function RewindMessagePortals(props: RewindPortalBridgeProps): ReactNode {
+  const readSnapshot = props.useChat ?? props.useSession
+  if (readSnapshot === undefined) {
+    return <DomRewindMessagePortals key={props.sessionId} sessionId={props.sessionId} openRestoredSession={props.openRestoredSession} />
+  }
+  return <LegacyRewindMessagePortals {...props} readSnapshot={readSnapshot} />
 }
 
 /** User-message action and its review-first file/conversation restore dialog. */
@@ -1813,7 +1985,11 @@ function findActionsContainer(row: Element): Element | null {
   return queryInside(legacy, ACTIONS_SELECTOR) ?? legacy.lastElementChild
 }
 
-function collectPortalTargets(nodes: readonly RewindNodeLike[]): readonly RewindPortalTarget[] {
+/**
+ * Legacy chat-snapshot bridge kept for 0.1.x hosts and test doubles.
+ * DSH 0.2.0 uses {@link collectDomPortalTargets} instead.
+ */
+export function collectPortalTargets(nodes: readonly RewindNodeLike[]): readonly RewindPortalTarget[] {
   const rows = new Map<string, HTMLElement>()
   for (const element of Array.from(document.querySelectorAll<HTMLElement>(
     '[data-chat-flow-kind="user"][data-chat-anchor-key]',

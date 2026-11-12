@@ -67,8 +67,17 @@ interface RewindMessageActionProps {
 interface RewindPortalBridgeProps {
     readonly sessionId: string;
     readonly openRestoredSession: (sessionId: string, promptText: string, attachments?: readonly RewindAttachment[]) => Promise<void>;
-    readonly useSession: SnapshotSelectorHook;
+    /**
+     * Legacy 0.1.x chat snapshot hooks kept optional for older test doubles and
+     * hosts; DSH 0.2.0 stopped injecting them, so the bridge reads the Host turn
+     * anchor endpoint instead.
+     */
+    readonly useSession?: SnapshotSelectorHook;
     readonly useChat?: SnapshotSelectorHook;
+}
+interface RewindPortalTarget {
+    readonly container: HTMLElement;
+    readonly matched: RewindMatch;
 }
 interface SlotsLike {
     inject(name: string, install: () => unknown): void;
@@ -254,8 +263,13 @@ export declare function apply(ctx: ClientContextLike): void;
  * @returns the chat nodes in render order.
  */
 export declare function collectChatNodes(order: readonly string[] | null, store: ChatNodeStoreLike | readonly RewindNodeLike[] | null): readonly RewindNodeLike[];
-/** Session-scoped bridge that portals rewind controls into direct user-message action rows. */
-export declare function RewindMessagePortals({ sessionId, openRestoredSession, useSession, useChat }: RewindPortalBridgeProps): ReactNode;
+/**
+ * Session-scoped bridge that portals rewind controls into direct user-message action rows.
+ *
+ * DSH 0.1.x passes chat snapshot hooks; DSH 0.2.0 stopped injecting them, so the
+ * bridge falls back to DOM rows plus the Host turn-anchor endpoint.
+ */
+export declare function RewindMessagePortals(props: RewindPortalBridgeProps): ReactNode;
 /** User-message action and its review-first file/conversation restore dialog. */
 export declare function RewindMessageAction({ matched, sessionId, openRestoredSession }: RewindMessageActionProps): ReactNode;
 interface TurnRewindSettingsCardProps {
@@ -270,6 +284,11 @@ export declare function selectRewindMessageTarget(value: RewindNodeLike): {
     readonly matched: RewindMatch;
     readonly rowKey: string;
 } | null;
+/**
+ * Legacy chat-snapshot bridge kept for 0.1.x hosts and test doubles.
+ * DSH 0.2.0 uses {@link collectDomPortalTargets} instead.
+ */
+export declare function collectPortalTargets(nodes: readonly RewindNodeLike[]): readonly RewindPortalTarget[];
 /**
  * Re-upload one durable attachment as a fresh draft attachment.
  *

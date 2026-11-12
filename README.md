@@ -30,6 +30,7 @@ It never commits, stashes, resets, switches branches, edits the Git index, or de
 
 Most recent work first:
 
+- **Rewind button survives the 0.2.2 client slot API** — DSH `0.2.2-rc.1` no longer injects the `useChat`/`useSession` chat snapshot hooks into `conversation.session.header.actions`; the bridge now reads Host-provided turn anchors (`GET /turn-rewind/turns`) and matches rendered user rows by `data-chat-turn`. The legacy snapshot path remains for older Hosts.
 - **File rewind works in ordinary directories (0.3.0)** — when the working directory is not a Git repository it is snapshotted as an ordinary directory (`.git` and `node_modules` excluded by default, plus an optional `.dsh-rewindignore`), so messages-only rewind is no longer the only option.
 - **The fastest path is now the default (0.3.8)** — the new `auto` mode uses Git-native checkpoints in a Git worktree (reusing the repository object database, so committed content is never stored twice) and the plugin's own store for ordinary directories.
 - **Unchanged files are no longer re-read (0.3.5)** — each workspace keeps a persistent path identity cache; a measured 20 000-file / 351 MB workspace dropped from 237 s to about 7 s per capture.
@@ -123,6 +124,8 @@ dsh --profile web --dump-config | grep turn-rewind
 Restart a running profile after changing its bundle list.
 
 The package is a DSH Profile Bundle. `package.json` declares `dsh.bundle.patch`, and `cordis.patch.yml` mounts `@anionex/dsh-turn-rewind` without a DSH core patch.
+
+Compatibility is declared and exercised against DSH `0.2.2-rc.1` (previous releases stay supported). On `0.2.2` the `conversation.session.header.actions` slot no longer carries a per-session chat snapshot, so the Web bridge resolves turn anchors from the Host (`GET /turn-rewind/turns`) instead of the removed snapshot hooks.
 
 When the profile also provides the DSH Agent service, the plugin captures a hidden checkpoint in the first `agent/pre-step` waterfall before the Agent processes the opening user message. Capture failures are reported but do not reject the user's turn; the corresponding message simply has no usable rewind point. In Web profiles, the same-origin `/turn-rewind` endpoint resolves the selected `user/message` sequence, exposes a paged file preview, mints a short-lived session-bound restore plan, and delegates child creation to DSH's official Host create/fork lifecycle. It never restores files automatically.
 

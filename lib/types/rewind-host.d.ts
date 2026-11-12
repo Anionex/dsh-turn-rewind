@@ -154,6 +154,15 @@ declare module '@deepseek-ai/cordis' {
     }
 }
 export declare const REWIND_HTTP_PATH = "/turn-rewind";
+/**
+ * Same-origin route mapping every recorded turn to its opening user-message seq.
+ *
+ * DSH 0.2.0 removed the per-message chat snapshot from session-scoped slot
+ * entries, so the browser half can no longer resolve a rendered message row back
+ * to the Session event seq the rewind API anchors on. This read-only endpoint
+ * restores that mapping without touching project files or the Session log.
+ */
+export declare const TURNS_HTTP_PATH = "/turn-rewind/turns";
 /** Capture each turn beside model work and gate root tool side effects on its bounded outcome. */
 export declare class TurnCheckpointCoordinator {
     private readonly engine;
@@ -180,6 +189,8 @@ export declare class TurnCheckpointCoordinator {
 }
 /** Register the same-origin preview/apply endpoint consumed by the browser half. */
 export declare function installRewindHttp(ctx: Context, engine: ChangeLedgerEngine, coordinator: TurnCheckpointCoordinator): void;
+/** Build the read-only turn-anchor handler as a testable unit. */
+export declare function createTurnsHttpHandler(ctx: Pick<Context, 'sessions' | 'sessionQuery'>): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void>;
 /** Build the exact-route handler as a testable unit. */
 export declare function createRewindHttpHandler(ctx: ConversationRestartContext & {
     readonly agents?: AgentsLike;

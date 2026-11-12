@@ -30,6 +30,7 @@ Agent / 用户 / 外部程序修改工作树
 
 按版本倒序，最近几轮集中解决的几件事：
 
+- **回退按钮适配 0.2.2 客户端 slot API** —— DSH `0.2.2-rc.1` 不再向 `conversation.session.header.actions` 注入 `useChat`/`useSession` 会话快照钩子；客户端改为读取 Host 提供的轮次锚点（`GET /turn-rewind/turns`），按 `data-chat-turn` 匹配已渲染的用户消息行，旧 Host 的 snapshot 路径保留。
 - **普通目录也能回退文件（0.3.0）** —— 工作目录不是 Git 仓库时，插件会把它当成普通目录快照（默认排除 `.git`、`node_modules`，可用 `.dsh-rewindignore` 追加规则），不再只能「只回溯消息」。
 - **默认走最快的路径（0.3.8）** —— 新增「自动（推荐）」模式：Git 工作区用 Git 原生检查点（复用仓库对象库，**首次检查点不再重存已提交内容**），普通目录用插件自己的存储。
 - **未改动的文件不再重读（0.3.5）** —— 每个工作区持久化路径身份缓存，身份没变就直接复用；实测 20 000 文件 / 351 MB 的工作区，每轮捕获从 237 秒降到 7 秒出头。
@@ -121,6 +122,8 @@ dsh --profile web --dump-config | grep turn-rewind
 修改 Profile Bundle 后需要重启对应 DSH 进程。
 
 本仓库是标准 DSH Profile Bundle：`package.json` 声明 `dsh.bundle.patch`，`cordis.patch.yml` 直接挂载 `@anionex/dsh-turn-rewind`，不修改 DSH 主仓库。
+
+兼容性已覆盖到 DSH `0.2.2-rc.1`（此前版本继续支持）。`0.2.2` 的 `conversation.session.header.actions` slot 不再附带会话级 chat 快照，Web 桥改为从 Host 的 `GET /turn-rewind/turns` 读取轮次锚点。
 
 当 Profile 同时提供 DSH Agent 服务时，插件会在每轮第一次 `agent/pre-step`、Agent 开始处理用户消息之前保存隐藏文件状态。保存失败只会让该消息无法回退，不会拦住用户这一轮。Web Profile 还会提供同源 `/turn-rewind` 接口：根据所选 `user/message` 序号找到对应状态，分页返回文件预览，生成短期、会话绑定的恢复授权，并把新对话创建交给 DSH 官方 Host create/fork 生命周期。插件绝不会自动恢复文件。
 
