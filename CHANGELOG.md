@@ -2,8 +2,12 @@
 
 ## Unreleased
 
-- Support exact DSH `0.2.2-rc.1` and later `0.2.x` releases: the per-session chat snapshot hooks (`useChat`/`useSession`) are gone from the client slot API, so the rewind button now keys Host-provided turn anchors (`GET /turn-rewind/turns`) to rendered user rows via `data-chat-turn`. The legacy snapshot path is retained for older Hosts.
-- 支持 DSH `0.2.2-rc.1` 及后续 `0.2.x`：客户端 slot API 已移除会话级 chat 快照 hooks（`useChat`/`useSession`），回退按钮改为把 Host 提供的轮次锚点（`GET /turn-rewind/turns`）按 `data-chat-turn` 映射到已渲染的用户消息行；旧 Host 的 snapshot 路径保留。
+## 0.3.13 — 2026-11-12
+
+- Support exact DSH `0.2.2-rc.1`: the per-session chat snapshot hooks (`useChat`/`useSession`) are gone from the client slot API, so the rewind button now keys Host-provided turn anchors (`GET /turn-rewind/turns`) to rendered user rows via `data-chat-turn`. The legacy snapshot path is retained for older Hosts.
+- 支持 DSH `0.2.2-rc.1`：客户端 slot API 已移除会话级 chat 快照 hooks（`useChat`/`useSession`），回退按钮改为把 Host 提供的轮次锚点（`GET /turn-rewind/turns`）按 `data-chat-turn` 映射到已渲染的用户消息行；旧 Host 的 snapshot 路径保留。
+- Refresh anchors for new messages, scope buttons to their owning session, cancel stale requests, and retain missing attachment references for explicit recovery errors.
+- 新消息自动刷新回退锚点，按钮限定于所属会话，取消过期请求，并保留缺失附件引用以明确提示恢复失败。
 - Keep messages-only rewind available on turns recorded before this plugin created a file checkpoint.
 - 对插件建立文件检查点之前的轮次，仍可使用仅回退消息。
 
