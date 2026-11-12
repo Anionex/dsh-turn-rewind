@@ -1035,11 +1035,12 @@ export function collectChatNodes(
 }
 
 /** Read the Host turn anchors that map a rendered `data-chat-turn` row to an event seq. */
-async function fetchTurnAnchors(sessionId: string): Promise<ReadonlyMap<number, RewindMatch>> {
+async function fetchTurnAnchors(sessionId: string, signal: AbortSignal): Promise<ReadonlyMap<number, RewindMatch>> {
   const query = new URLSearchParams({ sessionId })
   const response = await fetch(`${TURNS_PATH}?${query.toString()}`, {
     headers: { accept: 'application/json' },
     cache: 'no-store',
+    signal,
   })
   if (!response.ok) return new Map()
   return parseTurnAnchors(await response.json() as unknown)
@@ -1076,11 +1077,10 @@ function parseTurnAttachments(value: unknown): readonly RewindAttachment[] {
     if (item === null || typeof item !== 'object') continue
     const record = item as Record<string, unknown>
     if (record.kind !== 'image' && record.kind !== 'file') continue
-    if (typeof record.attachmentId !== 'string' || record.attachmentId === '') continue
     const kind = record.kind
     attachments.push({
       kind,
-      attachmentId: record.attachmentId,
+      attachmentId: typeof record.attachmentId === 'string' ? record.attachmentId : '',
       name: typeof record.name === 'string' && record.name !== '' ? record.name : kind,
       mediaType: typeof record.mediaType === 'string' && record.mediaType !== '' ? record.mediaType : 'application/octet-stream',
     })
@@ -1097,13 +1097,17 @@ function parseTurnAttachments(value: unknown): readonly RewindAttachment[] {
  * @param anchors - per-turn rewind matches loaded from the Host.
  * @returns one portal target per direct user message, in document order.
  */
-function collectDomPortalTargets(anchors: ReadonlyMap<number, RewindMatch>): readonly RewindPortalTarget[] {
+function sessionRows(sessionId: string): HTMLElement[] {
+  return Array.from(document.querySelectorAll<HTMLElement>('[data-conversation-session]'))
+    .filter(root => root.dataset.conversationSession === sessionId)
+    .flatMap(root => Array.from(root.querySelectorAll<HTMLElement>('[data-chat-flow-kind="user"][data-chat-turn]')))
+}
+
+function collectDomPortalTargets(anchors: ReadonlyMap<number, RewindMatch>, sessionId: string): readonly RewindPortalTarget[] {
   if (anchors.size === 0) return []
   const targets: RewindPortalTarget[] = []
   const seen = new Set<number>()
-  for (const row of Array.from(document.querySelectorAll<HTMLElement>(
-    '[data-chat-flow-kind="user"][data-chat-turn]',
-  ))) {
+  for (const row of sessionRows(sessionId)) {
     const turn = Number(row.dataset.chatTurn)
     if (!Number.isSafeInteger(turn)) continue
     const matched = anchors.get(turn)
@@ -1124,10 +1128,16 @@ function DomRewindMessagePortals({ sessionId, openRestoredSession }: RewindPorta
   useLayoutEffect(() => {
     let active = true
     let queued = false
+    let loading = false
+    let retry: ReturnType<typeof setTimeout> | undefined
+    const controller = new AbortController()
+    anchors.current = new Map()
     const refresh = (): void => {
       if (!active) return
-      const next = collectDomPortalTargets(anchors.current)
+      const next = collectDomPortalTargets(anchors.current, sessionId)
       setTargets(current => samePortalTargets(current, next) ? current : next)
+      const missing = sessionRows(sessionId).some(row => Number.isSafeInteger(Number(row.dataset.chatTurn)) && !anchors.current.has(Number(row.dataset.chatTurn)))
+      if (missing && !loading && retry === undefined) void load()
     }
     const queueRefresh = (): void => {
       if (queued || !active) return
@@ -1138,21 +1148,35 @@ function DomRewindMessagePortals({ sessionId, openRestoredSession }: RewindPorta
       })
     }
     const load = async (): Promise<void> => {
+      if (!active || loading) return
+      loading = true
       try {
-        const loaded = await fetchTurnAnchors(sessionId)
+        const loaded = await fetchTurnAnchors(sessionId, controller.signal)
         if (!active) return
         anchors.current = loaded
-        queueRefresh()
       } catch {
-        // Hosts without the anchor endpoint keep the bridge dormant.
+        // A transient failure is retried only while a rendered turn lacks an anchor.
+      } finally {
+        loading = false
+        if (active) {
+          // Bound retries when the DOM precedes persistence, and avoid fetching
+          // again for every streamed token or portal insertion.
+          retry = setTimeout(() => {
+            retry = undefined
+            queueRefresh()
+          }, 1000)
+          queueRefresh()
+        }
       }
     }
     void load()
     refresh()
     const observer = new MutationObserver(queueRefresh)
-    observer.observe(document.body, { childList: true, subtree: true })
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-chat-turn'] })
     return () => {
       active = false
+      controller.abort()
+      clearTimeout(retry)
       observer.disconnect()
     }
   }, [sessionId])
@@ -1215,7 +1239,7 @@ function LegacyRewindMessagePortals({ sessionId, openRestoredSession, readSnapsh
 export function RewindMessagePortals(props: RewindPortalBridgeProps): ReactNode {
   const readSnapshot = props.useChat ?? props.useSession
   if (readSnapshot === undefined) {
-    return <DomRewindMessagePortals sessionId={props.sessionId} openRestoredSession={props.openRestoredSession} />
+    return <DomRewindMessagePortals key={props.sessionId} sessionId={props.sessionId} openRestoredSession={props.openRestoredSession} />
   }
   return <LegacyRewindMessagePortals {...props} readSnapshot={readSnapshot} />
 }
