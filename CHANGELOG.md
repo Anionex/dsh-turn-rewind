@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Support exact DSH `0.2.2-rc.1` and later `0.2.x` releases: the per-session chat snapshot hooks (`useChat`/`useSession`) are gone from the client slot API, so the rewind button now keys Host-provided turn anchors (`GET /turn-rewind/turns`) to rendered user rows via `data-chat-turn`. The legacy snapshot path is retained for older Hosts.
+- 支持 DSH `0.2.2-rc.1` 及后续 `0.2.x`：客户端 slot API 已移除会话级 chat 快照 hooks（`useChat`/`useSession`），回退按钮改为把 Host 提供的轮次锚点（`GET /turn-rewind/turns`）按 `data-chat-turn` 映射到已渲染的用户消息行；旧 Host 的 snapshot 路径保留。
+- Keep messages-only rewind available on turns recorded before this plugin created a file checkpoint.
+- 对插件建立文件检查点之前的轮次，仍可使用仅回退消息。
+
 ## 0.3.12 — 2026-11-07
 
 - Restore message images and files into the draft when rewinding or restarting, using the public session-input API. Validate original message references before reading attachment bytes; retain empty files and explain missing or refused attachments.

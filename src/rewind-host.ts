@@ -159,6 +159,15 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const REWIND_HTTP_PATH = '/turn-rewind'
+/**
+ * Same-origin route mapping every recorded turn to its opening user-message seq.
+ *
+ * DSH 0.2.0 removed the per-message chat snapshot from session-scoped slot
+ * entries, so the browser half can no longer resolve a rendered message row back
+ * to the Session event seq the rewind API anchors on. This read-only endpoint
+ * restores that mapping without touching project files or the Session log.
+ */
+export const TURNS_HTTP_PATH = '/turn-rewind/turns'
 const BODY_LIMIT = 64 * 1024
 const INITIAL_CHANGE_PREVIEW_LIMIT = 8
 const MAX_CHANGE_PAGE_SIZE = 200
@@ -398,6 +407,132 @@ export function installRewindHttp(
     path: REWIND_HTTP_PATH,
     handler: createRewindHttpHandler(ctx, engine, coordinator),
   }), 'change-ledger.rewindHttp')
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: TURNS_HTTP_PATH,
+    handler: createTurnsHttpHandler(ctx),
+  }), 'change-ledger.turnsHttp')
+}
+
+/** Build the read-only turn-anchor handler as a testable unit. */
+export function createTurnsHttpHandler(
+  ctx: Pick<Context, 'sessions' | 'sessionQuery'>,
+): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void> {
+  return async (request, response) => {
+    try {
+      if (request.method !== 'GET') {
+        json(response, 405, { error: 'method not allowed' })
+        return
+      }
+      const url = new URL(request.url ?? TURNS_HTTP_PATH, 'http://dsh.local')
+      const sessionId = requiredText(url.searchParams.get('sessionId'), 'sessionId')
+      json(response, 200, { turns: listTurnAnchors(await readSession(ctx, sessionId)) })
+    } catch (error) {
+      const status = error instanceof ChangeLedgerError && error.code === 'RESTORE_POINT_NOT_FOUND' ? 404 : 409
+      json(response, status, { error: errorMessage(error), code: error instanceof ChangeLedgerError ? error.code : 'REWIND_FAILED' })
+    }
+  }
+}
+
+/** One rewind anchor the browser keys a rendered message row by its turn number. */
+interface TurnAnchorLike {
+  readonly turn: number
+  readonly userSeq: number
+  readonly turnStartSeq: number
+  readonly previousTurnEndSeq?: number
+  readonly promptText: string
+  readonly attachments?: readonly TurnAttachmentLike[]
+}
+
+/** One durable `image` / `file` reference distilled for the browser restart dialog. */
+interface TurnAttachmentLike {
+  readonly kind: 'image' | 'file'
+  readonly attachmentId: string
+  readonly name: string
+  readonly mediaType: string
+}
+
+/**
+ * Anchor every recorded turn to its opening direct user message.
+ *
+ * Mirrors `messageTarget` from the apply path: a turn opens at its first direct
+ * `user/message` after `turn/start` and closes at the following `turn/end`. The
+ * currently open turn is included; callers gate restoration separately.
+ * @param session - live or stored session to scan.
+ * @returns clean turns in event order.
+ */
+function listTurnAnchors(session: SessionLike): readonly TurnAnchorLike[] {
+  const anchors: TurnAnchorLike[] = []
+  let turnStart: SessionEventLike | undefined
+  let previousTurnEnd: SessionEventLike | undefined
+  let opening: SessionEventLike | undefined
+  const flush = (): void => {
+    if (turnStart === undefined || opening === undefined) return
+    const turn = turnStart.data.turn
+    if (!Number.isSafeInteger(turn) || (turn as number) < 0) return
+    const attachments = turnAttachments(opening.data)
+    anchors.push({
+      turn: turn as number,
+      userSeq: opening.seq,
+      turnStartSeq: turnStart.seq,
+      ...(previousTurnEnd === undefined ? {} : { previousTurnEndSeq: previousTurnEnd.seq }),
+      promptText: turnPromptText(opening.data),
+      ...(attachments.length === 0 ? {} : { attachments }),
+    })
+  }
+  for (const event of getSessionEvents(session)) {
+    if (event.type === 'turn/start') {
+      flush()
+      turnStart = event
+      opening = undefined
+      continue
+    }
+    if (event.type === 'turn/end') {
+      flush()
+      turnStart = undefined
+      opening = undefined
+      previousTurnEnd = event
+      continue
+    }
+    if (turnStart !== undefined && opening === undefined && event.type === 'user/message' && isDirectUserMessage(event)) {
+      opening = event
+    }
+  }
+  flush()
+  return anchors
+}
+
+function turnPromptText(data: Record<string, unknown>): string {
+  const content = data.content
+  if (!Array.isArray(content)) return ''
+  const parts: string[] = []
+  for (const block of content) {
+    if (block === null || typeof block !== 'object') continue
+    const record = block as Record<string, unknown>
+    if (record.type === 'text' && typeof record.text === 'string') parts.push(record.text)
+  }
+  return parts.join('\n')
+}
+
+function turnAttachments(data: Record<string, unknown>): readonly TurnAttachmentLike[] {
+  const content = data.content
+  if (!Array.isArray(content)) return []
+  const attachments: TurnAttachmentLike[] = []
+  for (const block of content) {
+    if (block === null || typeof block !== 'object') continue
+    const record = block as Record<string, unknown>
+    if (record.type !== 'image' && record.type !== 'file') continue
+    const raw = record.attachment
+    const attachment = raw !== null && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+    const kind = record.type
+    attachments.push({
+      kind,
+      attachmentId: typeof attachment.attachmentId === 'string' ? attachment.attachmentId : '',
+      name: typeof attachment.name === 'string' && attachment.name !== '' ? attachment.name : kind,
+      mediaType: typeof attachment.mediaType === 'string' && attachment.mediaType !== '' ? attachment.mediaType : 'application/octet-stream',
+    })
+  }
+  return attachments
 }
 
 /** Build the exact-route handler as a testable unit. */
