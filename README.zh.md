@@ -123,7 +123,7 @@ dsh --profile web --dump-config | grep turn-rewind
 
 本仓库是标准 DSH Profile Bundle：`package.json` 声明 `dsh.bundle.patch`，`cordis.patch.yml` 直接挂载 `@anionex/dsh-turn-rewind`，不修改 DSH 主仓库。
 
-兼容性已覆盖到 DSH `0.2.2-rc.1`（此前版本继续支持）。`0.2.2` 的 `conversation.session.header.actions` slot 不再附带会话级 chat 快照，Web 桥改为从 Host 的 `GET /turn-rewind/turns` 读取轮次锚点。
+明确支持 DSH `0.2.2-rc.1`、`0.2.2-rc.3` 及此前已支持的版本。`0.2.2` 的 `conversation.session.header.actions` slot 不再附带会话级 chat 快照，Web 桥改为从 Host 的 `GET /turn-rewind/turns` 读取轮次锚点。
 
 当 Profile 同时提供 DSH Agent 服务时，插件会在每轮第一次 `agent/pre-step`、Agent 开始处理用户消息之前保存隐藏文件状态。保存失败只会让该消息无法回退，不会拦住用户这一轮。Web Profile 还会提供同源 `/turn-rewind` 接口：根据所选 `user/message` 序号找到对应状态，分页返回文件预览，生成短期、会话绑定的恢复授权，并把新对话创建交给 DSH 官方 Host create/fork 生命周期。插件绝不会自动恢复文件。
 

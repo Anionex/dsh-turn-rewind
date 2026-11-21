@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.3.14 — 2026-11-21
+
+- Support DSH `0.2.2-rc.3` in the compatibility declaration and settings peer range, fixing the Desktop Profile installation rejection reported in [#38](https://github.com/Anionex/dsh-turn-rewind/issues/38).
+- 兼容性声明及 settings peer 范围明确支持 DSH `0.2.2-rc.3`，修复 [#38](https://github.com/Anionex/dsh-turn-rewind/issues/38) 报告的 Desktop Profile 安装被拒绝问题。
+
 ## 0.3.13 — 2026-11-12
 
 - Support exact DSH `0.2.2-rc.1`: the per-session chat snapshot hooks (`useChat`/`useSession`) are gone from the client slot API, so the rewind button now keys Host-provided turn anchors (`GET /turn-rewind/turns`) to rendered user rows via `data-chat-turn`. The legacy snapshot path is retained for older Hosts.
