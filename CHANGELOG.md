@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.3.15 — 2026-11-26
+
+- Support exact DSH `0.2.2-rc.5` in the compatibility declaration and settings peer range, preserving every previously supported release. Verified with the repository checks and a live Desktop Profile installation on `0.2.2-rc.5`.
+- 兼容性声明及 settings peer 范围明确支持 DSH `0.2.2-rc.5`，保留此前支持的全部版本；通过仓库检查并在 `0.2.2-rc.5` 的 Desktop Profile 中实测安装。
+
 ## 0.3.14 — 2026-11-21
 
 - Support DSH `0.2.2-rc.3` in the compatibility declaration and settings peer range, fixing the Desktop Profile installation rejection reported in [#38](https://github.com/Anionex/dsh-turn-rewind/issues/38).
