@@ -195,6 +195,48 @@ export declare function createTurnsHttpHandler(ctx: Pick<Context, 'sessions' | '
 export declare function createRewindHttpHandler(ctx: ConversationRestartContext & {
     readonly agents?: AgentsLike;
 }, engine: ChangeLedgerEngine, coordinator: TurnCheckpointCoordinator): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void>;
+interface CompactionBoundary {
+    readonly summarySeq: number;
+    readonly replacementSeq: number;
+}
+interface ForkPoint {
+    /** Event seq the child session is forked at, inclusive. */
+    readonly seq: number;
+    /** True when the boundary moved back to the latest compaction checkpoint. */
+    readonly compacted: boolean;
+    /** Owned events between the compaction replacement and the requested boundary. */
+    readonly skippedEvents: number;
+}
+/**
+ * Latest compaction replacement inside one fork prefix, if the log records one.
+ * @param events - the source session's canonical events in seq order.
+ * @param upToSeq - inclusive fork boundary being considered.
+ * @returns the summary and replacement seqs, or undefined when never compacted.
+ */
+export declare function findCompactionBoundary(events: readonly SessionEventLike[], upToSeq: number): CompactionBoundary | undefined;
+/**
+ * Approximate request bytes the surface contributes at one fork boundary.
+ * @param events - the source session's canonical events in seq order.
+ * @param fromSeq - first surface seq included (the compaction replacement, or 0).
+ * @param upToSeq - inclusive fork boundary.
+ * @returns summed UTF-8 bytes of the serialized events in that span.
+ */
+export declare function surfaceBytes(events: readonly SessionEventLike[], fromSeq: number, upToSeq: number): number;
+/**
+ * Pick the fork boundary for a restart.
+ *
+ * DSH forks an exact raw prefix and its surface projection applies the latest
+ * compaction replacement inside it, so a long post-summary span can leave the
+ * child one request away from the provider's body cap. Above the budget the
+ * boundary moves back to the latest compaction replacement and the child opens
+ * from that summary instead of inheriting a dead over-cap surface. Without a
+ * checkpoint no boundary inside the prefix can shrink the surface, so the
+ * request is rejected with an actionable error rather than creating the child.
+ * @param events - the source session's canonical events in seq order.
+ * @param boundarySeq - the requested turn boundary (`previousTurnEndSeq`).
+ * @returns the chosen fork seq and whether it was compacted back.
+ */
+export declare function chooseForkPoint(events: readonly SessionEventLike[], boundarySeq: number): ForkPoint;
 /** Same-origin route that replays one stored attachment's bytes to the browser. */
 export declare const ATTACHMENT_HTTP_PATH = "/turn-rewind/attachment-bytes";
 /** Register the attachment-bytes route consumed by the rewound composer draft. */

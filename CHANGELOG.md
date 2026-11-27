@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.3.16 — 2026-11-27
+
+- Fork oversized sessions from their latest compaction checkpoint: when the requested turn boundary's surface exceeds the provider request-body budget, the restart child opens from the compaction replacement instead of an over-cap raw prefix, so it no longer dies on its first automatic compaction with `Request body too large`. The response reports `compacted` and `skippedEvents`, and the dialog explains that content after the checkpoint was not carried over.
+- Reject a boundary that is oversized and was never compacted with `SESSION_TOO_LARGE`, telling the user to `/compact` or start a new conversation first instead of creating a dead child session.
+- 超大会话改为从最近一次压缩检查点 fork：当目标轮次边界的 surface 超过 provider 请求体预算时，重启子会话从压缩替换消息开始，而不是继承超限的原始前缀，从而不再在第一次自动压缩时报 `Request body too large`；响应返回 `compacted` 与 `skippedEvents`，对话框说明压缩点之后的内容没有带入。
+- 对「超大且从未压缩」的边界返回 `SESSION_TOO_LARGE`，提示先 `/compact` 或新开会话，而不是创建一个必然失败的子会话。
+
 ## 0.3.15 — 2026-11-26
 
 - Support exact DSH `0.2.2-rc.5` in the compatibility declaration and settings peer range, preserving every previously supported release. Verified with the repository checks and a live Desktop Profile installation on `0.2.2-rc.5`.

@@ -125,7 +125,9 @@ Restart a running profile after changing its bundle list.
 
 The package is a DSH Profile Bundle. `package.json` declares `dsh.bundle.patch`, and `cordis.patch.yml` mounts `@anionex/dsh-turn-rewind` without a DSH core patch.
 
-Compatibility is declared for DSH `0.2.2-rc.1`, `0.2.2-rc.3`, `0.2.2-rc.5`, and previously supported versions. On `0.2.2` the `conversation.session.header.actions` slot no longer carries a per-session chat snapshot, so the Web bridge resolves turn anchors from the Host (`GET /turn-rewind/turns`) instead of the removed snapshot hooks.
+Compatibility is declared for DSH `0.2.2-rc.1`, `0.2.2-rc.3`, `0.2.2-rc.5`, and previously supported versions.
+
+**Oversized sessions.** DSH forks an exact raw prefix, and the child's surface is that prefix after its latest compaction replacement. When the surface would exceed the provider's request-body budget (10 MB on the DeepSeek gateway), a restart forks from the latest compaction replacement instead of the requested turn boundary, so the child keeps working; the response reports `compacted` and the dialog says that content after the checkpoint was not carried over. A prefix that is oversized and was never compacted is rejected with `SESSION_TOO_LARGE` before any child session is created. On `0.2.2` the `conversation.session.header.actions` slot no longer carries a per-session chat snapshot, so the Web bridge resolves turn anchors from the Host (`GET /turn-rewind/turns`) instead of the removed snapshot hooks.
 
 When the profile also provides the DSH Agent service, the plugin captures a hidden checkpoint in the first `agent/pre-step` waterfall before the Agent processes the opening user message. Capture failures are reported but do not reject the user's turn; the corresponding message simply has no usable rewind point. In Web profiles, the same-origin `/turn-rewind` endpoint resolves the selected `user/message` sequence, exposes a paged file preview, mints a short-lived session-bound restore plan, and delegates child creation to DSH's official Host create/fork lifecycle. It never restores files automatically.
 

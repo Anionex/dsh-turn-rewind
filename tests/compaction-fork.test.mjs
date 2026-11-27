@@ -1,0 +1,64 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { chooseForkPoint, findCompactionBoundary, surfaceBytes } from '../lib/rewind-host.js'
+
+/** One canonical event with a deterministic payload size. */
+function event(seq, type, data = {}) {
+  return { type, seq, time: seq, data }
+}
+
+/** A compaction summary followed by its replacement user message. */
+function compacted(seq, summaryChars) {
+  return [
+    event(seq, 'compaction/summary', { compactionId: 'c', summary: [{ type: 'text', text: 'x'.repeat(summaryChars) }] }),
+    event(seq + 1, 'user/message', { source: { kind: 'compaction' }, content: [{ type: 'text', text: `<compacted-summary>${'x'.repeat(summaryChars)}</compacted-summary>` }] }),
+    event(seq + 2, 'compaction/end', { compactionId: 'c' }),
+  ]
+}
+
+test('findCompactionBoundary reports the latest summary and its replacement', () => {
+  const events = [
+    event(1, 'system/message'),
+    ...compacted(10, 10),
+    ...compacted(100, 10),
+    event(200, 'turn/end'),
+  ]
+  assert.deepEqual(findCompactionBoundary(events, 200), { summarySeq: 100, replacementSeq: 101 })
+  assert.deepEqual(findCompactionBoundary(events, 100), { summarySeq: 100, replacementSeq: 101 })
+  assert.deepEqual(findCompactionBoundary(events, 90), { summarySeq: 10, replacementSeq: 11 })
+  assert.equal(findCompactionBoundary(events, 9), undefined)
+})
+
+test('surfaceBytes sums only the requested inclusive span', () => {
+  const events = [event(1, 'a'), event(2, 'b', { text: 'y'.repeat(1000) }), event(3, 'c')]
+  assert.ok(surfaceBytes(events, 2, 2) >= 1000)
+  assert.equal(surfaceBytes(events, 4, 5), 0)
+  assert.ok(surfaceBytes(events, 0, 3) > surfaceBytes(events, 2, 2))
+})
+
+test('a small prefix keeps the requested turn boundary', () => {
+  const events = [...compacted(1, 10), event(10, 'turn/end')]
+  assert.deepEqual(chooseForkPoint(events, 10), { seq: 10, compacted: false, skippedEvents: 0 })
+})
+
+test('an oversized compacted prefix forks from the compaction replacement', () => {
+  const big = 'z'.repeat(1024 * 1024)
+  const events = [
+    ...compacted(1, 10),
+    ...Array.from({ length: 7 }, (_, index) => event(10 + index, 'assistant/message', { text: big })),
+    event(20, 'turn/end'),
+  ]
+  const point = chooseForkPoint(events, 20)
+  assert.equal(point.compacted, true)
+  assert.equal(point.seq, 2)
+  assert.equal(point.skippedEvents, 9)
+})
+
+test('an oversized prefix without compaction is rejected with SESSION_TOO_LARGE', () => {
+  const big = 'z'.repeat(1024 * 1024)
+  const events = Array.from({ length: 7 }, (_, index) => event(index + 1, 'assistant/message', { text: big }))
+  assert.throws(
+    () => chooseForkPoint(events, events.length),
+    error => error?.code === 'SESSION_TOO_LARGE',
+  )
+})
