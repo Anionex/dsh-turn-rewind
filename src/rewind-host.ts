@@ -622,12 +622,14 @@ export function createRewindHttpHandler(
         if (mode === 'messages') {
           const target = messageTarget(await readSession(ctx, sessionId), messageSeq)
           const fork = await createConversationRestart(ctx, sessionId, target)
+          const archived = await archiveSourceSession(ctx, sessionId)
           json(response, 200, {
             status: 'completed',
             mode,
             sessionId: fork.sessionId,
             compacted: fork.compacted,
             skippedEvents: fork.skippedEvents,
+            archived,
           })
           return
         }
@@ -653,12 +655,14 @@ export function createRewindHttpHandler(
 
         try {
           const fork = await createConversationRestart(ctx, sessionId, checkpoint)
+          const archived = await archiveSourceSession(ctx, sessionId)
           json(response, 200, {
             status: 'completed',
             mode,
             sessionId: fork.sessionId,
             compacted: fork.compacted,
             skippedEvents: fork.skippedEvents,
+            archived,
             ...restoreResult,
           })
         } catch (forkError) {
@@ -925,6 +929,35 @@ export function chooseForkPoint(
     event.seq > boundary.replacementSeq && event.seq <= boundarySeq
   )).length
   return { seq: boundary.replacementSeq, compacted: true, skippedEvents }
+}
+
+/**
+ * Best-effort archive of the source conversation after a successful rewind fork.
+ *
+ * DSH has no session delete API; the workspace registry's archive removes the
+ * session from the sidebar while keeping its durable state and allowing an
+ * unarchive later. A session that still has running work rejects the archive,
+ * which is reported as `false` instead of failing the rewind.
+ * @param ctx - rewind host context providing the optional registry.
+ * @param sessionId - the source session to archive.
+ * @returns whether the archive was admitted.
+ */
+export async function archiveSourceSession(
+  ctx: Pick<Context, 'get'>,
+  sessionId: string,
+): Promise<boolean> {
+  const registry = ctx.get('workspaceRegistry') as
+    | { archiveSession?(sessionId: string): Promise<unknown> }
+    | undefined
+  if (registry?.archiveSession === undefined) return false
+  try {
+    await registry.archiveSession(sessionId)
+    return true
+  } catch (error) {
+    const logger = (ctx as { logger?: { warn(message: string): void } }).logger
+    logger?.warn(`[turn-rewind] could not archive ${sessionId}: ${errorMessage(error)}`)
+    return false
+  }
 }
 
 async function createConversationRestart(

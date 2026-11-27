@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { chooseForkPoint, findCompactionBoundary, surfaceBytes } from '../lib/rewind-host.js'
+import { archiveSourceSession, chooseForkPoint, findCompactionBoundary, surfaceBytes } from '../lib/rewind-host.js'
 
 /** One canonical event with a deterministic payload size. */
 function event(seq, type, data = {}) {
@@ -75,4 +75,20 @@ test('an oversized prefix without compaction is rejected with SESSION_TOO_LARGE'
     () => chooseForkPoint(events, events.length, events.length + 1),
     error => error?.code === 'SESSION_TOO_LARGE',
   )
+})
+
+test('the source session is archived after a successful rewind fork', async () => {
+  const calls = []
+  const ctx = {
+    get: name => name === 'workspaceRegistry'
+      ? { archiveSession: async id => { calls.push(id) } }
+      : undefined,
+  }
+  assert.equal(await archiveSourceSession(ctx, 'session-a'), true)
+  assert.deepEqual(calls, ['session-a'])
+})
+
+test('a missing or rejecting archive is reported, never thrown', async () => {
+  assert.equal(await archiveSourceSession({ get: () => undefined }, 'session-a'), false)
+  assert.equal(await archiveSourceSession({ get: () => ({ archiveSession: async () => { throw new Error('still running') } }) }, 'session-a'), false)
 })

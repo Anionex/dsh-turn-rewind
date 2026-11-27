@@ -241,6 +241,18 @@ export declare function surfaceBytes(events: readonly SessionEventLike[], fromSe
  * @returns the chosen fork seq and whether it was compacted back.
  */
 export declare function chooseForkPoint(events: readonly SessionEventLike[], boundarySeq: number, messageSeq: number): ForkPoint;
+/**
+ * Best-effort archive of the source conversation after a successful rewind fork.
+ *
+ * DSH has no session delete API; the workspace registry's archive removes the
+ * session from the sidebar while keeping its durable state and allowing an
+ * unarchive later. A session that still has running work rejects the archive,
+ * which is reported as `false` instead of failing the rewind.
+ * @param ctx - rewind host context providing the optional registry.
+ * @param sessionId - the source session to archive.
+ * @returns whether the archive was admitted.
+ */
+export declare function archiveSourceSession(ctx: Pick<Context, 'get'>, sessionId: string): Promise<boolean>;
 /** Same-origin route that replays one stored attachment's bytes to the browser. */
 export declare const ATTACHMENT_HTTP_PATH = "/turn-rewind/attachment-bytes";
 /** Register the attachment-bytes route consumed by the rewound composer draft. */

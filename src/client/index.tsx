@@ -386,6 +386,7 @@ interface RewindText {
   readonly completedCode: string
   readonly completedBoth: string
   readonly compactedNotice: string
+  readonly archivedNotice: string
   readonly openFailed: (reason: string) => string
   readonly restoredButOpenFailed: (reason: string) => string
   readonly modeMismatch: (mode: string) => string
@@ -501,6 +502,7 @@ const ZH: RewindText = {
   completedCode: '项目文件已恢复；当前对话保持不变。恢复前的文件已自动备份。',
   completedBoth: '项目文件已恢复，并已创建新对话。恢复前的文件已自动备份。',
   compactedNotice: '这段对话较长，新对话已从最近一次压缩点开始；压缩点之后的内容没有带入。',
+  archivedNotice: '原对话已归档，可在侧边栏搜索的「已归档」中恢复。',
   openFailed: reason => `新对话已创建，但没能自动打开：${reason}`,
   restoredButOpenFailed: reason => `文件已经恢复，新对话也已创建，但没能自动打开：${reason}`,
   modeMismatch: mode => `服务器返回了不匹配的回退模式：${mode}`,
@@ -671,6 +673,7 @@ const EN: RewindText = {
   completedCode: 'The project files have been restored; the current conversation is unchanged. The files from before the restore were backed up automatically.',
   completedBoth: 'The project files have been restored and a new conversation was created. The files from before the restore were backed up automatically.',
   compactedNotice: 'This conversation was long, so the new conversation starts from the latest compaction checkpoint; content after that point was not carried over.',
+  archivedNotice: 'The previous conversation was archived; you can restore it from the archived sessions in the sidebar search.',
   openFailed: reason => `The new conversation was created but could not be opened automatically: ${reason}`,
   restoredButOpenFailed: reason => `The files were restored and the new conversation was created, but it could not be opened automatically: ${reason}`,
   modeMismatch: mode => `The server returned a rewind mode that does not match: ${mode}`,
@@ -1398,7 +1401,8 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
       if (resultMode !== mode) throw new Error(t.modeMismatch(resultMode))
       if (mode === 'messages') {
         const childSessionId = requiredString(result.sessionId, 'sessionId')
-        setCompleted(result.compacted === true ? t.compactedNotice : t.completedMessages)
+        const done = result.compacted === true ? t.compactedNotice : t.completedMessages
+        setCompleted(result.archived === true ? `${done} ${t.archivedNotice}` : done)
         try {
           await openRestoredSession(childSessionId, matched.promptText, matched.attachments?.map(attachment => ({ ...attachment, sourceSessionId: sessionId, messageSeq: matched.messageSeq })))
           setOpen(false)
@@ -1414,7 +1418,8 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
       }
       const childSessionId = requiredString(result.sessionId, 'sessionId')
       requiredString(result.rescuePointId, 'rescuePointId')
-      setCompleted(result.compacted === true ? `${t.completedBoth} ${t.compactedNotice}` : t.completedBoth)
+      const done = result.compacted === true ? `${t.completedBoth} ${t.compactedNotice}` : t.completedBoth
+      setCompleted(result.archived === true ? `${done} ${t.archivedNotice}` : done)
       try {
         await openRestoredSession(childSessionId, matched.promptText, matched.attachments?.map(attachment => ({ ...attachment, sourceSessionId: sessionId, messageSeq: matched.messageSeq })))
         setOpen(false)

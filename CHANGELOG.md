@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.3.18 — 2026-11-27
+
+- Archive the source conversation after a successful rewind fork, so repeated rewinds no longer pile up sessions in the sidebar. DSH has no session delete API; archive removes the row while keeping durable state, and the sidebar's archived search restores it. A session with running work rejects the archive, which never fails the rewind; the response reports `archived`.
+- 回滚成功 fork 后自动归档源对话，反复回滚不再堆积会话。DSH 没有删除会话的 API，归档只把该行移出列表、保留数据，可在侧边栏「已归档」搜索中恢复；仍有工作在跑的会话归档会被拒绝，不影响回滚本身，响应返回 `archived`。
+
 ## 0.3.17 — 2026-11-27
 
 - Fix `SESSION_TOO_LARGE` on sessions compacted right before the selected message: a `/compact` recorded after the previous turn's end lies outside that fork boundary, so the checkpoint search now runs up to the selected message and prefers it. Forking at that later replacement keeps the child on the summary surface and skips nothing before the boundary.
