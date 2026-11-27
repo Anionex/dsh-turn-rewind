@@ -527,6 +527,7 @@ const ZH: RewindText = {
     REPOSITORY_CHANGED: '这个项目目录已不属于原来的 Git 工作区，无法恢复。',
     GIT_OPERATION_CHANGED: 'Git 正在执行其他操作。请先完成或取消该操作，再重新检查。',
     RESTORE_POINT_NOT_FOUND: '没有找到对应的文件状态，可能已被清理。',
+    SESSION_TOO_LARGE: '这段对话太大，且没有可用的压缩检查点。请先在原会话执行 /compact，或新开一个会话后再回滚。',
     NO_CHANGES: '项目文件已经是这条消息发送前的状态，无需恢复文件。可选择「只回溯消息」重新开始这段对话。',
     RESTORE_FAILED_ROLLED_BACK: '恢复未能完成，项目文件已自动还原到操作前的状态。',
     CONVERSATION_REWIND_FAILED: '文件已恢复，但无法创建新对话；项目文件已自动还原。',
@@ -699,6 +700,7 @@ const EN: RewindText = {
     NO_CHANGES: 'The project files already match the state from before this message, so no files need restoring. Choose “Rewind messages only” to restart this conversation from here.',
     RESTORE_FAILED_ROLLED_BACK: 'The restore did not finish; the project files were rolled back to their state before the operation.',
     CONVERSATION_REWIND_FAILED: 'The files were restored but the new conversation could not be created; the project files were rolled back.',
+    SESSION_TOO_LARGE: 'This part of the conversation is too large and has no compaction checkpoint. Run /compact in this session or start a new conversation, then rewind.',
   },
   captureSnapshotLimit: 'The files in this turn exceeded the total size limit, so the remaining files were left out of the checkpoint. A restore will not touch them.',
   captureFileLimit: 'This turn had more files than the limit allows, so the extra files were left out of the checkpoint. A restore will not touch them.',
@@ -2284,12 +2286,15 @@ export function describeCaptureNotice(ready: ReadyPreview | null): string | null
  * @returns one user-facing sentence.
  */
 export function explainCheckpointSkip(reason: string): string {
-  const code = /^\[([A-Z_]+)\]/.exec(reason)?.[1]
+  // Older profiles persisted a structured skip reason; never render it as
+  // `[object Object]` in the dialog.
+  const text = typeof reason === 'string' ? reason : JSON.stringify(reason)
+  const code = /^\[([A-Z_]+)\]/.exec(text)?.[1]
   const t = uiText()
   if (code === 'TURN_CHECKPOINT_TIMEOUT') return t.skipTimeout
   if (code === 'TURN_CHECKPOINT_DISABLED') return t.skipDisabled
   if (code === 'TURN_CHECKPOINT_NEW_CONTENT_LIMIT') return t.skipNewContentLimit
-  return t.skipOther(reason)
+  return t.skipOther(text)
 }
 
 /**

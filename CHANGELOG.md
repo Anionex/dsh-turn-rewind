@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.3.17 — 2026-11-27
+
+- Fix `SESSION_TOO_LARGE` on sessions compacted right before the selected message: a `/compact` recorded after the previous turn's end lies outside that fork boundary, so the checkpoint search now runs up to the selected message and prefers it. Forking at that later replacement keeps the child on the summary surface and skips nothing before the boundary.
+- Show a localized `SESSION_TOO_LARGE` sentence and stop rendering a structured skip reason as `[object Object]`.
+- 修复「刚 `/compact` 过仍报 `SESSION_TOO_LARGE`」：`/compact` 在上一轮结束之后、所选消息之前时不在该 fork 边界内，现在把检查点搜索范围扩大到所选消息之前并优先使用它；从该替换消息 fork 后子会话只保留摘要 surface。
+- `SESSION_TOO_LARGE` 现在有本地化文案，结构化跳过原因不再显示为 `[object Object]`。
+
 ## 0.3.16 — 2026-11-27
 
 - Fork oversized sessions from their latest compaction checkpoint: when the requested turn boundary's surface exceeds the provider request-body budget, the restart child opens from the compaction replacement instead of an over-cap raw prefix, so it no longer dies on its first automatic compaction with `Request body too large`. The response reports `compacted` and `skippedEvents`, and the dialog explains that content after the checkpoint was not carried over.

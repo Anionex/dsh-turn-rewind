@@ -38,7 +38,7 @@ test('surfaceBytes sums only the requested inclusive span', () => {
 
 test('a small prefix keeps the requested turn boundary', () => {
   const events = [...compacted(1, 10), event(10, 'turn/end')]
-  assert.deepEqual(chooseForkPoint(events, 10), { seq: 10, compacted: false, skippedEvents: 0 })
+  assert.deepEqual(chooseForkPoint(events, 10, 11), { seq: 10, compacted: false, skippedEvents: 0 })
 })
 
 test('an oversized compacted prefix forks from the compaction replacement', () => {
@@ -48,17 +48,31 @@ test('an oversized compacted prefix forks from the compaction replacement', () =
     ...Array.from({ length: 7 }, (_, index) => event(10 + index, 'assistant/message', { text: big })),
     event(20, 'turn/end'),
   ]
-  const point = chooseForkPoint(events, 20)
+  const point = chooseForkPoint(events, 20, 21)
   assert.equal(point.compacted, true)
   assert.equal(point.seq, 2)
   assert.equal(point.skippedEvents, 9)
+})
+
+test('a compaction between the boundary and the message is still forkable', () => {
+  const big = 'z'.repeat(1024 * 1024)
+  const events = [
+    ...Array.from({ length: 7 }, (_, index) => event(index + 1, 'assistant/message', { text: big })),
+    event(10, 'turn/end'),
+    ...compacted(100, 10),
+    event(110, 'user/message', { source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] }),
+  ]
+  const point = chooseForkPoint(events, 10, 110)
+  assert.equal(point.compacted, true)
+  assert.equal(point.seq, 101)
+  assert.equal(point.skippedEvents, 0)
 })
 
 test('an oversized prefix without compaction is rejected with SESSION_TOO_LARGE', () => {
   const big = 'z'.repeat(1024 * 1024)
   const events = Array.from({ length: 7 }, (_, index) => event(index + 1, 'assistant/message', { text: big }))
   assert.throws(
-    () => chooseForkPoint(events, events.length),
+    () => chooseForkPoint(events, events.length, events.length + 1),
     error => error?.code === 'SESSION_TOO_LARGE',
   )
 })

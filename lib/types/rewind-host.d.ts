@@ -229,14 +229,18 @@ export declare function surfaceBytes(events: readonly SessionEventLike[], fromSe
  * compaction replacement inside it, so a long post-summary span can leave the
  * child one request away from the provider's body cap. Above the budget the
  * boundary moves back to the latest compaction replacement and the child opens
- * from that summary instead of inheriting a dead over-cap surface. Without a
+ * from that summary instead of inheriting a dead over-cap surface. Compaction may
+ * run between the previous turn's end and the selected message (`/compact`), so
+ * the checkpoint is searched up to the message rather than to the turn boundary;
+ * one newer than that boundary is still forkable and is preferred. Without a
  * checkpoint no boundary inside the prefix can shrink the surface, so the
  * request is rejected with an actionable error rather than creating the child.
  * @param events - the source session's canonical events in seq order.
  * @param boundarySeq - the requested turn boundary (`previousTurnEndSeq`).
+ * @param messageSeq - the selected user message; compaction before it is forkable.
  * @returns the chosen fork seq and whether it was compacted back.
  */
-export declare function chooseForkPoint(events: readonly SessionEventLike[], boundarySeq: number): ForkPoint;
+export declare function chooseForkPoint(events: readonly SessionEventLike[], boundarySeq: number, messageSeq: number): ForkPoint;
 /** Same-origin route that replays one stored attachment's bytes to the browser. */
 export declare const ATTACHMENT_HTTP_PATH = "/turn-rewind/attachment-bytes";
 /** Register the attachment-bytes route consumed by the rewound composer draft. */
