@@ -629,6 +629,7 @@ export function createRewindHttpHandler(
             sessionId: fork.sessionId,
             compacted: fork.compacted,
             skippedEvents: fork.skippedEvents,
+            handoff: fork.handoff,
             archived,
           })
           return
@@ -662,6 +663,7 @@ export function createRewindHttpHandler(
             sessionId: fork.sessionId,
             compacted: fork.compacted,
             skippedEvents: fork.skippedEvents,
+            handoff: fork.handoff,
             archived,
             ...restoreResult,
           })
@@ -836,10 +838,63 @@ interface ForkPoint {
   readonly compacted: boolean
   /** Owned events between the compaction replacement and the requested boundary. */
   readonly skippedEvents: number
+  /** Plain-text transcript of the skipped span, empty when nothing was skipped. */
+  readonly handoff: string
 }
 
 function serializedEventBytes(event: SessionEventLike): number {
   return Buffer.byteLength(JSON.stringify(event), 'utf8')
+}
+
+/** Upper bound for the injected handoff transcript, keeping the request small. */
+const HANDOFF_MAX_CHARS = 120_000
+
+/** Concatenate the text blocks of one message event. */
+function messageText(event: SessionEventLike): string {
+  const content = event.data.content
+  if (!Array.isArray(content)) return ''
+  const parts: string[] = []
+  for (const block of content) {
+    if (block === null || typeof block !== 'object') continue
+    const record = block as Record<string, unknown>
+    if (record.type === 'text' && typeof record.text === 'string' && record.text !== '') parts.push(record.text)
+  }
+  return parts.join('\n')
+}
+
+/**
+ * Render the conversation span a compacted fork leaves out, in reading order.
+ *
+ * Only user and assistant prose is carried over: tool calls, results and images
+ * are omitted so the transcript stays small and never re-triggers the body cap.
+ * When the span exceeds the cap the oldest lines are dropped, keeping the turns
+ * closest to the rewind point.
+ * @param events - source session events in seq order.
+ * @param afterSeq - the compaction replacement seq the child starts from.
+ * @param upToSeq - the inclusive rewind boundary.
+ * @returns transcript text, possibly empty.
+ */
+export function buildHandoff(
+  events: readonly SessionEventLike[],
+  afterSeq: number,
+  upToSeq: number,
+): string {
+  const lines: string[] = []
+  for (const event of events) {
+    if (event.seq <= afterSeq || event.seq > upToSeq) continue
+    if (event.type !== 'user/message' && event.type !== 'assistant/message') continue
+    const text = messageText(event).trim()
+    // Harness-injected context reminders are not part of the conversation.
+    if (text === ''
+      || text.startsWith('<system-reminder>')
+      || text.startsWith('Time sampled while preparing')) continue
+    lines.push(`${event.type === 'user/message' ? '用户' : '助手'}: ${text}`)
+  }
+  let transcript = lines.join('\n\n')
+  if (transcript.length > HANDOFF_MAX_CHARS) {
+    transcript = `…\n\n${transcript.slice(transcript.length - HANDOFF_MAX_CHARS)}`
+  }
+  return transcript
 }
 
 /**
@@ -951,7 +1006,7 @@ export function chooseForkPoint(
     : 0
   const bytes = surfaceBytes(events, surfaceStart, boundarySeq)
   if (bytes <= FORK_SURFACE_BUDGET_BYTES) {
-    return { seq: boundarySeq, compacted: false, skippedEvents: 0 }
+    return { seq: boundarySeq, compacted: false, skippedEvents: 0, handoff: '' }
   }
   if (boundary === undefined) {
     throw new ChangeLedgerError(
@@ -962,7 +1017,13 @@ export function chooseForkPoint(
   const skippedEvents = events.filter(event => (
     event.seq > boundary.replacementSeq && event.seq <= boundarySeq
   )).length
-  return { seq: boundary.replacementSeq, compacted: true, skippedEvents }
+  const transcript = buildHandoff(events, boundary.replacementSeq, boundarySeq)
+  return {
+    seq: boundary.replacementSeq,
+    compacted: true,
+    skippedEvents,
+    handoff: transcript,
+  }
 }
 
 /**
@@ -998,7 +1059,7 @@ async function createConversationRestart(
   ctx: ConversationRestartContext,
   sourceId: string,
   checkpoint: MessageTarget,
-): Promise<{ readonly sessionId: string; readonly compacted: boolean; readonly skippedEvents: number }> {
+): Promise<{ readonly sessionId: string; readonly compacted: boolean; readonly skippedEvents: number; readonly handoff: string }> {
   const source = await readSession(ctx, sourceId)
   const current = messageTarget(source, checkpoint.messageSeq)
   if (current.turn !== checkpoint.turn
@@ -1028,6 +1089,7 @@ async function createConversationRestart(
       sessionId: requiredText(created.sessionId, 'sessionController sessionId'),
       compacted: forkPoint?.compacted ?? false,
       skippedEvents: forkPoint?.skippedEvents ?? 0,
+      handoff: forkPoint?.handoff ?? '',
     }
   }
   const apiProxy = ctx.get('apiProxy') as ApiProxyLike | undefined
@@ -1053,6 +1115,7 @@ async function createConversationRestart(
     sessionId: requiredText(response.result.value.sessionId, 'fork sessionId'),
     compacted: forkPoint?.compacted ?? false,
     skippedEvents: forkPoint?.skippedEvents ?? 0,
+    handoff: forkPoint?.handoff ?? '',
   }
 }
 

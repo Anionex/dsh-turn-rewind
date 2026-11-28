@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.3.20 — 2026-11-28
+
+- Inject a handoff transcript into the restored draft when a compacted fork drops recent turns: the skipped span's user and assistant prose (tool traffic, images and harness reminders omitted) is prepended to the original message, capped at 120k characters, so the model still sees what happened between the checkpoint and the rewind point.
+- 压缩点 fork 丢掉近期内容时，把丢失区间里用户与助手的正文（忽略工具调用、图片和系统提醒）作为交接文本放进回滚后的草稿，上限 12 万字符，模型仍能看到压缩点之后发生了什么。
+
 ## 0.3.19 — 2026-11-28
 
 - Count image attachments at their inline base64 request size in the fork-surface estimate. Session logs store image references with a declared byte length, but the provider receives the bytes inline, so a screenshot-heavy prefix previously stayed under the text budget and the child still failed with `Request body too large`. The estimate now adds each referenced image's `bytes` scaled by 4/3.

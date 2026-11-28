@@ -206,7 +206,22 @@ interface ForkPoint {
     readonly compacted: boolean;
     /** Owned events between the compaction replacement and the requested boundary. */
     readonly skippedEvents: number;
+    /** Plain-text transcript of the skipped span, empty when nothing was skipped. */
+    readonly handoff: string;
 }
+/**
+ * Render the conversation span a compacted fork leaves out, in reading order.
+ *
+ * Only user and assistant prose is carried over: tool calls, results and images
+ * are omitted so the transcript stays small and never re-triggers the body cap.
+ * When the span exceeds the cap the oldest lines are dropped, keeping the turns
+ * closest to the rewind point.
+ * @param events - source session events in seq order.
+ * @param afterSeq - the compaction replacement seq the child starts from.
+ * @param upToSeq - the inclusive rewind boundary.
+ * @returns transcript text, possibly empty.
+ */
+export declare function buildHandoff(events: readonly SessionEventLike[], afterSeq: number, upToSeq: number): string;
 /**
  * Latest compaction replacement inside one fork prefix, if the log records one.
  * @param events - the source session's canonical events in seq order.

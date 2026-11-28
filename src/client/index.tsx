@@ -386,6 +386,7 @@ interface RewindText {
   readonly completedCode: string
   readonly completedBoth: string
   readonly compactedNotice: string
+  readonly handoffHeader: string
   readonly archivedNotice: string
   readonly openFailed: (reason: string) => string
   readonly restoredButOpenFailed: (reason: string) => string
@@ -502,6 +503,7 @@ const ZH: RewindText = {
   completedCode: '项目文件已恢复；当前对话保持不变。恢复前的文件已自动备份。',
   completedBoth: '项目文件已恢复，并已创建新对话。恢复前的文件已自动备份。',
   compactedNotice: '这段对话较长，新对话已从最近一次压缩点开始；压缩点之后的内容没有带入。',
+  handoffHeader: '（这段对话较长，已从最近一次压缩点重新开始。以下是压缩点之后、回滚点之前的对话记录，供恢复上下文参考。）',
   archivedNotice: '原对话已归档，可在侧边栏搜索的「已归档」中恢复。',
   openFailed: reason => `新对话已创建，但没能自动打开：${reason}`,
   restoredButOpenFailed: reason => `文件已经恢复，新对话也已创建，但没能自动打开：${reason}`,
@@ -673,6 +675,7 @@ const EN: RewindText = {
   completedCode: 'The project files have been restored; the current conversation is unchanged. The files from before the restore were backed up automatically.',
   completedBoth: 'The project files have been restored and a new conversation was created. The files from before the restore were backed up automatically.',
   compactedNotice: 'This conversation was long, so the new conversation starts from the latest compaction checkpoint; content after that point was not carried over.',
+  handoffHeader: '(This conversation was long and restarts from the latest compaction checkpoint. The transcript below covers the part between that checkpoint and this message, for reference.)',
   archivedNotice: 'The previous conversation was archived; you can restore it from the archived sessions in the sidebar search.',
   openFailed: reason => `The new conversation was created but could not be opened automatically: ${reason}`,
   restoredButOpenFailed: reason => `The files were restored and the new conversation was created, but it could not be opened automatically: ${reason}`,
@@ -1403,8 +1406,11 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
         const childSessionId = requiredString(result.sessionId, 'sessionId')
         const done = result.compacted === true ? t.compactedNotice : t.completedMessages
         setCompleted(result.archived === true ? `${done} ${t.archivedNotice}` : done)
+        const draft = typeof result.handoff === 'string' && result.handoff.trim() !== ''
+          ? `${t.handoffHeader}\n\n${result.handoff}\n\n---\n\n${matched.promptText}`
+          : matched.promptText
         try {
-          await openRestoredSession(childSessionId, matched.promptText, matched.attachments?.map(attachment => ({ ...attachment, sourceSessionId: sessionId, messageSeq: matched.messageSeq })))
+          await openRestoredSession(childSessionId, draft, matched.attachments?.map(attachment => ({ ...attachment, sourceSessionId: sessionId, messageSeq: matched.messageSeq })))
           setOpen(false)
         } catch (navigationError) {
           setError(t.openFailed(messageOf(navigationError)))
@@ -1420,8 +1426,11 @@ export function RewindMessageAction({ matched, sessionId, openRestoredSession }:
       requiredString(result.rescuePointId, 'rescuePointId')
       const done = result.compacted === true ? `${t.completedBoth} ${t.compactedNotice}` : t.completedBoth
       setCompleted(result.archived === true ? `${done} ${t.archivedNotice}` : done)
+      const draft = typeof result.handoff === 'string' && result.handoff.trim() !== ''
+        ? `${t.handoffHeader}\n\n${result.handoff}\n\n---\n\n${matched.promptText}`
+        : matched.promptText
       try {
-        await openRestoredSession(childSessionId, matched.promptText, matched.attachments?.map(attachment => ({ ...attachment, sourceSessionId: sessionId, messageSeq: matched.messageSeq })))
+        await openRestoredSession(childSessionId, draft, matched.attachments?.map(attachment => ({ ...attachment, sourceSessionId: sessionId, messageSeq: matched.messageSeq })))
         setOpen(false)
       } catch (navigationError) {
         setError(t.restoredButOpenFailed(messageOf(navigationError)))

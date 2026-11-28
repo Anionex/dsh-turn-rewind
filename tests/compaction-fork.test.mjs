@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { archiveSourceSession, chooseForkPoint, findCompactionBoundary, surfaceBytes } from '../lib/rewind-host.js'
+import { archiveSourceSession, buildHandoff, chooseForkPoint, findCompactionBoundary, surfaceBytes } from '../lib/rewind-host.js'
 
 /** One canonical event with a deterministic payload size. */
 function event(seq, type, data = {}) {
@@ -51,7 +51,7 @@ test('surfaceBytes counts inline image bytes, not just the reference', () => {
 
 test('a small prefix keeps the requested turn boundary', () => {
   const events = [...compacted(1, 10), event(10, 'turn/end')]
-  assert.deepEqual(chooseForkPoint(events, 10, 11), { seq: 10, compacted: false, skippedEvents: 0 })
+  assert.deepEqual(chooseForkPoint(events, 10, 11), { seq: 10, compacted: false, skippedEvents: 0, handoff: '' })
 })
 
 test('an oversized compacted prefix forks from the compaction replacement', () => {
@@ -88,6 +88,34 @@ test('an oversized prefix without compaction is rejected with SESSION_TOO_LARGE'
     () => chooseForkPoint(events, events.length, events.length + 1),
     error => error?.code === 'SESSION_TOO_LARGE',
   )
+})
+
+test('buildHandoff keeps user and assistant prose and drops tool traffic', () => {
+  const events = [
+    event(1, 'user/message', { content: [{ type: 'text', text: '怎么接 5V 升压模块' }] }),
+    event(2, 'assistant/message', { content: [{ type: 'text', text: '用 MT3608。' }] }),
+    event(3, 'tool/call', { name: 'bash', arguments: '{"cmd":"x"}' }),
+    event(4, 'tool/result', { content: [{ type: 'text', text: 'output' }] }),
+    event(5, 'user/message', { content: [{ type: 'image', attachment: { attachmentId: 'sha256:x', mediaType: 'image/png', bytes: 100 } }] }),
+    event(6, 'user/message', { content: [{ type: 'text', text: '<system-reminder>injected</system-reminder>' }] }),
+  ]
+  const handoff = buildHandoff(events, 0, 6)
+  assert.match(handoff, /用户: 怎么接 5V 升压模块/)
+  assert.match(handoff, /助手: 用 MT3608。/)
+  assert.ok(!handoff.includes('bash'))
+  assert.ok(!handoff.includes('output'))
+  assert.ok(!handoff.includes('system-reminder'))
+})
+
+test('buildHandoff caps long spans from the oldest side', () => {
+  const big = 'x'.repeat(80_000)
+  const events = Array.from({ length: 4 }, (_, index) => event(index + 1, 'user/message', {
+    content: [{ type: 'text', text: `${String(index)}${big}` }],
+  }))
+  const handoff = buildHandoff(events, 0, 4)
+  assert.ok(handoff.length <= 120_010, `expected cap, got ${handoff.length}`)
+  assert.ok(handoff.includes('3' + big))
+  assert.ok(!handoff.includes('0' + big))
 })
 
 test('the source session is archived after a successful rewind fork', async () => {
