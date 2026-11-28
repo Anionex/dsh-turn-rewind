@@ -842,6 +842,38 @@ function serializedEventBytes(event: SessionEventLike): number {
   return Buffer.byteLength(JSON.stringify(event), 'utf8')
 }
 
+/**
+ * Sum the bytes of image attachments referenced by one event payload.
+ *
+ * Session logs store image references, but the provider receives the bytes
+ * inline (base64), so a text-only estimate undercounts a screenshot-heavy
+ * surface by megabytes. The reference carries its own byte length; the request
+ * projection expands it, so the estimate scales by the base64 ratio.
+ * @param value - event data to walk.
+ * @param depth - recursion guard for malformed payloads.
+ * @returns declared image byte total.
+ */
+function imageAttachmentBytes(value: unknown, depth = 0): number {
+  if (depth > 6 || value === null || typeof value !== 'object') return 0
+  if (Array.isArray(value)) {
+    let total = 0
+    for (const item of value) total += imageAttachmentBytes(item, depth + 1)
+    return total
+  }
+  const record = value as Record<string, unknown>
+  let total = 0
+  if (typeof record.mediaType === 'string'
+    && record.mediaType.startsWith('image/')
+    && typeof record.bytes === 'number'
+    && record.bytes > 0) {
+    total += record.bytes
+  }
+  for (const item of Object.values(record)) {
+    total += imageAttachmentBytes(item, depth + 1)
+  }
+  return total
+}
+
 function isCompactionReplacement(event: SessionEventLike, afterSeq: number): boolean {
   return event.type === 'user/message'
     && event.seq > afterSeq
@@ -884,6 +916,8 @@ export function surfaceBytes(
   for (const event of events) {
     if (event.seq < fromSeq || event.seq > upToSeq) continue
     bytes += serializedEventBytes(event)
+    // Images travel inline as base64 even though the log stores a reference.
+    bytes += Math.ceil(imageAttachmentBytes(event.data) * 4 / 3)
   }
   return bytes
 }

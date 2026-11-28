@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.3.19 — 2026-11-28
+
+- Count image attachments at their inline base64 request size in the fork-surface estimate. Session logs store image references with a declared byte length, but the provider receives the bytes inline, so a screenshot-heavy prefix previously stayed under the text budget and the child still failed with `Request body too large`. The estimate now adds each referenced image's `bytes` scaled by 4/3.
+- 计算 fork surface 时把图片附件按内联 base64 的请求体积计入。会话日志只保存图片引用及其声明字节数，而 provider 收到的是内联字节；此前截图多的前缀在文本预算内、子会话仍会报 `Request body too large`。现在按引用里的 `bytes` 乘以 4/3 计入。
+
 ## 0.3.18 — 2026-11-27
 
 - Archive the source conversation after a successful rewind fork, so repeated rewinds no longer pile up sessions in the sidebar. DSH has no session delete API; archive removes the row while keeping durable state, and the sidebar's archived search restores it. A session with running work rejects the archive, which never fails the rewind; the response reports `archived`.

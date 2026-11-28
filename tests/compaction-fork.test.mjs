@@ -36,6 +36,19 @@ test('surfaceBytes sums only the requested inclusive span', () => {
   assert.ok(surfaceBytes(events, 0, 3) > surfaceBytes(events, 2, 2))
 })
 
+test('surfaceBytes counts inline image bytes, not just the reference', () => {
+  const events = [
+    event(1, 'user/message', {
+      content: [
+        { type: 'image', attachment: { attachmentId: 'sha256:x', mediaType: 'image/png', bytes: 900_000 } },
+        { type: 'text', text: 'hello' },
+      ],
+    }),
+  ]
+  const bytes = surfaceBytes(events, 1, 1)
+  assert.ok(bytes >= 1_200_000, `expected base64-inflated estimate, got ${bytes}`)
+})
+
 test('a small prefix keeps the requested turn boundary', () => {
   const events = [...compacted(1, 10), event(10, 'turn/end')]
   assert.deepEqual(chooseForkPoint(events, 10, 11), { seq: 10, compacted: false, skippedEvents: 0 })
