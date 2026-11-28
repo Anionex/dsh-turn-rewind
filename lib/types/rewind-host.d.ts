@@ -195,6 +195,79 @@ export declare function createTurnsHttpHandler(ctx: Pick<Context, 'sessions' | '
 export declare function createRewindHttpHandler(ctx: ConversationRestartContext & {
     readonly agents?: AgentsLike;
 }, engine: ChangeLedgerEngine, coordinator: TurnCheckpointCoordinator): (request: HttpRequestLike, response: HttpResponseLike) => Promise<void>;
+interface CompactionBoundary {
+    readonly summarySeq: number;
+    readonly replacementSeq: number;
+}
+interface ForkPoint {
+    /** Event seq the child session is forked at, inclusive. */
+    readonly seq: number;
+    /** True when the boundary moved back to the latest compaction checkpoint. */
+    readonly compacted: boolean;
+    /** Owned events between the compaction replacement and the requested boundary. */
+    readonly skippedEvents: number;
+    /** Plain-text transcript of the skipped span, empty when nothing was skipped. */
+    readonly handoff: string;
+}
+/**
+ * Render the conversation span a compacted fork leaves out, in reading order.
+ *
+ * Only user and assistant prose is carried over: tool calls, results and images
+ * are omitted so the transcript stays small and never re-triggers the body cap.
+ * When the span exceeds the cap the oldest lines are dropped, keeping the turns
+ * closest to the rewind point.
+ * @param events - source session events in seq order.
+ * @param afterSeq - the compaction replacement seq the child starts from.
+ * @param upToSeq - the inclusive rewind boundary.
+ * @returns transcript text, possibly empty.
+ */
+export declare function buildHandoff(events: readonly SessionEventLike[], afterSeq: number, upToSeq: number): string;
+/**
+ * Latest compaction replacement inside one fork prefix, if the log records one.
+ * @param events - the source session's canonical events in seq order.
+ * @param upToSeq - inclusive fork boundary being considered.
+ * @returns the summary and replacement seqs, or undefined when never compacted.
+ */
+export declare function findCompactionBoundary(events: readonly SessionEventLike[], upToSeq: number): CompactionBoundary | undefined;
+/**
+ * Approximate request bytes the surface contributes at one fork boundary.
+ * @param events - the source session's canonical events in seq order.
+ * @param fromSeq - first surface seq included (the compaction replacement, or 0).
+ * @param upToSeq - inclusive fork boundary.
+ * @returns summed UTF-8 bytes of the serialized events in that span.
+ */
+export declare function surfaceBytes(events: readonly SessionEventLike[], fromSeq: number, upToSeq: number): number;
+/**
+ * Pick the fork boundary for a restart.
+ *
+ * DSH forks an exact raw prefix and its surface projection applies the latest
+ * compaction replacement inside it, so a long post-summary span can leave the
+ * child one request away from the provider's body cap. Above the budget the
+ * boundary moves back to the latest compaction replacement and the child opens
+ * from that summary instead of inheriting a dead over-cap surface. Compaction may
+ * run between the previous turn's end and the selected message (`/compact`), so
+ * the checkpoint is searched up to the message rather than to the turn boundary;
+ * one newer than that boundary is still forkable and is preferred. Without a
+ * checkpoint no boundary inside the prefix can shrink the surface, so the
+ * request is rejected with an actionable error rather than creating the child.
+ * @param events - the source session's canonical events in seq order.
+ * @param boundarySeq - the requested turn boundary (`previousTurnEndSeq`).
+ * @param messageSeq - the selected user message; compaction before it is forkable.
+ * @returns the chosen fork seq and whether it was compacted back.
+ */
+export declare function chooseForkPoint(events: readonly SessionEventLike[], boundarySeq: number, messageSeq: number): ForkPoint;
+/**
+ * Best-effort archive of the source conversation after a successful rewind fork.
+ *
+ * DSH has no session delete API; the workspace registry's archive removes the
+ * session from the sidebar while keeping its durable state and allowing an
+ * unarchive later. A session that still has running work rejects the archive,
+ * which is reported as `false` instead of failing the rewind.
+ * @param ctx - rewind host context providing the optional registry.
+ * @param sessionId - the source session to archive.
+ * @returns whether the archive was admitted.
+ */
+export declare function archiveSourceSession(ctx: Pick<Context, 'get'>, sessionId: string): Promise<boolean>;
 /** Same-origin route that replays one stored attachment's bytes to the browser. */
 export declare const ATTACHMENT_HTTP_PATH = "/turn-rewind/attachment-bytes";
 /** Register the attachment-bytes route consumed by the rewound composer draft. */

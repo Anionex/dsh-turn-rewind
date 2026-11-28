@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+## 0.3.20 — 2026-11-28
+
+- Inject a handoff transcript into the restored draft when a compacted fork drops recent turns: the skipped span's user and assistant prose (tool traffic, images and harness reminders omitted) is prepended to the original message, capped at 120k characters, so the model still sees what happened between the checkpoint and the rewind point.
+- 压缩点 fork 丢掉近期内容时，把丢失区间里用户与助手的正文（忽略工具调用、图片和系统提醒）作为交接文本放进回滚后的草稿，上限 12 万字符，模型仍能看到压缩点之后发生了什么。
+
+## 0.3.19 — 2026-11-28
+
+- Count image attachments at their inline base64 request size in the fork-surface estimate. Session logs store image references with a declared byte length, but the provider receives the bytes inline, so a screenshot-heavy prefix previously stayed under the text budget and the child still failed with `Request body too large`. The estimate now adds each referenced image's `bytes` scaled by 4/3.
+- 计算 fork surface 时把图片附件按内联 base64 的请求体积计入。会话日志只保存图片引用及其声明字节数，而 provider 收到的是内联字节；此前截图多的前缀在文本预算内、子会话仍会报 `Request body too large`。现在按引用里的 `bytes` 乘以 4/3 计入。
+
+## 0.3.18 — 2026-11-27
+
+- Archive the source conversation after a successful rewind fork, so repeated rewinds no longer pile up sessions in the sidebar. DSH has no session delete API; archive removes the row while keeping durable state, and the sidebar's archived search restores it. A session with running work rejects the archive, which never fails the rewind; the response reports `archived`.
+- 回滚成功 fork 后自动归档源对话，反复回滚不再堆积会话。DSH 没有删除会话的 API，归档只把该行移出列表、保留数据，可在侧边栏「已归档」搜索中恢复；仍有工作在跑的会话归档会被拒绝，不影响回滚本身，响应返回 `archived`。
+
+## 0.3.17 — 2026-11-27
+
+- Fix `SESSION_TOO_LARGE` on sessions compacted right before the selected message: a `/compact` recorded after the previous turn's end lies outside that fork boundary, so the checkpoint search now runs up to the selected message and prefers it. Forking at that later replacement keeps the child on the summary surface and skips nothing before the boundary.
+- Show a localized `SESSION_TOO_LARGE` sentence and stop rendering a structured skip reason as `[object Object]`.
+- 修复「刚 `/compact` 过仍报 `SESSION_TOO_LARGE`」：`/compact` 在上一轮结束之后、所选消息之前时不在该 fork 边界内，现在把检查点搜索范围扩大到所选消息之前并优先使用它；从该替换消息 fork 后子会话只保留摘要 surface。
+- `SESSION_TOO_LARGE` 现在有本地化文案，结构化跳过原因不再显示为 `[object Object]`。
+
+## 0.3.16 — 2026-11-27
+
+- Fork oversized sessions from their latest compaction checkpoint: when the requested turn boundary's surface exceeds the provider request-body budget, the restart child opens from the compaction replacement instead of an over-cap raw prefix, so it no longer dies on its first automatic compaction with `Request body too large`. The response reports `compacted` and `skippedEvents`, and the dialog explains that content after the checkpoint was not carried over.
+- Reject a boundary that is oversized and was never compacted with `SESSION_TOO_LARGE`, telling the user to `/compact` or start a new conversation first instead of creating a dead child session.
+- 超大会话改为从最近一次压缩检查点 fork：当目标轮次边界的 surface 超过 provider 请求体预算时，重启子会话从压缩替换消息开始，而不是继承超限的原始前缀，从而不再在第一次自动压缩时报 `Request body too large`；响应返回 `compacted` 与 `skippedEvents`，对话框说明压缩点之后的内容没有带入。
+- 对「超大且从未压缩」的边界返回 `SESSION_TOO_LARGE`，提示先 `/compact` 或新开会话，而不是创建一个必然失败的子会话。
+
+## 0.3.15 — 2026-11-26
+
+- Support exact DSH `0.2.2-rc.5` in the compatibility declaration and settings peer range, preserving every previously supported release. Verified with the repository checks and a live Desktop Profile installation on `0.2.2-rc.5`.
+- 兼容性声明及 settings peer 范围明确支持 DSH `0.2.2-rc.5`，保留此前支持的全部版本；通过仓库检查并在 `0.2.2-rc.5` 的 Desktop Profile 中实测安装。
+
 ## 0.3.14 — 2026-11-21
 
 - Support DSH `0.2.2-rc.3` in the compatibility declaration and settings peer range, fixing the Desktop Profile installation rejection reported in [#38](https://github.com/Anionex/dsh-turn-rewind/issues/38).

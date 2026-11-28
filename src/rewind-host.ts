@@ -622,7 +622,16 @@ export function createRewindHttpHandler(
         if (mode === 'messages') {
           const target = messageTarget(await readSession(ctx, sessionId), messageSeq)
           const fork = await createConversationRestart(ctx, sessionId, target)
-          json(response, 200, { status: 'completed', mode, sessionId: fork.sessionId })
+          const archived = await archiveSourceSession(ctx, sessionId)
+          json(response, 200, {
+            status: 'completed',
+            mode,
+            sessionId: fork.sessionId,
+            compacted: fork.compacted,
+            skippedEvents: fork.skippedEvents,
+            handoff: fork.handoff,
+            archived,
+          })
           return
         }
         const checkpointId = requiredText(body.checkpointId, 'checkpointId')
@@ -647,7 +656,17 @@ export function createRewindHttpHandler(
 
         try {
           const fork = await createConversationRestart(ctx, sessionId, checkpoint)
-          json(response, 200, { status: 'completed', mode, sessionId: fork.sessionId, ...restoreResult })
+          const archived = await archiveSourceSession(ctx, sessionId)
+          json(response, 200, {
+            status: 'completed',
+            mode,
+            sessionId: fork.sessionId,
+            compacted: fork.compacted,
+            skippedEvents: fork.skippedEvents,
+            handoff: fork.handoff,
+            archived,
+            ...restoreResult,
+          })
         } catch (forkError) {
           if (restoreResult === undefined) throw forkError
           try {
@@ -796,11 +815,251 @@ async function checkpointForRequest(
   return checkpoint
 }
 
+/**
+ * Request-body headroom under the provider's 10 MB cap. The gateway rejects a
+ * whole request above 10 MB, and residual system prompt, tool declarations and
+ * image payloads are not part of the session-log estimate, so the fork seed
+ * keeps a conservative margin below that cap.
+ */
+const FORK_SURFACE_BUDGET_BYTES = 6 * 1024 * 1024
+
+/** Events within which a compaction summary's replacement message must appear. */
+const COMPACTION_REPLACEMENT_WINDOW = 4
+
+interface CompactionBoundary {
+  readonly summarySeq: number
+  readonly replacementSeq: number
+}
+
+interface ForkPoint {
+  /** Event seq the child session is forked at, inclusive. */
+  readonly seq: number
+  /** True when the boundary moved back to the latest compaction checkpoint. */
+  readonly compacted: boolean
+  /** Owned events between the compaction replacement and the requested boundary. */
+  readonly skippedEvents: number
+  /** Plain-text transcript of the skipped span, empty when nothing was skipped. */
+  readonly handoff: string
+}
+
+function serializedEventBytes(event: SessionEventLike): number {
+  return Buffer.byteLength(JSON.stringify(event), 'utf8')
+}
+
+/** Upper bound for the injected handoff transcript, keeping the request small. */
+const HANDOFF_MAX_CHARS = 120_000
+
+/** Concatenate the text blocks of one message event. */
+function messageText(event: SessionEventLike): string {
+  const content = event.data.content
+  if (!Array.isArray(content)) return ''
+  const parts: string[] = []
+  for (const block of content) {
+    if (block === null || typeof block !== 'object') continue
+    const record = block as Record<string, unknown>
+    if (record.type === 'text' && typeof record.text === 'string' && record.text !== '') parts.push(record.text)
+  }
+  return parts.join('\n')
+}
+
+/**
+ * Render the conversation span a compacted fork leaves out, in reading order.
+ *
+ * Only user and assistant prose is carried over: tool calls, results and images
+ * are omitted so the transcript stays small and never re-triggers the body cap.
+ * When the span exceeds the cap the oldest lines are dropped, keeping the turns
+ * closest to the rewind point.
+ * @param events - source session events in seq order.
+ * @param afterSeq - the compaction replacement seq the child starts from.
+ * @param upToSeq - the inclusive rewind boundary.
+ * @returns transcript text, possibly empty.
+ */
+export function buildHandoff(
+  events: readonly SessionEventLike[],
+  afterSeq: number,
+  upToSeq: number,
+): string {
+  const lines: string[] = []
+  for (const event of events) {
+    if (event.seq <= afterSeq || event.seq > upToSeq) continue
+    if (event.type !== 'user/message' && event.type !== 'assistant/message') continue
+    const text = messageText(event).trim()
+    // Harness-injected context reminders are not part of the conversation.
+    if (text === ''
+      || text.startsWith('<system-reminder>')
+      || text.startsWith('Time sampled while preparing')) continue
+    lines.push(`${event.type === 'user/message' ? '用户' : '助手'}: ${text}`)
+  }
+  let transcript = lines.join('\n\n')
+  if (transcript.length > HANDOFF_MAX_CHARS) {
+    transcript = `…\n\n${transcript.slice(transcript.length - HANDOFF_MAX_CHARS)}`
+  }
+  return transcript
+}
+
+/**
+ * Sum the bytes of image attachments referenced by one event payload.
+ *
+ * Session logs store image references, but the provider receives the bytes
+ * inline (base64), so a text-only estimate undercounts a screenshot-heavy
+ * surface by megabytes. The reference carries its own byte length; the request
+ * projection expands it, so the estimate scales by the base64 ratio.
+ * @param value - event data to walk.
+ * @param depth - recursion guard for malformed payloads.
+ * @returns declared image byte total.
+ */
+function imageAttachmentBytes(value: unknown, depth = 0): number {
+  if (depth > 6 || value === null || typeof value !== 'object') return 0
+  if (Array.isArray(value)) {
+    let total = 0
+    for (const item of value) total += imageAttachmentBytes(item, depth + 1)
+    return total
+  }
+  const record = value as Record<string, unknown>
+  let total = 0
+  if (typeof record.mediaType === 'string'
+    && record.mediaType.startsWith('image/')
+    && typeof record.bytes === 'number'
+    && record.bytes > 0) {
+    total += record.bytes
+  }
+  for (const item of Object.values(record)) {
+    total += imageAttachmentBytes(item, depth + 1)
+  }
+  return total
+}
+
+function isCompactionReplacement(event: SessionEventLike, afterSeq: number): boolean {
+  return event.type === 'user/message'
+    && event.seq > afterSeq
+    && event.seq <= afterSeq + COMPACTION_REPLACEMENT_WINDOW
+    && JSON.stringify(event.data).includes('<compacted-summary>')
+}
+
+/**
+ * Latest compaction replacement inside one fork prefix, if the log records one.
+ * @param events - the source session's canonical events in seq order.
+ * @param upToSeq - inclusive fork boundary being considered.
+ * @returns the summary and replacement seqs, or undefined when never compacted.
+ */
+export function findCompactionBoundary(
+  events: readonly SessionEventLike[],
+  upToSeq: number,
+): CompactionBoundary | undefined {
+  let boundary: CompactionBoundary | undefined
+  for (const event of events) {
+    if (event.type !== 'compaction/summary' || event.seq > upToSeq) continue
+    const replacement = events.find(candidate => isCompactionReplacement(candidate, event.seq))
+    if (replacement !== undefined) boundary = { summarySeq: event.seq, replacementSeq: replacement.seq }
+  }
+  return boundary
+}
+
+/**
+ * Approximate request bytes the surface contributes at one fork boundary.
+ * @param events - the source session's canonical events in seq order.
+ * @param fromSeq - first surface seq included (the compaction replacement, or 0).
+ * @param upToSeq - inclusive fork boundary.
+ * @returns summed UTF-8 bytes of the serialized events in that span.
+ */
+export function surfaceBytes(
+  events: readonly SessionEventLike[],
+  fromSeq: number,
+  upToSeq: number,
+): number {
+  let bytes = 0
+  for (const event of events) {
+    if (event.seq < fromSeq || event.seq > upToSeq) continue
+    bytes += serializedEventBytes(event)
+    // Images travel inline as base64 even though the log stores a reference.
+    bytes += Math.ceil(imageAttachmentBytes(event.data) * 4 / 3)
+  }
+  return bytes
+}
+
+/**
+ * Pick the fork boundary for a restart.
+ *
+ * DSH forks an exact raw prefix and its surface projection applies the latest
+ * compaction replacement inside it, so a long post-summary span can leave the
+ * child one request away from the provider's body cap. Above the budget the
+ * boundary moves back to the latest compaction replacement and the child opens
+ * from that summary instead of inheriting a dead over-cap surface. Compaction may
+ * run between the previous turn's end and the selected message (`/compact`), so
+ * the checkpoint is searched up to the message rather than to the turn boundary;
+ * one newer than that boundary is still forkable and is preferred. Without a
+ * checkpoint no boundary inside the prefix can shrink the surface, so the
+ * request is rejected with an actionable error rather than creating the child.
+ * @param events - the source session's canonical events in seq order.
+ * @param boundarySeq - the requested turn boundary (`previousTurnEndSeq`).
+ * @param messageSeq - the selected user message; compaction before it is forkable.
+ * @returns the chosen fork seq and whether it was compacted back.
+ */
+export function chooseForkPoint(
+  events: readonly SessionEventLike[],
+  boundarySeq: number,
+  messageSeq: number,
+): ForkPoint {
+  const boundary = findCompactionBoundary(events, messageSeq - 1)
+  const surfaceStart = boundary !== undefined && boundary.replacementSeq <= boundarySeq
+    ? boundary.replacementSeq
+    : 0
+  const bytes = surfaceBytes(events, surfaceStart, boundarySeq)
+  if (bytes <= FORK_SURFACE_BUDGET_BYTES) {
+    return { seq: boundarySeq, compacted: false, skippedEvents: 0, handoff: '' }
+  }
+  if (boundary === undefined) {
+    throw new ChangeLedgerError(
+      'SESSION_TOO_LARGE',
+      `the conversation before this message is about ${String(Math.round(bytes / (1024 * 1024)))} MB and has no compaction checkpoint; run /compact in this session or continue in a new conversation before rewinding`,
+    )
+  }
+  const skippedEvents = events.filter(event => (
+    event.seq > boundary.replacementSeq && event.seq <= boundarySeq
+  )).length
+  const transcript = buildHandoff(events, boundary.replacementSeq, boundarySeq)
+  return {
+    seq: boundary.replacementSeq,
+    compacted: true,
+    skippedEvents,
+    handoff: transcript,
+  }
+}
+
+/**
+ * Best-effort archive of the source conversation after a successful rewind fork.
+ *
+ * DSH has no session delete API; the workspace registry's archive removes the
+ * session from the sidebar while keeping its durable state and allowing an
+ * unarchive later. A session that still has running work rejects the archive,
+ * which is reported as `false` instead of failing the rewind.
+ * @param ctx - rewind host context providing the optional registry.
+ * @param sessionId - the source session to archive.
+ * @returns whether the archive was admitted.
+ */
+export async function archiveSourceSession(
+  ctx: Pick<Context, 'get'>,
+  sessionId: string,
+): Promise<boolean> {
+  const registry = ctx.get('workspaceRegistry') as
+    | { archiveSession?(sessionId: string): Promise<unknown> }
+    | undefined
+  if (registry?.archiveSession === undefined) return false
+  try {
+    await registry.archiveSession(sessionId)
+    return true
+  } catch (error) {
+    const logger = (ctx as { logger?: { warn(message: string): void } }).logger
+    logger?.warn(`[turn-rewind] could not archive ${sessionId}: ${errorMessage(error)}`)
+    return false
+  }
+}
+
 async function createConversationRestart(
   ctx: ConversationRestartContext,
   sourceId: string,
   checkpoint: MessageTarget,
-): Promise<{ readonly sessionId: string }> {
+): Promise<{ readonly sessionId: string; readonly compacted: boolean; readonly skippedEvents: number; readonly handoff: string }> {
   const source = await readSession(ctx, sourceId)
   const current = messageTarget(source, checkpoint.messageSeq)
   if (current.turn !== checkpoint.turn
@@ -808,6 +1067,9 @@ async function createConversationRestart(
     || current.previousTurnEndSeq !== checkpoint.previousTurnEndSeq) {
     throw new ChangeLedgerError('PLAN_STALE', 'the session no longer contains the selected message boundary')
   }
+  const forkPoint = checkpoint.previousTurnEndSeq === undefined
+    ? undefined
+    : chooseForkPoint(getSessionEvents(source), checkpoint.previousTurnEndSeq, checkpoint.messageSeq)
   // Cordis throws when a context reads a service property it did not inject, and
   // no single inject list covers both carriers: 0.1.1 provides `apiProxy` while
   // 0.1.2-alpha provides `sessionController`. `ctx.get` is the optional accessor
@@ -820,10 +1082,15 @@ async function createConversationRestart(
       list(): readonly { readonly id: string; readonly sessionIds: readonly string[] }[]
     } | undefined
     const workspace = registry?.list().find(candidate => candidate.sessionIds.includes(sourceId))
-    const created = checkpoint.previousTurnEndSeq === undefined
+    const created = forkPoint === undefined
       ? await controller.create(workspace === undefined ? { cwd: checkpoint.cwd } : { workspaceId: workspace.id })
-      : await controller.fork({ sessionId: sourceId, atSeq: checkpoint.previousTurnEndSeq })
-    return { sessionId: requiredText(created.sessionId, 'sessionController sessionId') }
+      : await controller.fork({ sessionId: sourceId, atSeq: forkPoint.seq })
+    return {
+      sessionId: requiredText(created.sessionId, 'sessionController sessionId'),
+      compacted: forkPoint?.compacted ?? false,
+      skippedEvents: forkPoint?.skippedEvents ?? 0,
+      handoff: forkPoint?.handoff ?? '',
+    }
   }
   const apiProxy = ctx.get('apiProxy') as ApiProxyLike | undefined
   if (apiProxy === undefined) {
@@ -832,19 +1099,24 @@ async function createConversationRestart(
       'this DSH host exposes neither sessionController nor apiProxy, so a new conversation cannot be created',
     )
   }
-  const response = checkpoint.previousTurnEndSeq === undefined
+  const response = forkPoint === undefined
     ? await apiProxy.sessions.create({
         rpcId: randomUUID(),
         payload: { cwd: checkpoint.cwd },
       })
     : await apiProxy.sessions.fork({
         rpcId: randomUUID(),
-        payload: { sessionId: sourceId, atSeq: checkpoint.previousTurnEndSeq },
+        payload: { sessionId: sourceId, atSeq: forkPoint.seq },
       })
   if (!response.result.ok) {
     throw new ChangeLedgerError('CONVERSATION_REWIND_FAILED', response.result.error.message)
   }
-  return { sessionId: requiredText(response.result.value.sessionId, 'fork sessionId') }
+  return {
+    sessionId: requiredText(response.result.value.sessionId, 'fork sessionId'),
+    compacted: forkPoint?.compacted ?? false,
+    skippedEvents: forkPoint?.skippedEvents ?? 0,
+    handoff: forkPoint?.handoff ?? '',
+  }
 }
 
 function messageTarget(session: SessionLike, messageSeq: number): MessageTarget {

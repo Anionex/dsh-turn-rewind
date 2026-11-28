@@ -2,3 +2,8 @@ node_modules/
 *.tgz
 .DS_Store
 coverage/
+
+slow-suite*.log
+tests-full*.log
+engine-*.log
+perf*.mjs

@@ -123,7 +123,11 @@ dsh --profile web --dump-config | grep turn-rewind
 
 本仓库是标准 DSH Profile Bundle：`package.json` 声明 `dsh.bundle.patch`，`cordis.patch.yml` 直接挂载 `@anionex/dsh-turn-rewind`，不修改 DSH 主仓库。
 
-明确支持 DSH `0.2.2-rc.1`、`0.2.2-rc.3` 及此前已支持的版本。`0.2.2` 的 `conversation.session.header.actions` slot 不再附带会话级 chat 快照，Web 桥改为从 Host 的 `GET /turn-rewind/turns` 读取轮次锚点。
+明确支持 DSH `0.2.2-rc.1`、`0.2.2-rc.3`、`0.2.2-rc.5` 及此前已支持的版本。
+
+**超大会话。** DSH 的 fork 复制精确原始前缀，子会话的 surface 是应用最近一次压缩替换后的结果。当该 surface 超过 provider 请求体预算（DeepSeek 网关为 10 MB）时，重启改为从最近一次压缩替换处 fork，而不是目标轮次边界，子会话因此仍可继续；响应返回 `compacted`，对话框会说明压缩点之后的内容没有带入。若前缀超大且从未压缩，则在创建任何子会话之前直接返回 `SESSION_TOO_LARGE`。估算会把图片附件按内联 base64 的请求体积计入（引用里的 `bytes` 乘以 4/3），因为日志只存引用、provider 收到的是字节。边界确实回退时，响应还会带上被跳过区间的 `handoff` 交接文本（只含用户与助手正文，上限 12 万字符），客户端把它放在回滚后的草稿前面，模型仍能看到压缩点之后发生了什么。
+
+**旧会话清理。** 对话回滚成功后，Host 通过工作区注册表归档源会话，反复回滚不会在侧边栏留下长尾。归档是 DSH 唯一的会话移除机制（没有删除 API），保留持久日志，可从侧边栏「已归档」搜索恢复。源会话仍有工作在跑时会拒绝归档，回滚本身仍然成功，响应返回 `archived: false`。`0.2.2` 的 `conversation.session.header.actions` slot 不再附带会话级 chat 快照，Web 桥改为从 Host 的 `GET /turn-rewind/turns` 读取轮次锚点。
 
 当 Profile 同时提供 DSH Agent 服务时，插件会在每轮第一次 `agent/pre-step`、Agent 开始处理用户消息之前保存隐藏文件状态。保存失败只会让该消息无法回退，不会拦住用户这一轮。Web Profile 还会提供同源 `/turn-rewind` 接口：根据所选 `user/message` 序号找到对应状态，分页返回文件预览，生成短期、会话绑定的恢复授权，并把新对话创建交给 DSH 官方 Host create/fork 生命周期。插件绝不会自动恢复文件。
 
